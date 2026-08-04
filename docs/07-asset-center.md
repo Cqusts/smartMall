@@ -110,7 +110,7 @@ CREATE TABLE asset_product_rel (
     rel_type     VARCHAR(32) NOT NULL COMMENT 'main|detail|scene|clip|size_chart|ad',
     sort_order   INT         NOT NULL DEFAULT 0,
     is_primary   TINYINT     NOT NULL DEFAULT 0 COMMENT '是否该类型下的首选素材',
-    bind_source  VARCHAR(16) NOT NULL COMMENT 'auto|manual COMMENT 自动匹配还是人工绑定',
+    bind_source  VARCHAR(16) NOT NULL COMMENT 'auto|manual 自动匹配还是人工绑定',
     bind_conf    DECIMAL(4,3) COMMENT '自动匹配的置信度',
     created_at   DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uk_asset_product_type (asset_id, product_id, rel_type),
