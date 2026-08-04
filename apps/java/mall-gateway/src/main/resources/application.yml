@@ -1,0 +1,120 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: mall-gateway
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2s
+
+  cloud:
+    gateway:
+      # 全局默认过滤器
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials RETAIN_UNIQUE
+
+      httpclient:
+        connect-timeout: 2000
+        response-timeout: ${GATEWAY_RESPONSE_TIMEOUT:30s}
+
+      routes:
+        # ---------- Java 业务服务 ----------
+        - id: mall-product
+          uri: http://${PRODUCT_HOST:localhost}:${PRODUCT_PORT:8081}
+          predicates:
+            - Path=/api/product/**
+
+        - id: mall-asset
+          uri: http://${ASSET_HOST:localhost}:${ASSET_PORT:8082}
+          predicates:
+            - Path=/api/asset/**
+
+        - id: mall-dataplat
+          uri: http://${DATAPLAT_HOST:localhost}:${DATAPLAT_PORT:8083}
+          predicates:
+            - Path=/api/dataplat/**
+
+        - id: mall-kpi
+          uri: http://${KPI_HOST:localhost}:${KPI_PORT:8084}
+          predicates:
+            - Path=/api/kpi/**
+
+        # ---------- Python AI 服务 ----------
+        - id: ai-gateway
+          uri: http://${AI_GATEWAY_HOST:localhost}:${AI_GATEWAY_PORT:9000}
+          predicates:
+            - Path=/api/ai/gateway/**
+          filters:
+            - StripPrefix=3
+
+        - id: ai-rag
+          uri: http://${AI_RAG_HOST:localhost}:${AI_RAG_PORT:9001}
+          predicates:
+            - Path=/api/ai/rag/**
+          filters:
+            - StripPrefix=3
+
+        # 客服对话：流式输出，单独放宽超时
+        - id: ai-agent
+          uri: http://${AI_AGENT_HOST:localhost}:${AI_AGENT_PORT:9002}
+          predicates:
+            - Path=/api/ai/agent/**
+          filters:
+            - StripPrefix=3
+          metadata:
+            response-timeout: 120000
+
+        - id: ai-media
+          uri: http://${AI_MEDIA_HOST:localhost}:${AI_MEDIA_PORT:9003}
+          predicates:
+            - Path=/api/ai/media/**
+          filters:
+            - StripPrefix=3
+
+        - id: ai-clip
+          uri: http://${AI_CLIP_HOST:localhost}:${AI_CLIP_PORT:9004}
+          predicates:
+            - Path=/api/ai/clip/**
+          filters:
+            - StripPrefix=3
+
+        - id: ai-train
+          uri: http://${AI_TRAIN_HOST:localhost}:${AI_TRAIN_PORT:9005}
+          predicates:
+            - Path=/api/ai/train/**
+          filters:
+            - StripPrefix=3
+
+        # SRS 直播回调（on_publish / on_unpublish / on_dvr）。
+        # 由 ai-clip 承接：它拥有直播切片全链路，收到回调后自行投递 live.record.done。
+        - id: live-hooks
+          uri: http://${AI_CLIP_HOST:localhost}:${AI_CLIP_PORT:9004}
+          predicates:
+            - Path=/api/live/**
+          filters:
+            - StripPrefix=2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,gateway
+  endpoint:
+    health:
+      show-details: when-authorized
+      probes:
+        enabled: true
+
+smartmall:
+  version: 0.1.0-SNAPSHOT
+
+logging:
+  level:
+    root: INFO
+    com.smartmall: DEBUG
+    org.springframework.cloud.gateway: INFO

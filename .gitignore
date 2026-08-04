@@ -1,0 +1,52 @@
+# ---- 密钥与环境（绝不提交）----
+deploy/.env
+.env
+.env.local
+*.pem
+*.key
+
+# ---- Java ----
+target/
+*.jar
+*.class
+.mvn/
+!.mvn/wrapper/maven-wrapper.jar
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+
+# ---- 前端 ----
+node_modules/
+apps/web/dist/
+.vite/
+
+# ---- 模型与数据（体积大，用 download-models.sh 获取）----
+/data/
+models/
+*.safetensors
+*.ckpt
+*.pth
+*.bin
+datasets/raw/
+datasets/*.jsonl
+
+# ---- 运行产物 ----
+logs/
+*.log
+airflow.db
+comfyui-output/
+
+# ---- IDE ----
+.idea/
+.vscode/
+*.iml
+.DS_Store

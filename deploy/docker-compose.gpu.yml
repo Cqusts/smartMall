@@ -1,0 +1,88 @@
+# smartMall GPU 服务层
+#
+# 启动：docker compose -f deploy/docker-compose.gpu.yml up -d
+#
+# ⚠️ 显存约束（单卡 24G，详见 docs/14-infra.md）：
+#
+#   常驻区 ~6G   —— FunASR / CosyVoice2 / bge-m3，由 ai-clip / ai-media / ai-rag
+#                   进程内加载，不在本文件中（避免跨进程显存管理）
+#   独占轮转 ~16G —— ComfyUI（本文件）
+#   全卡独占 ~22G —— Wan2.2 视频生成、QLoRA 训练，必须先卸载常驻模型，
+#                   只在夜间窗口（02:00-06:00）执行
+#
+# 因此 comfyui 与 vllm 不应同时启用，除非升级到 48G 卡。
+
+name: smartmall-gpu
+
+networks:
+  smartmall:
+    external: true
+    name: smartmall
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+
+  # ---------------------------------------------------------------- ComfyUI
+  # 图像生成。工作流 JSON 从宿主机挂载，实现版本化（见 docs/06-agent-marketing.md）。
+  comfyui:
+    image: ${COMFYUI_IMAGE:-yanwk/comfyui-boot:cu124-slim}
+    container_name: sm-comfyui
+    restart: unless-stopped
+    <<: *gpu
+    environment:
+      CLI_ARGS: "--listen 0.0.0.0 --port 8188 --preview-method auto"
+      NVIDIA_VISIBLE_DEVICES: "0"
+    ports: ["${COMFYUI_PORT:-8188}:8188"]
+    volumes:
+      - ${MODELS_DIR:-/data/models}/comfyui:/root/ComfyUI/models
+      - ../comfyui-workflows:/root/ComfyUI/user/default/workflows
+      - ${DATA_DIR:-/data}/comfyui-output:/root/ComfyUI/output
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8188/system_stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    networks: [smartmall]
+
+  # ---------------------------------------------------------------- vLLM
+  # 微调模型上线后启用（M7）。支持 LoRA 热加载，多版本共用一个基座，
+  # 流量切分在 ai-gateway 完成，业务代码零改动（见 docs/10-finetune.md）。
+  #
+  # 默认不随 compose up 启动：docker compose ... --profile serving up -d
+  vllm:
+    image: vllm/vllm-openai:v0.8.5
+    container_name: sm-vllm
+    restart: unless-stopped
+    profiles: [serving]
+    <<: *gpu
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    command: >
+      --model /models/qwen3-8b
+      --served-model-name smartmall-cs-base
+      --enable-lora
+      --lora-modules style-v1=/models/lora/sft-dpo-v1
+      --max-lora-rank 16
+      --quantization awq
+      --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.45}
+      --max-model-len 8192
+      --host 0.0.0.0 --port 8000
+    ports: ["${VLLM_PORT:-8000}:8000"]
+    volumes:
+      - ${MODELS_DIR:-/data/models}:/models:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    networks: [smartmall]

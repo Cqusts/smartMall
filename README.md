@@ -131,7 +131,45 @@ flowchart TB
 
 ---
 
+## 快速开始
+
+```bash
+make env          # 从模板创建 deploy/.env，填入 API 密钥
+make up           # 中间件 → 建表 → Kafka topic → 应用 → 健康检查
+make health       # 存活检查
+```
+
+本地开发用 `make up-dev`（只起 MySQL + Redis + Milvus，约 12G 内存，应用在 IDE 里跑）。
+完整操作手册见 [deploy/README.md](deploy/README.md)。
+
+---
+
 ## 当前状态
 
-📋 **方案设计阶段** — 本仓库当前包含完整的架构与落地文档，尚未开始编码。
-实施路线见 [13 · 里程碑路线图](docs/13-roadmap.md)，从 M0 基建与 M1 数据中台起步。
+| 里程碑 | 状态 | 内容 |
+|---|---|---|
+| **M0 基础设施** | ✅ 已完成 | monorepo 骨架、11 个服务、compose 三件套、30 张表、Kafka 契约、健康探针 |
+| M1 数据中台 + RAG | ⬜ 待开始 | 四道清洗关卡、`knowledge_item`、混合检索 |
+| M2 文本 AI 客服 | ⬜ | LangGraph、MCP 工具、Trace 回流 |
+| M3 素材中心 + 运营 Agent | ⬜ | ComfyUI / Wan2.2 / CosyVoice2 |
+| M4 多模态客服 | ⬜ | 图片理解入口、素材挂载 |
+| M5 直播切片 | ⬜ | SRS + FunASR + 语义分段 |
+| M6 销售考核 | ⬜ | Judge + 校准 |
+| M7 模型微调 | ⬜ | LoRA SFT + DPO |
+
+排期与每阶段验收标准见 [13 · 里程碑路线图](docs/13-roadmap.md)。
+
+### M0 已交付
+
+```
+apps/java/      mall-{gateway,product,asset,dataplat,kpi} + mall-common
+apps/python/    ai-{rag,agent,media,clip,train} + ai-common；ai-gateway 用 LiteLLM 官方镜像
+deploy/         compose 四件套、30 张表 DDL、ClickHouse 分析表、5 个运维脚本
+pipelines/      Airflow DAG 与 Data-Juicer 配方目录
+comfyui-workflows/  工作流注册表契约
+evals/          13 个评测集的规格与门禁阈值
+```
+
+**已验证**：6 个 Java 模块编译通过；10 个服务本地启动并 `/health` 全绿；
+网关经 `StripPrefix` 正确转发到各后端；Java 与 Python 两侧 `ApiResponse` JSON 形状一致；
+Kafka Topic 契约校验通过（含负向测试）；四个 compose 文件语法校验通过。

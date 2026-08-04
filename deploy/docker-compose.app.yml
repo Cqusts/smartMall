@@ -1,0 +1,281 @@
+# smartMall 应用层
+#
+# 前置：docker compose -f deploy/docker-compose.base.yml up -d && ./deploy/scripts/init-db.sh
+# 启动：docker compose -f deploy/docker-compose.app.yml up -d --build
+#
+# 复用 base 层创建的外部网络 smartmall，因此可以独立重建应用而不动中间件。
+
+name: smartmall-app
+
+networks:
+  smartmall:
+    external: true
+    name: smartmall
+
+volumes:
+  airflow-logs:
+  labelstudio-data:
+  srs-record:
+
+x-java-env: &java-env
+  MYSQL_HOST: mysql
+  MYSQL_PORT: "3306"
+  MYSQL_DATABASE: ${MYSQL_DATABASE:-smartmall}
+  MYSQL_USER: ${MYSQL_USER:-smartmall}
+  MYSQL_PASSWORD: ${MYSQL_PASSWORD:-smartmall}
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  TZ: Asia/Shanghai
+  JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=70 -Duser.timezone=Asia/Shanghai"
+
+x-python-env: &python-env
+  ENV: ${ENV:-dev}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_JSON: ${LOG_JSON:-false}
+  MYSQL_HOST: mysql
+  REDIS_HOST: redis
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  MILVUS_HOST: milvus
+  MILVUS_PORT: "19530"
+  S3_ENDPOINT: http://seaweedfs:8333
+  S3_BUCKET: ${S3_BUCKET:-smartmall-assets}
+  LITELLM_BASE_URL: http://ai-gateway:9000
+  LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-smartmall-local}
+  LANGFUSE_HOST: http://langfuse:3000
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+  PRODUCT_BASE_URL: http://mall-product:8081
+  ASSET_BASE_URL: http://mall-asset:8082
+  DATAPLAT_BASE_URL: http://mall-dataplat:8083
+  KPI_BASE_URL: http://mall-kpi:8084
+  RAG_BASE_URL: http://ai-rag:9001
+  TZ: Asia/Shanghai
+
+x-java-healthcheck: &java-healthcheck
+  interval: 20s
+  timeout: 5s
+  retries: 5
+  start_period: 60s
+
+services:
+
+  # ================================================================ Java 业务服务
+  mall-gateway:
+    build:
+      context: ../apps/java
+      dockerfile: Dockerfile
+      args: { MODULE: mall-gateway }
+    container_name: sm-gateway
+    restart: unless-stopped
+    environment:
+      <<: *java-env
+      PRODUCT_HOST: mall-product
+      ASSET_HOST: mall-asset
+      DATAPLAT_HOST: mall-dataplat
+      KPI_HOST: mall-kpi
+      AI_GATEWAY_HOST: ai-gateway
+      AI_RAG_HOST: ai-rag
+      AI_AGENT_HOST: ai-agent
+      AI_MEDIA_HOST: ai-media
+      AI_CLIP_HOST: ai-clip
+      AI_TRAIN_HOST: ai-train
+    ports: ["${GATEWAY_PORT:-8080}:8080"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      <<: *java-healthcheck
+    networks: [smartmall]
+
+  mall-product:
+    build: { context: ../apps/java, dockerfile: Dockerfile, args: { MODULE: mall-product } }
+    container_name: sm-product
+    restart: unless-stopped
+    environment: *java-env
+    ports: ["8081:8081"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      <<: *java-healthcheck
+    networks: [smartmall]
+
+  mall-asset:
+    build: { context: ../apps/java, dockerfile: Dockerfile, args: { MODULE: mall-asset } }
+    container_name: sm-asset
+    restart: unless-stopped
+    environment:
+      <<: *java-env
+      S3_ENDPOINT: http://seaweedfs:8333
+      S3_BUCKET: ${S3_BUCKET:-smartmall-assets}
+    ports: ["8082:8082"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      <<: *java-healthcheck
+    networks: [smartmall]
+
+  mall-dataplat:
+    build: { context: ../apps/java, dockerfile: Dockerfile, args: { MODULE: mall-dataplat } }
+    container_name: sm-dataplat
+    restart: unless-stopped
+    environment:
+      <<: *java-env
+      CLICKHOUSE_HOST: clickhouse
+      LABEL_STUDIO_URL: http://label-studio:8080
+    ports: ["8083:8083"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      <<: *java-healthcheck
+    networks: [smartmall]
+
+  mall-kpi:
+    build: { context: ../apps/java, dockerfile: Dockerfile, args: { MODULE: mall-kpi } }
+    container_name: sm-kpi
+    restart: unless-stopped
+    environment:
+      <<: *java-env
+      CLICKHOUSE_HOST: clickhouse
+    ports: ["8084:8084"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8084/health"]
+      <<: *java-healthcheck
+    networks: [smartmall]
+
+  # ================================================================ Python AI 服务
+  # LiteLLM 官方镜像即模型网关本身，无需自建 FastAPI 包一层。
+  # 未认证探针：/health/liveliness（存活）、/health/readiness（就绪），
+  # 与其余服务的 /health、/ready 语义一致。
+  ai-gateway:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: sm-ai-gateway
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "--port", "9000"]
+    environment:
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-smartmall-local}
+      LANGFUSE_HOST: http://langfuse:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      TZ: Asia/Shanghai
+    volumes:
+      - ../apps/python/ai-gateway/config.yaml:/app/config.yaml:ro
+    ports: ["9000:9000"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health/liveliness"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks: [smartmall]
+
+  ai-rag:
+    build: { context: ../apps/python, dockerfile: ai-rag/Dockerfile }
+    container_name: sm-ai-rag
+    restart: unless-stopped
+    environment: *python-env
+    ports: ["9001:9001"]
+    networks: [smartmall]
+
+  ai-agent:
+    build: { context: ../apps/python, dockerfile: ai-agent/Dockerfile }
+    container_name: sm-ai-agent
+    restart: unless-stopped
+    environment: *python-env
+    ports: ["9002:9002"]
+    networks: [smartmall]
+
+  ai-media:
+    build: { context: ../apps/python, dockerfile: ai-media/Dockerfile }
+    container_name: sm-ai-media
+    restart: unless-stopped
+    environment:
+      <<: *python-env
+      COMFYUI_BASE_URL: http://host.docker.internal:8188
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["9003:9003"]
+    networks: [smartmall]
+
+  ai-clip:
+    build: { context: ../apps/python, dockerfile: ai-clip/Dockerfile }
+    container_name: sm-ai-clip
+    restart: unless-stopped
+    environment:
+      <<: *python-env
+      SRS_API_BASE: http://srs:1985
+      LIVE_RECORD_DIR: /data/live
+    volumes: ["srs-record:/data/live"]
+    ports: ["9004:9004"]
+    networks: [smartmall]
+
+  ai-train:
+    build: { context: ../apps/python, dockerfile: ai-train/Dockerfile }
+    container_name: sm-ai-train
+    restart: unless-stopped
+    environment: *python-env
+    ports: ["9005:9005"]
+    networks: [smartmall]
+
+  # ================================================================ 支撑平台
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: sm-langfuse
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-pg:5432/langfuse
+      NEXTAUTH_URL: http://localhost:${LANGFUSE_PORT:-3000}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-change-me-in-env}
+      SALT: ${LANGFUSE_SALT:-change-me-in-env}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: "false"
+    ports: ["${LANGFUSE_PORT:-3000}:3000"]
+    networks: [smartmall]
+
+  label-studio:
+    image: heartexlabs/label-studio:1.13.1
+    container_name: sm-label-studio
+    restart: unless-stopped
+    environment:
+      LABEL_STUDIO_PORT: "8080"
+      LABEL_STUDIO_USERNAME: ${LABEL_STUDIO_USERNAME:-admin@smartmall.local}
+      LABEL_STUDIO_PASSWORD: ${LABEL_STUDIO_PASSWORD:-smartmall123}
+      LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK: "true"
+    ports: ["${LABEL_STUDIO_PORT:-8090}:8080"]
+    volumes: ["labelstudio-data:/label-studio/data"]
+    networks: [smartmall]
+
+  airflow:
+    image: apache/airflow:3.0.2-python3.11
+    container_name: sm-airflow
+    restart: unless-stopped
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-pg:5432/airflow
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__API__BASE_URL: http://localhost:${AIRFLOW_PORT:-8091}
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USERNAME:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD:-smartmall123}
+      # 供 DAG 调用应用服务
+      DATAPLAT_BASE_URL: http://mall-dataplat:8083
+      AI_RAG_BASE_URL: http://ai-rag:9001
+    command: standalone
+    ports: ["${AIRFLOW_PORT:-8091}:8080"]
+    volumes:
+      - ../pipelines/dags:/opt/airflow/dags:ro
+      - ../pipelines/recipes:/opt/airflow/recipes:ro
+      - airflow-logs:/opt/airflow/logs
+    networks: [smartmall]
+
+  srs:
+    image: ossrs/srs:6
+    container_name: sm-srs
+    restart: unless-stopped
+    command: ./objs/srs -c conf/smartmall.conf
+    ports:
+      - "${SRS_RTMP_PORT:-1935}:1935"    # RTMP 推流
+      - "${SRS_API_PORT:-1985}:1985"     # HTTP API
+      - "${SRS_HTTP_PORT:-8888}:8080"    # HTTP-FLV / HLS 播放
+    volumes:
+      - ./config/srs.conf:/usr/local/srs/conf/smartmall.conf:ro
+      - srs-record:/usr/local/srs/objs/nginx/html/record
+    networks: [smartmall]

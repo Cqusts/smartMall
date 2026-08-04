@@ -1,0 +1,91 @@
+# ComfyUI 工作流注册表
+#
+# 工作流必须版本化——「能生成图」和「能稳定批量生产图」的差距全在这里。
+# ai-media 读本文件，把 params 注入工作流 JSON 后调 ComfyUI 的 /prompt API，
+# 因此换模型、加节点不需要改代码。
+#
+# 详见 docs/06-agent-marketing.md。
+#
+# M0 只定义契约，工作流 JSON 在 M3 落地。
+
+version: 1
+
+workflows:
+  - id: product_white_bg
+    version: v1
+    file: product_white_bg_v1.json
+    description: 白底商品图，适用全类目
+    applicable_categories: ["*"]
+    base_model: qwen-image
+    params:
+      positive_prompt: { node: "6",  field: "text" }
+      negative_prompt: { node: "7",  field: "text" }
+      seed:            { node: "3",  field: "seed" }
+      ref_image:       { node: "12", field: "image" }
+      steps:           { node: "3",  field: "steps", default: 28 }
+    vram_gb: 16
+    avg_seconds: 20
+    status: planned
+
+  - id: model_scene
+    version: v1
+    file: model_scene_v1.json
+    description: 模特上身场景图，适用服装类目
+    applicable_categories: [服装, 上装, 针织衫, 外套]
+    base_model: qwen-image
+    params:
+      positive_prompt: { node: "6",  field: "text" }
+      negative_prompt: { node: "7",  field: "text" }
+      seed:            { node: "3",  field: "seed" }
+      ref_image:       { node: "12", field: "image" }   # IP-Adapter 视觉锚点
+      steps:           { node: "3",  field: "steps", default: 28 }
+    vram_gb: 16
+    avg_seconds: 25
+    status: planned
+
+  - id: detail_macro
+    version: v1
+    file: detail_macro_v1.json
+    description: 细节特写（面料纹理、五金、走线）
+    applicable_categories: ["*"]
+    base_model: qwen-image
+    params:
+      positive_prompt: { node: "6",  field: "text" }
+      ref_image:       { node: "12", field: "image" }
+      seed:            { node: "3",  field: "seed" }
+    vram_gb: 16
+    avg_seconds: 20
+    status: planned
+
+  - id: poster_promo
+    version: v1
+    file: poster_promo_v1.json
+    description: 促销海报（含中文文字渲染）
+    applicable_categories: ["*"]
+    base_model: qwen-image   # 中文文字渲染能力强，海报必需
+    params:
+      positive_prompt: { node: "6",  field: "text" }
+      poster_text:     { node: "18", field: "text" }
+      ref_image:       { node: "12", field: "image" }
+    vram_gb: 16
+    avg_seconds: 25
+    status: planned
+
+  - id: vton_catvton
+    version: v1
+    file: vton_catvton_v1.json
+    description: 虚拟试穿。⚠️ 若使用真人模特底图需确认肖像权授权，建议用 AI 生成的虚拟模特
+    applicable_categories: [服装, 上装, 针织衫, 外套, 连衣裙]
+    base_model: catvton
+    params:
+      human_image: { node: "4", field: "image" }
+      cloth_image: { node: "5", field: "image" }
+    vram_gb: 8
+    avg_seconds: 40
+    status: planned
+
+# 所有生成图必须通过的质量闸门（防虚假宣传，不是可选项）
+quality_gates:
+  subject_similarity_min: 0.75   # 生成图与商品实拍图的 CLIP 相似度
+  require_ip_adapter: true       # 纯 text2img 生成的是"想象中的商品"，电商场景禁用
+  ai_label_required: true        # 显式角标 + 隐式元数据 + 数字水印，三项齐全

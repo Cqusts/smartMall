@@ -1,0 +1,95 @@
+# LiteLLM 统一模型网关配置
+#
+# 所有 LLM 调用都经过这里，收益有三：
+#   1. 屏蔽 DashScope / DeepSeek / 本地 vLLM 的接口差异，业务侧只用 OpenAI 协议
+#   2. 按 token 记账到 agent 与场景维度——混合模型策略下控制成本的前提
+#   3. 微调模型上线后，A/B 流量切分只需改这里的路由，业务代码零改动
+#
+# 详见 docs/02-tech-selection.md 与 docs/10-finetune.md。
+
+model_list:
+
+  # ---------------- 客服对话主力 ----------------
+  - model_name: chat-default
+    litellm_params:
+      model: dashscope/qwen-plus
+      api_key: os.environ/DASHSCOPE_API_KEY
+      api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+      rpm: 600
+    model_info:
+      description: 客服对话主力。性价比与中文能力的平衡点
+
+  # ---------------- 闲聊分流 ----------------
+  # 约 30% 的消息是纯寒暄，走完整 RAG 链路是纯粹的成本浪费。
+  # 分流到 turbo 后这部分成本降一个数量级（见 docs/05-agent-customer-service.md）。
+  - model_name: chat-light
+    litellm_params:
+      model: dashscope/qwen-turbo
+      api_key: os.environ/DASHSCOPE_API_KEY
+      api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+      rpm: 1200
+
+  # ---------------- 复杂推理：考核 Judge、语义分段 ----------------
+  - model_name: reasoning
+    litellm_params:
+      model: dashscope/qwen-max
+      api_key: os.environ/DASHSCOPE_API_KEY
+      api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+      rpm: 120
+    model_info:
+      description: 判断任务对模型能力敏感，这里省钱会直接损害准确性
+
+  # 考核 AI 客服时用不同厂商的模型做交叉验证，规避 self-preference 偏差
+  # （用 qwen 评 qwen 生成的回复会系统性偏高，见 docs/09-sales-kpi.md）
+  - model_name: reasoning-crosscheck
+    litellm_params:
+      model: deepseek/deepseek-reasoner
+      api_key: os.environ/DEEPSEEK_API_KEY
+      rpm: 120
+
+  # ---------------- 视觉理解 ----------------
+  - model_name: vision
+    litellm_params:
+      model: dashscope/qwen-vl-max
+      api_key: os.environ/DASHSCOPE_API_KEY
+      api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+      rpm: 300
+    model_info:
+      description: 用户发图理解 + 素材 VLM 打标，共用同一套结构化模板
+
+  # ---------------- 备用通道（主模型故障时降级）----------------
+  - model_name: chat-fallback
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+      rpm: 600
+
+  # ---------------- 微调模型（M7 上线后启用）----------------
+  # vLLM 以 OpenAI 协议暴露，接进来即可按用户分流做 A/B
+  # - model_name: chat-style-v1
+  #   litellm_params:
+  #     model: openai/style-v1
+  #     api_base: http://vllm:8000/v1
+  #     api_key: dummy
+
+litellm_settings:
+  drop_params: true
+  num_retries: 2
+  request_timeout: 120
+  # 主模型失败自动降级，避免单一供应商故障导致客服整体不可用
+  fallbacks:
+    - chat-default: [chat-fallback]
+    - reasoning: [reasoning-crosscheck]
+  # Langfuse 回调：Trace 不是日志，是训练数据的采集管道（见 docs/05）
+  success_callback: [langfuse]
+  failure_callback: [langfuse]
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # 按 agent_id / scene 打标记账，供 ClickHouse 的 ch_cost 表做成本拆分
+  track_cost_per_model: true
+
+router_settings:
+  routing_strategy: usage-based-routing-v2
+  allowed_fails: 3
+  cooldown_time: 30

@@ -1,0 +1,248 @@
+# smartMall 中间件层
+#
+# 启动：docker compose -f deploy/docker-compose.base.yml up -d
+# 这一层不含任何业务服务，可独立启停。应用层见 docker-compose.app.yml。
+#
+# 端口占用说明（避免与应用层冲突）：
+#   8080 → mall-gateway 占用，因此 SeaweedFS volume / ClickHouse 原生端口都不映射到 8080/9000
+#   9000-9005 → Python AI 服务占用
+
+name: smartmall-base
+
+networks:
+  smartmall:
+    name: smartmall
+    driver: bridge
+
+volumes:
+  mysql-data:
+  redis-data:
+  kafka-data:
+  clickhouse-data:
+  milvus-data:
+  milvus-etcd:
+  milvus-objstore:
+  seaweed-data:
+  langfuse-pg:
+
+services:
+
+  # ---------------------------------------------------------------- MySQL
+  mysql:
+    image: mysql:8.0
+    container_name: sm-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-smartmall}
+      MYSQL_USER: ${MYSQL_USER:-smartmall}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-smartmall}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      - --max-connections=300
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 首次启动自动执行建表脚本（按文件名顺序）
+      - ./sql/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [smartmall]
+
+  # ---------------------------------------------------------------- Redis
+  redis:
+    image: redis:7-alpine
+    container_name: sm-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [smartmall]
+
+  # ---------------------------------------------------------------- Kafka (KRaft，免 Zookeeper)
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: sm-kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"   # topic 由 init-kafka.sh 显式创建，分区数是显存约束的一部分
+      KAFKA_LOG_RETENTION_HOURS: 168
+      CLUSTER_ID: smartmall-kraft-cluster
+    ports:
+      - "${KAFKA_EXTERNAL_PORT:-29092}:29092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks: [smartmall]
+
+  # ---------------------------------------------------------------- ClickHouse
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: sm-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-smartmall}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-smartmall}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-smartmall}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-9100}:9000"   # 原生端口映射到 9100，避开 ai-gateway 的 9000
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [smartmall]
+
+  # ---------------------------------------------------------------- Milvus 及其内部依赖
+  # 注意：下面的 etcd 与 milvus-objstore 是 Milvus 的内部实现依赖，
+  # 与应用层的对象存储（SeaweedFS）无关，不要混用。
+  # Milvus 官方 standalone 仍依赖 MinIO 作为内部块存储，此处按官方版本固定，
+  # 不影响我们在应用层弃用 MinIO 的决策（见 docs/02-tech-selection.md）。
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    container_name: sm-milvus-etcd
+    restart: unless-stopped
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: >
+      etcd -advertise-client-urls=http://milvus-etcd:2379
+           -listen-client-urls=http://0.0.0.0:2379
+           --data-dir /etcd
+    volumes:
+      - milvus-etcd:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks: [smartmall]
+
+  milvus-objstore:
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    container_name: sm-milvus-objstore
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - milvus-objstore:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks: [smartmall]
+
+  milvus:
+    image: milvusdb/milvus:v2.5.4
+    container_name: sm-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-objstore:9000
+      # 内置 BM25 稀疏检索需要开启全文检索能力（Milvus 2.5+）
+      COMMON_STORAGETYPE: local
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"
+      - "${MILVUS_METRICS_PORT:-9091}:9091"
+    volumes:
+      - milvus-data:/var/lib/milvus
+    depends_on:
+      milvus-etcd: { condition: service_healthy }
+      milvus-objstore: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 90s
+    networks: [smartmall]
+
+  # ---------------------------------------------------------------- 应用对象存储
+  # MinIO 开源仓库已于 2026-04 归档，新项目改用 SeaweedFS（见 docs/02-tech-selection.md）。
+  # 生产环境亦可直接接阿里云 OSS，把 S3_ENDPOINT 指过去即可，无需本服务。
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.73
+    container_name: sm-seaweedfs
+    restart: unless-stopped
+    command: >
+      server -dir=/data -master.volumeSizeLimitMB=1024
+             -volume.max=20 -filer -s3
+             -s3.port=8333 -metricsPort=9327
+    ports:
+      - "${S3_PORT:-8333}:8333"      # S3 兼容 API
+      - "${SEAWEED_MASTER_PORT:-9333}:9333"
+    volumes:
+      - seaweed-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9333/cluster/healthz"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [smartmall]
+
+  # ---------------------------------------------------------------- Langfuse 的 PostgreSQL
+  langfuse-pg:
+    image: postgres:16-alpine
+    container_name: sm-langfuse-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-langfuse}
+    volumes:
+      - langfuse-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [smartmall]
