@@ -13,11 +13,18 @@ dependencies = [
     "httpx>=0.27",
     "structlog>=24.4",
     "PyYAML>=6.0",
+    # 数据库访问是 CLI 的必需项，不能放可选依赖——
+    # 否则 `pip install -e .` 之后 `cli check` 直接 ModuleNotFoundError。
+    # 四道关卡本身仍是纯函数、不碰这两个包，可测试性不受影响。
+    "SQLAlchemy>=2.0",
+    "PyMySQL>=1.1",
 ]
 
 [project.optional-dependencies]
-db = ["SQLAlchemy>=2.0", "PyMySQL>=1.1"]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+smartmall-pipeline = "smartmall_pipeline.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["smartmall_pipeline"]

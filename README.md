@@ -193,11 +193,35 @@ apps/python/ai-rag/app/
   milvus_store.py   Milvus 2.5 原生 BM25 混合检索
 ```
 
-**测试**：142 个（pipeline 106 + ai-rag 36），`pytest` 全绿。
+**测试**：152 个（pipeline 116 + ai-rag 36），`pytest` 全绿。
 端到端用例从 300 条合成对话跑到可发布的知识条目，断言漏斗单调递减、
 PII 零残留、全链路可溯源、流水线可复现。
 
 ```bash
-cd pipelines && pytest -q                    # 106 passed
-cd apps/python/ai-rag && pytest -q           # 36 passed
+cd pipelines && pip install -e ".[dev]" && pytest -q   # 116 passed
+cd apps/python/ai-rag && pip install -e ../ai-common && pytest -q   # 36 passed
 ```
+
+### 跑一遍数据中台
+
+只需要 MySQL（不需要 Docker、GPU、也不需要 API Key）：
+
+```bash
+cd pipelines
+pip install -e .
+
+export MYSQL_HOST=localhost MYSQL_USER=smartmall MYSQL_PASSWORD=smartmall MYSQL_DATABASE=smartmall
+
+smartmall-pipeline check                  # 校验连通性、表结构、中文编码
+smartmall-pipeline ingest --count 400     # 生成合成对话写入 ODS
+smartmall-pipeline clean --fake-llm       # 跑四道关卡，打印漏斗报表
+smartmall-pipeline stats                  # 各层数据量
+smartmall-pipeline coverage               # 知识覆盖度矩阵
+smartmall-pipeline publish --version kb-v1
+```
+
+`--fake-llm` 用假模型跑通链路，不产生 API 费用；去掉它即为真实清洗
+（需先配好 `LITELLM_BASE_URL` 与 `LITELLM_API_KEY`）。
+
+Windows PowerShell 用 `$env:MYSQL_HOST="localhost"` 设置环境变量，
+且不支持 `&&`，命令需分行执行。
