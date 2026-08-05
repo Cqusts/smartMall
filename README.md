@@ -149,7 +149,7 @@ make health       # 存活检查
 | 里程碑 | 状态 | 内容 |
 |---|---|---|
 | **M0 基础设施** | ✅ 已完成 | monorepo 骨架、11 个服务、compose 三件套、30 张表、Kafka 契约、健康探针 |
-| M1 数据中台 + RAG | ⬜ 待开始 | 四道清洗关卡、`knowledge_item`、混合检索 |
+| **M1 数据中台 + RAG** | 🟡 核心已完成 | 四道清洗关卡、`knowledge_item`、混合检索、发版门禁、覆盖度矩阵、3 个 DAG（142 测试）<br/>待接真实环境：JDDC 导入、Milvus 集成验证、Label Studio 项目配置 |
 | M2 文本 AI 客服 | ⬜ | LangGraph、MCP 工具、Trace 回流 |
 | M3 素材中心 + 运营 Agent | ⬜ | ComfyUI / Wan2.2 / CosyVoice2 |
 | M4 多模态客服 | ⬜ | 图片理解入口、素材挂载 |
@@ -173,3 +173,31 @@ evals/          13 个评测集的规格与门禁阈值
 **已验证**：6 个 Java 模块编译通过；10 个服务本地启动并 `/health` 全绿；
 网关经 `StripPrefix` 正确转发到各后端；Java 与 Python 两侧 `ApiResponse` JSON 形状一致；
 Kafka Topic 契约校验通过（含负向测试）；四个 compose 文件语法校验通过。
+
+### M1 已交付
+
+```
+pipelines/smartmall_pipeline/
+  models.py         领域模型（Dialogue / KnowledgeItem / SftSample / 漏斗报表）
+  ingest/           JDDC 适配器 + 合成数据生成器
+  gates/            四道清洗关卡 + PII 脱敏
+  orchestrator.py   四关编排（不依赖 Airflow，可在 pytest 跑通）
+  publish.py        7 项发版质量门禁 + JSONL 快照
+  coverage.py       类目 × 知识类型覆盖度矩阵 → 补写任务
+  repository.py     SQLAlchemy Core 数据访问
+pipelines/dags/     3 个 Airflow DAG
+pipelines/recipes/  Data-Juicer 配方 + 算子校验工具
+apps/python/ai-rag/app/
+  chunking.py       按 biz_type 分策略切分
+  retrieval.py      硬性过滤 · RRF 融合 · 阈值裁剪
+  milvus_store.py   Milvus 2.5 原生 BM25 混合检索
+```
+
+**测试**：142 个（pipeline 106 + ai-rag 36），`pytest` 全绿。
+端到端用例从 300 条合成对话跑到可发布的知识条目，断言漏斗单调递减、
+PII 零残留、全链路可溯源、流水线可复现。
+
+```bash
+cd pipelines && pytest -q                    # 106 passed
+cd apps/python/ai-rag && pytest -q           # 36 passed
+```
