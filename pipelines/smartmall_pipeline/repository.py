@@ -80,13 +80,18 @@ class OdsRepository(_Base):
         return result.rowcount or 0
 
     def fetch_unprocessed(self, limit: int = 5000) -> list[Dialogue]:
-        """拉取尚未进入 DWD 的原始对话。"""
+        """拉取尚未被清洗处理过的原始对话。
+
+        判据是 ``ods_process_log`` 而不是 ``dwd_dialogue_session``——
+        在关卡①②被淘汰的对话根本到不了 DWD，用 DWD 判断会把它们
+        永远当成待处理，每次清洗重新处理一遍，产出成倍的重复知识。
+        """
         from sqlalchemy import text
 
         sql = text(
             "SELECT o.id, o.raw_payload FROM ods_raw_dialogue o "
-            "LEFT JOIN dwd_dialogue_session s ON s.ods_id = o.id "
-            "WHERE s.id IS NULL ORDER BY o.id LIMIT :limit"
+            "LEFT JOIN ods_process_log p ON p.ods_id = o.id "
+            "WHERE p.id IS NULL ORDER BY o.id LIMIT :limit"
         )
         with self.engine.connect() as conn:
             rows = conn.execute(sql, {"limit": limit}).fetchall()
@@ -97,6 +102,35 @@ class OdsRepository(_Base):
             dlg.ods_id = ods_id
             out.append(dlg)
         return out
+
+    def mark_processed(
+        self,
+        outcomes: dict[int, tuple[str, str | None]],
+        batch_id: str,
+    ) -> int:
+        """记录每条 ODS 记录的处理结果。
+
+        必须与知识条目写入在同一个流程里完成，否则中途失败会导致
+        "知识已写入但记录未标记"，下次重跑产生重复。
+        用 INSERT IGNORE 保证重复标记是安全的。
+        """
+        from sqlalchemy import text
+
+        if not outcomes:
+            return 0
+
+        sql = text(
+            "INSERT IGNORE INTO ods_process_log "
+            "(ods_id, batch_id, outcome, dropped_at_gate) "
+            "VALUES (:ods_id, :batch_id, :outcome, :gate)"
+        )
+        rows = [
+            {"ods_id": ods_id, "batch_id": batch_id, "outcome": outcome, "gate": gate}
+            for ods_id, (outcome, gate) in outcomes.items()
+        ]
+        with self.engine.begin() as conn:
+            conn.execute(sql, rows)
+        return len(rows)
 
 
 class DwsRepository(_Base):
@@ -115,10 +149,10 @@ class DwsRepository(_Base):
 
         sql = text(
             "INSERT INTO knowledge_item "
-            "(biz_type, modality, title, content, summary, asset_ids, product_ids, "
+            "(biz_type, modality, knowledge_type, title, content, summary, asset_ids, product_ids, "
             " category_id, tags, source, source_ref, quality_score, confidence, "
             " review_status, valid_from, valid_to, embedding_status) "
-            "VALUES (:biz_type, :modality, :title, :content, :summary, :asset_ids, "
+            "VALUES (:biz_type, :modality, :knowledge_type, :title, :content, :summary, :asset_ids, "
             " :product_ids, :category_id, :tags, :source, :source_ref, :quality_score, "
             " :confidence, :review_status, :valid_from, :valid_to, 'pending')"
         )
@@ -126,6 +160,7 @@ class DwsRepository(_Base):
             {
                 "biz_type": str(i.biz_type),
                 "modality": str(i.modality),
+                "knowledge_type": str(i.knowledge_type),
                 "title": i.title,
                 "content": i.content,
                 "summary": i.summary,

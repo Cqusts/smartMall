@@ -20,13 +20,20 @@ from datetime import datetime, timedelta
 
 from ..models import Dialogue, Turn
 
-# 类目 × 问题类型矩阵。覆盖度分析的两个维度就是它们。
-CATEGORIES: dict[str, int] = {
-    "针织衫": 1024,
-    "羽绒服": 1025,
-    "连衣裙": 1026,
-    "女包": 48,
+# 商品清单。与 deploy/sql/mysql/99_seed.sql 的 product 表保持一致——
+# 清洗时需要 {product_id: category_id} 映射来填知识条目的类目，
+# 对不上的话映射查不到，覆盖度矩阵会显示 0%。
+#
+# 注意商品 ID 与类目 ID 是两个维度：一个类目下可以有多个商品。
+PRODUCTS: dict[str, tuple[int, int]] = {
+    # 商品简称: (product_id, category_id)
+    "针织衫": (9001, 1024),
+    "羽绒服": (9002, 1025),
+    "连衣裙": (9003, 1026),
+    "单肩包": (9004, 2048),
 }
+
+CATEGORIES: dict[str, int] = {name: cat for name, (_, cat) in PRODUCTS.items()}
 
 QUESTION_TEMPLATES: dict[str, list[tuple[str, str]]] = {
     "材质": [
@@ -99,9 +106,9 @@ def generate_dialogue(
         category / question_type: 指定类目与问题类型；None 则随机。
         inject_noise: 是否注入应被清洗的噪声。测试关卡效果时设 True。
     """
-    category = category or rng.choice(list(CATEGORIES))
+    category = category or rng.choice(list(PRODUCTS))
     question_type = question_type or rng.choice(list(QUESTION_TEMPLATES))
-    product_id = CATEGORIES[category]
+    product_id, _ = PRODUCTS[category]
 
     started = datetime(2026, 3, 1, 10, 0, 0) + timedelta(minutes=seq)
     turns: list[Turn] = []
@@ -196,4 +203,12 @@ def generate_batch(
 
 def coverage_matrix_spec() -> dict[str, list[str]]:
     """返回合成器覆盖的「类目 × 问题类型」矩阵，供覆盖度分析对照。"""
-    return {cat: list(QUESTION_TEMPLATES) for cat in CATEGORIES}
+    return {cat: list(QUESTION_TEMPLATES) for cat in PRODUCTS}
+
+
+def product_category_map() -> dict[int, int]:
+    """``{product_id: category_id}``，与 99_seed.sql 的 product 表一致。
+
+    离线测试时可直接用它，不必连库。
+    """
+    return {pid: cat for pid, cat in PRODUCTS.values()}

@@ -214,12 +214,24 @@ def run(
     dialogues: list[Dialogue],
     llm: LlmClient,
     config: Gate3Config | None = None,
+    *,
+    product_category: dict[int, int] | None = None,
 ) -> tuple[list[KnowledgeItem], list[SftSample], GateStats]:
     """执行关卡③。
+
+    Args:
+        product_category: ``{product_id: category_id}`` 映射。
+
+            知识条目的 ``category_id`` 必须在这里填上：它既是检索时收窄
+            范围的过滤条件，也是覆盖度矩阵的行维度。不填的话矩阵永远显示
+            0% 覆盖率，"哪里缺知识"就无从谈起。
+
+            映射由调用方从数据库加载后传入——保持本函数是纯函数，可离线测试。
 
     Returns:
         (知识条目, 微调样本, 统计)。两个出口——知识进 RAG，样本进微调。
     """
+    cat_of = product_category or {}
     cfg = config or Gate3Config()
     stats = GateStats(gate="③ 模型清洗", input_count=len(dialogues), unit="条目")
     items: list[KnowledgeItem] = []
@@ -301,6 +313,11 @@ def run(
                 valid_to = datetime.now() + timedelta(days=cfg.promotion_valid_days)
                 stats.modify("活动类设置有效期")
 
+            # 类目取自关联商品。一段会话通常只涉及一个类目，取第一个命中的即可
+            category_id = next(
+                (cat_of[p] for p in dlg.product_ids if p in cat_of), None
+            )
+
             items.append(
                 KnowledgeItem(
                     biz_type=BizType.QA,
@@ -308,6 +325,7 @@ def run(
                     content=answer,
                     tags=list(raw.get("tags") or []),
                     product_ids=list(dlg.product_ids),
+                    category_id=category_id,
                     source=dlg.source_type,
                     source_ref=f"ods:{dlg.ods_id}" if dlg.ods_id else f"session:{dlg.session_no}",
                     quality_score=quality,

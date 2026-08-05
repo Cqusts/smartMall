@@ -53,6 +53,27 @@ CREATE TABLE IF NOT EXISTS ods_raw_dialogue (
     INDEX idx_batch (batch_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='原始对话（只增不改）';
 
+-- ODS 记录处理日志。
+--
+-- 为什么需要单独一张表：ODS 是只增不改的（任何加工出错都要能重跑），
+-- 所以不能往 ods_raw_dialogue 加"已处理"状态列。而"哪些已处理"又必须可查，
+-- 否则每次清洗都会把同一批对话重新处理一遍，产出成倍的重复知识。
+--
+-- 顺带解决另一个问题：在关卡①②被淘汰的对话根本到不了 DWD，
+-- 靠 JOIN dwd_dialogue_session 判断"已处理"会把它们永远当成待处理。
+-- 这张表按记录粒度留痕，也让"这条对话为什么没进知识库"可追。
+CREATE TABLE IF NOT EXISTS ods_process_log (
+    id              BIGINT      PRIMARY KEY AUTO_INCREMENT,
+    ods_id          BIGINT      NOT NULL,
+    batch_id        VARCHAR(64) NOT NULL COMMENT '清洗批次',
+    outcome         VARCHAR(16) NOT NULL COMMENT 'passed 产出知识 | dropped 被淘汰',
+    dropped_at_gate VARCHAR(32)          COMMENT '被哪一关淘汰',
+    processed_at    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_ods (ods_id),
+    INDEX idx_batch (batch_id),
+    INDEX idx_outcome (outcome)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='ODS 处理日志（ODS 只增不改，处理状态外置）';
+
 CREATE TABLE IF NOT EXISTS ods_raw_asset (
     id            BIGINT      PRIMARY KEY AUTO_INCREMENT,
     asset_id      BIGINT      NOT NULL,
@@ -151,8 +172,13 @@ CREATE TABLE IF NOT EXISTS dwd_clip_segment (
 -- 清洗后的对话 QA、素材 VLM 描述、直播口播话术、商品属性、售后政策，全部归一到这张表。
 CREATE TABLE IF NOT EXISTS knowledge_item (
     id                BIGINT        PRIMARY KEY AUTO_INCREMENT,
-    biz_type          VARCHAR(32)   NOT NULL COMMENT 'qa|spec|script|policy|faq',
+    biz_type          VARCHAR(32)   NOT NULL COMMENT 'qa|spec|script|policy|faq 知识的形态',
     modality          VARCHAR(16)   NOT NULL DEFAULT 'text' COMMENT 'text|image|video',
+    knowledge_type    VARCHAR(32)   NOT NULL DEFAULT 'other'
+                                    COMMENT 'spec|logistics|aftersale|sizing|promotion|usage|other 知识的主题。
+与 biz_type 是两个维度：biz_type 说"这是什么形态的知识"（问答/属性/话术），
+knowledge_type 说"这条知识讲的是什么"。后者是覆盖度矩阵的列维度——
+不落库的话矩阵永远显示 0% 覆盖率，"哪里缺知识"就无从谈起',
 
     title             VARCHAR(512)  COMMENT '问题 / 标题',
     content           TEXT          NOT NULL COMMENT '答案 / 正文',
@@ -188,6 +214,7 @@ CREATE TABLE IF NOT EXISTS knowledge_item (
     INDEX idx_review_embed (review_status, embedding_status),
     INDEX idx_category (category_id),
     INDEX idx_biz_modality (biz_type, modality),
+    INDEX idx_coverage (category_id, knowledge_type),
     INDEX idx_valid (valid_from, valid_to),
     INDEX idx_source (source, source_ref(64))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='知识条目：RAG 知识库的唯一数据源';

@@ -26,7 +26,7 @@ EXPECTED_TABLES=(
   category product sku product_attr size_chart live_schedule
   asset asset_product_rel asset_clip_meta asset_audit
   ds_source ds_job
-  ods_raw_dialogue ods_raw_asset ods_raw_clip ods_raw_doc
+  ods_raw_dialogue ods_raw_asset ods_raw_clip ods_raw_doc ods_process_log
   dwd_dialogue_session dwd_dialogue_turn dwd_clip_segment
   knowledge_item sft_sample dataset_version eval_sample eval_result model_version
   kpi_metric kpi_score kpi_golden_set kpi_calibration kpi_appeal
