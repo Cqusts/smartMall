@@ -223,6 +223,10 @@ class GateStats(BaseModel):
     gate: str
     input_count: int = 0
     output_count: int = 0
+    unit: str = "会话"
+    """处理单元。关卡①②处理「会话」，关卡③把一段会话拆成多条「条目」，
+    单位在此发生变化——漏斗百分比不能跨单位累计，否则会出现
+    "178% 存活率" 这种读不通的数字。"""
     dropped: dict[str, int] = Field(default_factory=dict)
     modified: dict[str, int] = Field(default_factory=dict)
     """按类型统计"被修改"的次数，如 pii_masked、order_no_parameterized"""
@@ -273,11 +277,15 @@ class FunnelReport(BaseModel):
         if not self.stages:
             return "(空)"
         lines = [f"清洗漏斗 batch={self.batch_id}", "=" * 62]
-        initial = self.stages[0].input_count
+        # 累计存活率只在同一单位内有意义；单位切换时重置基数
+        base_unit = self.stages[0].unit
+        base_count = self.stages[0].input_count
         for s in self.stages:
-            pct = s.output_count / initial * 100 if initial else 0
+            if s.unit != base_unit:
+                base_unit, base_count = s.unit, s.input_count
+            pct = s.output_count / base_count * 100 if base_count else 0
             lines.append(
-                f"{s.gate:<26} {s.input_count:>7} → {s.output_count:>7}"
+                f"{s.gate:<26} {s.input_count:>7} → {s.output_count:>7} {s.unit}"
                 f"  ({pct:5.1f}% 存活, 淘汰 {s.drop_count})"
             )
             for reason, n in sorted(s.dropped.items(), key=lambda kv: -kv[1]):

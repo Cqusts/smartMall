@@ -221,7 +221,7 @@ def run(
         (知识条目, 微调样本, 统计)。两个出口——知识进 RAG，样本进微调。
     """
     cfg = config or Gate3Config()
-    stats = GateStats(gate="③ 模型清洗", input_count=len(dialogues))
+    stats = GateStats(gate="③ 模型清洗", input_count=len(dialogues), unit="条目")
     items: list[KnowledgeItem] = []
     samples: list[SftSample] = []
 
