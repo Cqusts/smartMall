@@ -1,0 +1,98 @@
+# 关卡① 机器清洗 —— Data-Juicer 配方
+#
+# 配方变更 = 数据资产变更，必须发新版本（见 docs/03-data-platform.md）。
+# 改这个文件后要同步：
+#   1. 文件名版本号（dialogue_clean_v2.yaml）
+#   2. dataset_version.filter_sql 里记录的配方版本
+#
+# ⚠️ 算子参数名在 Data-Juicer 各版本间会变。跑之前先执行：
+#       python -m smartmall_pipeline.tools.validate_recipe recipes/dialogue_clean_v1.yaml
+#   它会对照已安装的 data-juicer 校验算子名与参数名，避免跑到一半才报错。
+#
+# 与 smartmall_pipeline/gates/gate1_machine.py 的关系：
+#   本配方用于**全量批处理**（百万级，走 Data-Juicer 的 LSH 与多进程）；
+#   gate1_machine.py 是同一套规则的轻量 Python 实现，用于单元测试与小批量。
+#   两者的阈值必须保持一致，否则测试通过但线上行为不同。
+
+project_name: 'smartmall-dialogue-clean'
+dataset_path: '/data/datasets/ods_dialogue.jsonl'
+export_path: '/data/datasets/gate1_output.jsonl'
+
+np: 8                      # 进程数，按 CPU 核数调
+text_keys: 'text'
+open_tracer: true          # 记录每个算子的淘汰量，对应"各关卡淘汰量统计报表"
+trace_num: 20
+
+process:
+
+  # ---------------- 长度过滤 ----------------
+  - text_length_filter:
+      min_len: 10
+      max_len: 8000
+
+  # ---------------- 语种过滤 ----------------
+  # JDDC 是中文语料，占比过低通常是乱码或外文噪声
+  - language_id_score_filter:
+      lang: 'zh'
+      min_score: 0.8
+
+  # ---------------- 乱码过滤 ----------------
+  # 字母数字占比过高 → 多半是编码错乱或日志串入
+  - alphanumeric_filter:
+      tokenization: false
+      min_ratio: 0.0
+      max_ratio: 0.5
+
+  # 特殊字符占比过高 → 表情轰炸、符号刷屏
+  - special_characters_filter:
+      min_ratio: 0.0
+      max_ratio: 0.25
+
+  # ---------------- 敏感词 / 竞品词 ----------------
+  # 词表见 recipes/flagged_words/zh.txt
+  - flagged_words_filter:
+      lang: 'zh'
+      tokenization: false
+      max_ratio: 0.0005
+      flagged_words_dir: './recipes/flagged_words'
+
+  # ---------------- PII 脱敏 ----------------
+  # 注意顺序：身份证(18位) → 银行卡(16-19位) → 手机号(11位) → 订单号(12-24位)。
+  # 顺序错了，银行卡号中间的 11 位会被先当成手机号吃掉。
+  # 这与 gates/pii.py 的 RULES 顺序必须完全一致。
+  - replace_content_mapper:
+      pattern: '(?<!\d)\d{17}[\dXx](?!\d)'
+      repl: '<ID_CARD>'
+  - replace_content_mapper:
+      pattern: '(?<!\d)\d{16,19}(?!\d)'
+      repl: '<BANK_CARD>'
+  - replace_content_mapper:
+      pattern: '(?<!\d)1[3-9]\d{9}(?!\d)'
+      repl: '<PHONE>'
+  - replace_content_mapper:
+      pattern: '(?<!\d)0\d{2,3}-?\d{7,8}(?!\d)'
+      repl: '<TELEPHONE>'
+  - replace_content_mapper:
+      pattern: '[\w.+-]+@[\w-]+\.[\w.-]+'
+      repl: '<EMAIL>'
+  - replace_content_mapper:
+      pattern: '(?<!\d)\d{12,24}(?!\d)'
+      repl: '<ORDER_NO>'
+
+  # ---------------- 外链与引流 ----------------
+  - clean_links_mapper: {}
+  - replace_content_mapper:
+      pattern: '(微信号?[:：]?\s*[\w-]{6,}|加\s*(微信|VX|vx|威信))'
+      repl: '<CONTACT>'
+
+  # ---------------- 近重复去重 ----------------
+  # 放最后：前面的清洗会让"只差一点噪声"的样本变得完全相同，
+  # 先清洗再去重能多消掉一批。
+  # jaccard_threshold 必须与 gate1_machine.Gate1Config.dedup_threshold 一致。
+  - document_minhash_deduplicator:
+      tokenization: 'character'   # 中文没有天然词边界，字符 shingle 比分词稳
+      window_size: 4
+      num_permutations: 256
+      jaccard_threshold: 0.85
+      num_bands: null             # null = 由最优参数算法自动推导
+      num_rows_per_band: null
