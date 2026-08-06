@@ -21,6 +21,7 @@ import argparse
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from . import coverage as coverage_mod
 from . import publish as publish_mod
@@ -31,6 +32,52 @@ from .orchestrator import run_pipeline
 from .repository import DwsRepository, OdsRepository
 
 EXPECTED_TABLES = 31
+
+
+# ---------------------------------------------------------------- .env
+
+def _load_env_file(path: Path) -> int:
+    """加载 KEY=VALUE 形式的 .env 文件。
+
+    **不覆盖已存在的环境变量**——显式 export 的值优先于文件，
+    这样临时切库（比如指到测试库跑一次）不需要改文件。
+
+    自己实现而不引入 python-dotenv：只有十几行，不值得多一个依赖。
+    """
+    if not path.is_file():
+        return 0
+
+    loaded = 0
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    return loaded
+
+
+def _default_env_files() -> list[Path]:
+    """按优先级列出候选 .env 位置。
+
+    先看当前目录，再往上找仓库根的 deploy/.env——
+    从 pipelines/ 或仓库根目录跑，都能找到同一份配置。
+    """
+    candidates = [Path.cwd() / ".env"]
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "deploy").is_dir():
+            candidates.append(parent / "deploy" / ".env")
+            break
+    return candidates
 
 
 def _env_summary() -> str:
@@ -390,6 +437,10 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    p.add_argument(
+        "--env-file",
+        help="指定 .env 文件；默认依次尝试 ./.env 与 <仓库根>/deploy/.env",
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("check", help="检查数据库连通与表结构")
@@ -436,11 +487,35 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # 先加载 .env，再执行命令——省掉每开一个终端都要重设环境变量
+    if args.env_file:
+        path = Path(args.env_file)
+        if not path.is_file():
+            print(f"✗ 找不到 {path}")
+            return 1
+        n = _load_env_file(path)
+        print(f"  已加载 {path}（{n} 项）")
+    else:
+        for path in _default_env_files():
+            n = _load_env_file(path)
+            if n:
+                print(f"  已加载 {path}（{n} 项）")
+                break
+
     try:
         return args.func(args)
     except KeyboardInterrupt:
         print("\n已中断")
         return 130
+    except BrokenPipeError:
+        # 输出被 head / more 之类截断。这是正常使用方式，不该甩 traceback。
+        # 需要重定向 stdout，否则解释器退出时 flush 会再抛一次。
+        try:
+            sys.stdout.close()
+        finally:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
     except Exception as exc:  # noqa: BLE001
         # 数据库连不上是最常见的失败，甩一屏 traceback 对使用者毫无帮助。
         # 只有真正意外的异常才保留堆栈。
