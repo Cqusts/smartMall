@@ -314,6 +314,141 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- index / search
+
+
+def cmd_index(args: argparse.Namespace) -> int:
+    """把已审核的知识条目向量化写入索引。
+
+    对应 dag_kb_incremental_index 的手动版本：只处理
+    ``embedding_status IN ('pending','stale')`` 的条目。
+    ``stale`` 是内容改过但向量没跟上的状态——不重新算的话，
+    检索命中的是旧向量、返回的是新内容，两者对不上。
+    """
+    from sqlalchemy import text
+
+    from .rag import LocalVectorStore, build_provider
+    from .rag.embedding import EmbeddingError
+
+    repo = DwsRepository.from_env()
+
+    try:
+        provider = build_provider(args.embedding)
+    except EmbeddingError as exc:
+        print(f"✗ {exc}")
+        return 1
+    print(f"==> 向量化后端：{provider.name}")
+
+    where = (
+        "k.deleted = 0 AND k.review_status IN ('approved','revised')"
+        if args.rebuild
+        else "k.deleted = 0 AND k.review_status IN ('approved','revised') "
+             "AND k.embedding_status IN ('pending','stale')"
+    )
+    with repo.engine.connect() as conn:
+        rows = conn.execute(text(
+            f"SELECT k.id, k.biz_type, k.title, k.content FROM knowledge_item k "
+            f"WHERE {where} ORDER BY k.id LIMIT :limit"
+        ), {"limit": args.limit}).mappings().fetchall()
+
+    if not rows:
+        print("  没有待向量化的条目。加 --rebuild 可全量重建。")
+        return 0
+    print(f"  待处理 {len(rows)} 条")
+
+    # 检索文本要带上标题：用户的提问更接近「问题」而非「答案」，
+    # 只索引答案会显著降低召回
+    payload = [
+        (r["id"], 0, f"{r['title']}\n{r['content']}" if r["title"] else r["content"])
+        for r in rows
+    ]
+
+    store = LocalVectorStore(engine=repo.engine)
+    batch = args.batch_size
+    done = 0
+    for i in range(0, len(payload), batch):
+        chunk = payload[i : i + batch]
+        try:
+            vectors = provider.embed([t for _, _, t in chunk])
+        except EmbeddingError as exc:
+            print(f"\n✗ 第 {i} 批向量化失败：{exc}")
+            print(f"  已完成 {done} 条，重跑本命令会从断点继续")
+            return 1
+        store.upsert(
+            [(iid, seq, txt, vec) for (iid, seq, txt), vec in zip(chunk, vectors)],
+            provider.name,
+        )
+        repo.mark_indexed([iid for iid, _, _ in chunk])
+        done += len(chunk)
+        print(f"\r  已向量化 {done}/{len(payload)}", end="", flush=True)
+
+    print(f"\n  ✓ 完成 {done} 条")
+    return 0
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    """检索调试台：输入问题，看混合检索命中什么。"""
+    from .rag import LocalVectorStore, build_provider, embed_query
+    from .rag.embedding import EmbeddingError
+
+    repo = DwsRepository.from_env()
+    store = LocalVectorStore(engine=repo.engine)
+
+    n = store.load()
+    if n == 0:
+        print("  索引为空。先跑 `index` 建索引。")
+        return 1
+    print(f"==> 索引已加载 {n} 条（后端 {store.provider_name}）")
+
+    try:
+        provider = build_provider(args.embedding)
+        qvec = embed_query(provider, args.query)
+    except EmbeddingError as exc:
+        print(f"✗ {exc}")
+        return 1
+
+    hits = store.search(
+        args.query, qvec,
+        top_k=args.top_k,
+        product_ids=[args.product_id] if args.product_id else None,
+        category_id=args.category_id,
+    )
+
+    print(f"\n问题：{args.query}")
+    print("=" * 68)
+
+    # 拒答判据用余弦相似度，不能用 RRF 分——后者只反映排名，
+    # 最大值恒为 2/(k+1)，与查询是否真的匹配无关。
+    # 注意本地实现**没有 rerank**，所以这个阈值比 docs/04 里
+    # rerank 之后的 0.5 宽松；接上 bge-reranker 后应改用那个阈值。
+    usable = [
+        h for h in hits
+        if h.dense_score >= args.min_similarity or h.bm25_score > 0
+    ]
+
+    if not hits or not usable:
+        print("无命中。")
+        print(f"  最高相似度 {hits[0].dense_score:.3f} < 阈值 {args.min_similarity}"
+              if hits else "  召回为空")
+        print("\n  按设计此时应拒答并转人工，而不是让模型硬编——")
+        print("  电商客服说错话的代价是真实的退货与投诉。")
+        return 0
+
+    for i, h in enumerate(usable, 1):
+        kw = "  关键词命中" if h.bm25_score > 0 else ""
+        print(f"\n[{i}] 相似度={h.dense_score:.3f}  RRF={h.score:.4f}{kw}")
+        print(f"    item={h.item_id}  {h.biz_type}/{h.knowledge_type}")
+        text_ = h.text.replace("\n", " / ")
+        print(f"    {text_[:120]}{'…' if len(text_) > 120 else ''}")
+        if h.asset_ids:
+            print(f"    素材: {list(h.asset_ids)}")
+
+    if len(usable) < len(hits):
+        print(f"\n  （另有 {len(hits) - len(usable)} 条因相似度过低被滤除）")
+    print()
+    return 0
+
+
 # ---------------------------------------------------------------- reset
 
 
@@ -468,6 +603,26 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("coverage", help="知识覆盖度矩阵")
     s.add_argument("--limit", type=int, default=20)
     s.set_defaults(func=cmd_coverage)
+
+    s = sub.add_parser("index", help="把已审核知识向量化写入索引")
+    s.add_argument("--embedding", default="dashscope",
+                   help="向量化后端：dashscope（走 API，默认）或 local（本地 bge-m3）")
+    s.add_argument("--limit", type=int, default=5000)
+    s.add_argument("--batch-size", type=int, default=25)
+    s.add_argument("--rebuild", action="store_true",
+                   help="全量重建，而非只处理 pending/stale")
+    s.set_defaults(func=cmd_index)
+
+    s = sub.add_parser("search", help="检索调试台")
+    s.add_argument("query", help="要检索的问题")
+    s.add_argument("--embedding", default="dashscope")
+    s.add_argument("--top-k", type=int, default=5)
+    s.add_argument("--product-id", type=int, help="按商品收窄")
+    s.add_argument("--category-id", type=int, help="按类目收窄")
+    s.add_argument("--min-similarity", type=float, default=0.35,
+                   help="余弦相似度下限，低于此值视为无命中。"
+                        "本地实现无 rerank，故比 docs/04 的 0.5 宽松")
+    s.set_defaults(func=cmd_search)
 
     s = sub.add_parser("reset", help="清空派生数据，保留 ODS 以便重新清洗")
     s.add_argument("--yes", action="store_true", help="确认执行（不加只做预览）")
