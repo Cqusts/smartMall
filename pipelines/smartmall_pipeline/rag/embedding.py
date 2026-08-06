@@ -26,9 +26,15 @@ DIM = 1024
 class EmbeddingProvider(Protocol):
     name: str
     dim: int
+    max_batch: int
+    """单次调用的条数上限。由实现方声明，调用方不该自己猜——
+    猜错的后果是跑到一半被服务端拒绝（HTTP 400）。"""
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """批量向量化。返回值必须已 L2 归一化，使内积等价于余弦相似度。"""
+        """批量向量化。返回值必须已 L2 归一化，使内积等价于余弦相似度。
+
+        实现方负责按 :attr:`max_batch` 内部分批，调用方可以传任意长度。
+        """
         ...
 
 
@@ -55,8 +61,9 @@ class DashScopeEmbedding:
     name = "dashscope/text-embedding-v3"
     dim = DIM
 
-    #: 官方限制单次最多 25 条
-    BATCH_SIZE = 25
+    #: DashScope 对 text-embedding-v3 的硬限制。
+    #: 超过会直接 400：``batch size is invalid, it should not be larger than 10``。
+    max_batch = 10
 
     def __init__(
         self,
@@ -64,7 +71,10 @@ class DashScopeEmbedding:
         base_url: str | None = None,
         model: str = "text-embedding-v3",
         timeout: float = 60.0,
+        max_batch: int | None = None,
     ) -> None:
+        if max_batch is not None:
+            self.max_batch = max_batch
         self.api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
         self.base_url = (
             base_url
@@ -86,16 +96,27 @@ class DashScopeEmbedding:
 
         out: list[list[float]] = []
         with httpx.Client(timeout=self.timeout) as client:
-            for i in range(0, len(texts), self.BATCH_SIZE):
-                batch = list(texts[i : i + self.BATCH_SIZE])
+            for i in range(0, len(texts), self.max_batch):
+                batch = list(texts[i : i + self.max_batch])
                 resp = client.post(
                     f"{self.base_url}/embeddings",
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     json={"model": self.model, "input": batch, "dimensions": self.dim},
                 )
                 if resp.status_code != 200:
+                    detail = resp.text[:300]
+                    hint = ""
+                    if "batch size" in detail:
+                        hint = (
+                            f"\n  当前批次 {len(batch)} 条超过服务端上限，"
+                            f"用 --batch-size 调小（该模型上限 {self.max_batch}）"
+                        )
+                    elif resp.status_code in (401, 403):
+                        hint = "\n  API Key 无效或未开通该模型，检查 DASHSCOPE_API_KEY"
+                    elif resp.status_code == 429:
+                        hint = "\n  触发限流，稍后重试；重跑会从断点继续"
                     raise EmbeddingError(
-                        f"向量化失败 HTTP {resp.status_code}: {resp.text[:200]}"
+                        f"向量化失败 HTTP {resp.status_code}: {detail}{hint}"
                     )
                 data = resp.json().get("data") or []
                 if len(data) != len(batch):
@@ -116,6 +137,7 @@ class LocalBgeEmbedding:
 
     name = "local/bge-m3"
     dim = DIM
+    max_batch = 64  # 本地无服务端限制，受显存/内存约束
 
     def __init__(self, model_path: str | None = None, batch_size: int = 16) -> None:
         self.model_path = model_path or os.environ.get(

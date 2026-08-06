@@ -364,7 +364,9 @@ def cmd_index(args: argparse.Namespace) -> int:
     ]
 
     store = LocalVectorStore(engine=repo.engine)
-    batch = args.batch_size
+    # 批次上限由 provider 声明——调用方猜错的后果是跑到一半被服务端 400
+    batch = args.batch_size or getattr(provider, "max_batch", 10)
+    print(f"  批次大小 {batch}")
     done = 0
     for i in range(0, len(payload), batch):
         chunk = payload[i : i + batch]
@@ -608,7 +610,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--embedding", default="dashscope",
                    help="向量化后端：dashscope（走 API，默认）或 local（本地 bge-m3）")
     s.add_argument("--limit", type=int, default=5000)
-    s.add_argument("--batch-size", type=int, default=25)
+    s.add_argument("--batch-size", type=int, default=None,
+                   help="单批条数；默认取所选后端声明的上限")
     s.add_argument("--rebuild", action="store_true",
                    help="全量重建，而非只处理 pending/stale")
     s.set_defaults(func=cmd_index)

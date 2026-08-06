@@ -241,3 +241,80 @@ class TestHybridSearch:
     def test_source_marked_fused(self, store):
         hits = store.search("针织衫", l2_normalize([1.0, 0.0, 0.0]))
         assert all(h.source == "fused" for h in hits)
+
+
+# ---------------------------------------------------------------- 批次契约
+
+
+class TestEmbeddingBatching:
+    """批次上限由 provider 声明，调用方不该自己猜。
+
+    猜错的后果是跑到一半被服务端 400 拒绝——DashScope 对
+    text-embedding-v3 的上限是 10，曾误设为 25 导致向量化全量失败。
+    """
+
+    def _client(self, monkeypatch, recorder: list[int]):
+        import httpx
+
+        from smartmall_pipeline.rag import embedding as emb
+
+        class _Resp:
+            status_code = 200
+
+            def __init__(self, n: int) -> None:
+                self._n = n
+
+            def json(self):
+                return {
+                    "data": [
+                        {"index": i, "embedding": [1.0] + [0.0] * (emb.DIM - 1)}
+                        for i in range(self._n)
+                    ]
+                }
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, url, headers=None, json=None):
+                recorder.append(len(json["input"]))
+                return _Resp(len(json["input"]))
+
+        monkeypatch.setattr(httpx, "Client", lambda **kw: _Client())
+
+    def test_dashscope_limit_is_ten(self):
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        assert DashScopeEmbedding.max_batch <= 10, (
+            "DashScope text-embedding-v3 单次最多 10 条，超过直接 400"
+        )
+
+    def test_splits_into_allowed_batches(self, monkeypatch):
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        sizes: list[int] = []
+        self._client(monkeypatch, sizes)
+        provider = DashScopeEmbedding(api_key="stub")
+        provider.embed([f"文本{i}" for i in range(23)])
+
+        assert sizes == [10, 10, 3]
+        assert all(n <= provider.max_batch for n in sizes)
+
+    def test_returns_one_vector_per_input(self, monkeypatch):
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        self._client(monkeypatch, [])
+        provider = DashScopeEmbedding(api_key="stub")
+        assert len(provider.embed([f"文本{i}" for i in range(23)])) == 23
+
+    def test_missing_api_key_gives_actionable_error(self, monkeypatch):
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding, EmbeddingError
+
+        monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+        with pytest.raises(EmbeddingError) as exc:
+            DashScopeEmbedding()
+        assert "bailian" in str(exc.value)          # 给出申请地址
+        assert "--embedding local" in str(exc.value)  # 给出替代方案
