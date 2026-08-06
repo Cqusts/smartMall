@@ -267,6 +267,75 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- reset
+
+
+# 派生数据：全部可以从 ODS 重新算出来，因此清空是安全的。
+# 顺序有讲究——先清引用方再清被引用方。
+DERIVED_TABLES = [
+    "knowledge_item",
+    "sft_sample",
+    "ods_process_log",
+    "dwd_dialogue_turn",
+    "dwd_dialogue_session",
+    "dwd_clip_segment",
+    "ds_job",
+    "dataset_version",
+]
+
+
+def cmd_reset(args: argparse.Namespace) -> int:
+    """清空派生数据，让 ODS 可以重新清洗。
+
+    这条命令是「ODS 只增不改」这条原则的兑现方式：原始数据永远留着，
+    所以清洗规则改了、类目映射修了、模型换了，都可以把派生结果丢掉重算，
+    而不需要重新采集数据。
+
+    默认只清派生层；``--include-ods`` 才会连原始数据一起删。
+    """
+    from sqlalchemy import text
+
+    repo = DwsRepository.from_env()
+    tables = list(DERIVED_TABLES)
+    if args.include_ods:
+        tables += ["ods_raw_dialogue", "ods_raw_asset", "ods_raw_clip", "ods_raw_doc"]
+
+    print(f"==> 目标库 {_env_summary()}")
+    with repo.engine.connect() as conn:
+        counts = {
+            t: conn.execute(text(f"SELECT COUNT(*) FROM {t}")).scalar() for t in tables
+        }
+
+    nonempty = {t: n for t, n in counts.items() if n}
+    if not nonempty:
+        print("  所有目标表已是空的，无需操作")
+        return 0
+
+    print("  将清空：")
+    for t, n in nonempty.items():
+        print(f"    {t:<24} {n:>8} 行")
+
+    if args.include_ods:
+        print("\n  ⚠ --include-ods 会删掉原始数据，删了就只能重新采集")
+
+    if not args.yes:
+        print("\n  这是不可逆操作。确认无误后加 --yes 重新执行。")
+        return 1
+
+    with repo.engine.begin() as conn:
+        conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+        for t in tables:
+            conn.execute(text(f"TRUNCATE TABLE {t}"))
+        conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+
+    print(f"\n✅ 已清空 {len(tables)} 张表")
+    if not args.include_ods:
+        with repo.engine.connect() as conn:
+            n = conn.execute(text("SELECT COUNT(*) FROM ods_raw_dialogue")).scalar()
+        print(f"   ODS 保留 {n} 条原始对话，直接跑 `clean` 即可重新清洗")
+    return 0
+
+
 # ---------------------------------------------------------------- publish
 
 
@@ -349,6 +418,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--limit", type=int, default=20)
     s.set_defaults(func=cmd_coverage)
 
+    s = sub.add_parser("reset", help="清空派生数据，保留 ODS 以便重新清洗")
+    s.add_argument("--yes", action="store_true", help="确认执行（不加只做预览）")
+    s.add_argument("--include-ods", action="store_true",
+                   help="连原始数据一起删（谨慎：删了只能重新采集）")
+    s.set_defaults(func=cmd_reset)
+
     s = sub.add_parser("publish", help="发布数据资产版本")
     s.add_argument("--version", required=True, help="如 kb-v1")
     s.add_argument("--snapshot-dir", default="./snapshots")
@@ -366,6 +441,37 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\n已中断")
         return 130
+    except Exception as exc:  # noqa: BLE001
+        # 数据库连不上是最常见的失败，甩一屏 traceback 对使用者毫无帮助。
+        # 只有真正意外的异常才保留堆栈。
+        if _is_connection_error(exc):
+            print(f"\n✗ 连接数据库失败：{_root_cause(exc)}")
+            print(f"  当前配置：{_env_summary()}")
+            print("\n  排查方向：")
+            print("    · MySQL 服务是否启动")
+            print("    · MYSQL_USER / MYSQL_PASSWORD 是否与实际一致")
+            print("    · 该用户是否有这个库的权限")
+            print("\n  先跑 `check` 可以一次性验证连通性与表结构。")
+            return 1
+        raise
+
+
+def _root_cause(exc: BaseException) -> str:
+    cause = exc
+    while cause.__cause__ is not None:
+        cause = cause.__cause__
+    return str(cause).strip() or type(cause).__name__
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    names = set()
+    cur: BaseException | None = exc
+    while cur is not None:
+        names.add(type(cur).__name__)
+        cur = cur.__cause__
+    return bool(
+        names & {"OperationalError", "ConnectionRefusedError", "InterfaceError"}
+    )
 
 
 if __name__ == "__main__":
