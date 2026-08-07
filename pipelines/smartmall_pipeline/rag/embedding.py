@@ -19,7 +19,10 @@ import os
 from typing import Protocol, Sequence, runtime_checkable
 
 DIM = 1024
-"""bge-m3 与 DashScope text-embedding-v3 都是 1024 维，可互换。"""
+"""bge-m3 与百炼 text-embedding-v3/v4 都支持 1024 维，可互换。
+
+v4 最高支持 2048 维，但换维度要重建整个索引，收益不抵成本——
+1024 维已经是检索质量与存储开销的合理平衡点。"""
 
 
 @runtime_checkable
@@ -53,35 +56,54 @@ def l2_normalize(vec: Sequence[float]) -> list[float]:
 
 
 class DashScopeEmbedding:
-    """通义千问 text-embedding-v3，走 OpenAI 兼容接口。
+    """百炼通用文本向量，走 OpenAI 兼容接口。
 
     也可指向 ai-gateway（LiteLLM）统一记账；没起网关时直连 DashScope。
+
+    百炼的免费额度**按模型独立发放，互不相通**——聊天模型额度用尽
+    并不影响向量模型，所以 clean 走别家、index 仍走百炼是可行的组合。
     """
 
-    name = "dashscope/text-embedding-v3"
-    dim = DIM
+    #: 各模型的单次请求条数上限。超过直接 400
+    #: （``batch size is invalid, it should not be larger than 10``）。
+    #: 由实现方声明而不是让调用方猜，是因为猜错要跑到一半才发现。
+    MODEL_BATCH_LIMITS = {
+        "text-embedding-v4": 10,
+        "text-embedding-v3": 10,
+        "text-embedding-v2": 25,
+        "text-embedding-v1": 25,
+        "qwen3.7-text-embedding": 20,
+    }
+    DEFAULT_MODEL = "text-embedding-v4"
+    """v4 与 v3 同价，但免费额度翻倍（100 万 vs 50 万 token）、
+    多语言更强，且同样支持 1024 维——没有理由继续用 v3。"""
 
-    #: DashScope 对 text-embedding-v3 的硬限制。
-    #: 超过会直接 400：``batch size is invalid, it should not be larger than 10``。
-    max_batch = 10
+    dim = DIM
 
     def __init__(
         self,
         api_key: str | None = None,
         base_url: str | None = None,
-        model: str = "text-embedding-v3",
+        model: str | None = None,
         timeout: float = 60.0,
         max_batch: int | None = None,
     ) -> None:
-        if max_batch is not None:
-            self.max_batch = max_batch
+        self.model = model or os.environ.get("EMBEDDING_MODEL") or self.DEFAULT_MODEL
+        # 模型名进 name：LocalVectorStore 靠它检测混用。
+        # 写死成常量的话，换了模型也照样往同一个索引里塞，
+        # 而不同模型的向量放在一起，相似度就没有意义了。
+        self.name = f"dashscope/{self.model}"
+        self.max_batch = (
+            max_batch
+            if max_batch is not None
+            else self.MODEL_BATCH_LIMITS.get(self.model, 10)
+        )
         self.api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
         self.base_url = (
             base_url
             or os.environ.get("EMBEDDING_BASE_URL")
             or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         ).rstrip("/")
-        self.model = model
         self.timeout = timeout
 
         if not self.api_key:
@@ -112,7 +134,13 @@ class DashScopeEmbedding:
                             f"用 --batch-size 调小（该模型上限 {self.max_batch}）"
                         )
                     elif resp.status_code in (401, 403):
-                        hint = "\n  API Key 无效或未开通该模型，检查 DASHSCOPE_API_KEY"
+                        hint = (
+                            "\n  API Key 无效、未开通该模型，或该模型免费额度已用尽。"
+                            "\n  百炼的免费额度按模型独立发放：聊天模型用尽不影响向量模型，"
+                            "\n  反之亦然。到控制台确认这个模型自己的余额。"
+                            "\n  换模型：EMBEDDING_MODEL=text-embedding-v3"
+                            "\n  不想付费：--embedding local（本地 bge-m3）"
+                        )
                     elif resp.status_code == 429:
                         hint = "\n  触发限流，稍后重试；重跑会从断点继续"
                     raise EmbeddingError(

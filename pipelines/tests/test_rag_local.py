@@ -285,12 +285,65 @@ class TestEmbeddingBatching:
 
         monkeypatch.setattr(httpx, "Client", lambda **kw: _Client())
 
-    def test_dashscope_limit_is_ten(self):
+    def test_batch_limit_is_declared_per_model(self, monkeypatch):
+        """条数上限随模型而变，不能写死一个常量。
+
+        v4/v3 是 10，v2 是 25——按 v2 的上限去调 v4 会 400，
+        按 v4 的上限去调 v2 则白白多发两倍请求。
+        """
         from smartmall_pipeline.rag.embedding import DashScopeEmbedding
 
-        assert DashScopeEmbedding.max_batch <= 10, (
-            "DashScope text-embedding-v3 单次最多 10 条，超过直接 400"
-        )
+        monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+        assert DashScopeEmbedding(api_key="stub").max_batch <= 10
+        assert DashScopeEmbedding(api_key="stub", model="text-embedding-v2").max_batch == 25
+
+    def test_unknown_model_falls_back_to_safest_limit(self, monkeypatch):
+        """没见过的模型宁可多发几次请求，也不要撞 400。"""
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+        p = DashScopeEmbedding(api_key="stub", model="text-embedding-v9")
+        assert p.max_batch <= 10
+
+    def test_provider_name_carries_the_model(self, monkeypatch):
+        """换了模型，索引必须能看出来。
+
+        LocalVectorStore 靠 provider 名检测混用。名字写死成常量的话，
+        v3 和 v4 的向量会被塞进同一个索引——维度一样、报错也不会有，
+        但相似度从此不可信。
+        """
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+        v4 = DashScopeEmbedding(api_key="stub", model="text-embedding-v4")
+        v3 = DashScopeEmbedding(api_key="stub", model="text-embedding-v3")
+        assert v4.name != v3.name
+        assert "text-embedding-v4" in v4.name
+
+    def test_model_can_be_set_by_env(self, monkeypatch):
+        """换模型不该改代码——聊天和向量的额度是分开的，会需要单独切。"""
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-v2")
+        p = DashScopeEmbedding(api_key="stub")
+        assert p.model == "text-embedding-v2"
+        assert p.max_batch == 25
+
+    def test_explicit_model_beats_env(self, monkeypatch):
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-v2")
+        assert DashScopeEmbedding(
+            api_key="stub", model="text-embedding-v4"
+        ).model == "text-embedding-v4"
+
+    def test_dim_stays_1024_across_models(self, monkeypatch):
+        """维度变了就得重建整个索引，不能因为换模型悄悄改掉。"""
+        from smartmall_pipeline.rag.embedding import DIM, DashScopeEmbedding
+
+        monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+        for m in ("text-embedding-v3", "text-embedding-v4"):
+            assert DashScopeEmbedding(api_key="stub", model=m).dim == DIM == 1024
 
     def test_splits_into_allowed_batches(self, monkeypatch):
         from smartmall_pipeline.rag.embedding import DashScopeEmbedding
