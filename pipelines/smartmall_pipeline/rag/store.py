@@ -290,7 +290,15 @@ class LocalVectorStore:
 
 
 def embed_query(provider: EmbeddingProvider, query: str) -> list[float]:
-    vecs = provider.embed([query])
-    if not vecs or len(vecs[0]) != DIM:
+    """把查询转成向量。
+
+    优先用 provider 的 :meth:`~...EmbeddingProvider.embed_query`——
+    Qwen3-Embedding 这类非对称模型对"待检索的问题"和"库里的文档"
+    产出不同的向量，用错一侧会白白损失召回。
+    不支持的实现（如 bge-m3 dense）退回 ``embed``，行为与从前一致。
+    """
+    fn = getattr(provider, "embed_query", None)
+    vec = [fn(query)] if callable(fn) else provider.embed([query])
+    if not vec or len(vec[0]) != DIM:
         raise RuntimeError(f"向量维度异常：期望 {DIM}")
-    return vecs[0]
+    return vec[0]

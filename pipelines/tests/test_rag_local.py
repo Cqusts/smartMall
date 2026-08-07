@@ -253,24 +253,34 @@ class TestEmbeddingBatching:
     text-embedding-v3 的上限是 10，曾误设为 25 导致向量化全量失败。
     """
 
-    def _client(self, monkeypatch, recorder: list[int]):
+    def _client(self, monkeypatch, recorder: list[int], sent: list | None = None):
+        """按请求体形状自动应答两种协议。
+
+        原生接口收 ``{"input": {"texts": [...]}}`` 回 ``output.embeddings``；
+        OpenAI 兼容接口收 ``{"input": [...]}`` 回 ``data``。桩必须两种都认，
+        否则测试只能证明其中一条路是通的。
+        """
         import httpx
 
         from smartmall_pipeline.rag import embedding as emb
 
+        def _vec():
+            return [1.0] + [0.0] * (emb.DIM - 1)
+
         class _Resp:
             status_code = 200
 
-            def __init__(self, n: int) -> None:
-                self._n = n
+            def __init__(self, n: int, native: bool) -> None:
+                self._n, self._native = n, native
 
             def json(self):
-                return {
-                    "data": [
-                        {"index": i, "embedding": [1.0] + [0.0] * (emb.DIM - 1)}
-                        for i in range(self._n)
-                    ]
-                }
+                if self._native:
+                    return {"output": {"embeddings": [
+                        {"text_index": i, "embedding": _vec()} for i in range(self._n)
+                    ]}}
+                return {"data": [
+                    {"index": i, "embedding": _vec()} for i in range(self._n)
+                ]}
 
         class _Client:
             def __enter__(self):
@@ -280,8 +290,12 @@ class TestEmbeddingBatching:
                 return False
 
             def post(self, url, headers=None, json=None):
-                recorder.append(len(json["input"]))
-                return _Resp(len(json["input"]))
+                if sent is not None:
+                    sent.append((url, json))
+                native = isinstance(json["input"], dict)
+                n = len(json["input"]["texts"]) if native else len(json["input"])
+                recorder.append(n)
+                return _Resp(n, native)
 
         monkeypatch.setattr(httpx, "Client", lambda **kw: _Client())
 
@@ -336,6 +350,106 @@ class TestEmbeddingBatching:
         assert DashScopeEmbedding(
             api_key="stub", model="text-embedding-v4"
         ).model == "text-embedding-v4"
+
+    def test_query_and_document_are_embedded_differently(self, monkeypatch):
+        """非对称模型的核心：查询侧和文档侧要打不同的 text_type。
+
+        Qwen3-Embedding 系列专门区分"待检索的问题"与"库里的文档"。
+        两侧都按 document 去编码，等于花了钱却用不上这个模型的长处。
+        """
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+        monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
+        sent: list = []
+        self._client(monkeypatch, [], sent)
+
+        p = DashScopeEmbedding(api_key="stub", model="qwen3.7-text-embedding")
+        p.embed(["库里的一条知识"])
+        p.embed_query("这件能机洗吗")
+
+        assert sent[0][1]["parameters"]["text_type"] == "document"
+        assert sent[1][1]["parameters"]["text_type"] == "query"
+
+    def test_native_endpoint_used_when_talking_to_dashscope(self, monkeypatch):
+        """只有原生接口认 text_type，直连时必须走它。"""
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
+        sent: list = []
+        self._client(monkeypatch, [], sent)
+        DashScopeEmbedding(api_key="stub").embed(["x"])
+
+        assert sent[0][0] == DashScopeEmbedding.NATIVE_URL
+        assert sent[0][1]["parameters"]["dimension"] == 1024  # 原生是单数
+
+    def test_gateway_routing_falls_back_to_openai_shape(self, monkeypatch):
+        """指到网关时只能说 OpenAI 兼容协议，不能硬发原生请求体。"""
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        sent: list = []
+        self._client(monkeypatch, [], sent)
+        p = DashScopeEmbedding(api_key="stub", base_url="http://gw:9000/v1")
+        p.embed(["x"])
+
+        assert not p.native
+        assert sent[0][0] == "http://gw:9000/v1/embeddings"
+        assert sent[0][1]["input"] == ["x"]        # 兼容协议是扁平数组
+        assert "dimensions" in sent[0][1]          # 兼容协议是复数
+
+    def test_query_still_works_without_text_type_support(self, monkeypatch):
+        """走网关时拿不到 text_type，但不能因此报错——降级即可。"""
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        self._client(monkeypatch, [])
+        p = DashScopeEmbedding(api_key="stub", base_url="http://gw:9000/v1")
+        assert len(p.embed_query("这件能机洗吗")) == 1024
+
+    def test_instruct_only_attached_to_queries(self, monkeypatch):
+        """instruct 只在 query 侧生效，挂到文档侧会被接口拒绝。"""
+        from smartmall_pipeline.rag.embedding import DashScopeEmbedding
+
+        monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
+        sent: list = []
+        self._client(monkeypatch, [], sent)
+        p = DashScopeEmbedding(api_key="stub", query_instruct="Retrieve FAQ answers")
+        p.embed(["文档"])
+        p.embed_query("问题")
+
+        assert "instruct" not in sent[0][1]["parameters"]
+        assert sent[1][1]["parameters"]["instruct"] == "Retrieve FAQ answers"
+
+    def test_store_embed_query_prefers_the_query_path(self, monkeypatch):
+        """检索入口必须真的走 embed_query，否则上面这些都白做。"""
+        from smartmall_pipeline.rag.embedding import DIM
+        from smartmall_pipeline.rag.store import embed_query
+
+        class _Asymmetric:
+            name, dim, max_batch = "stub", DIM, 10
+            def __init__(self):
+                self.calls = []
+            def embed(self, texts):
+                self.calls.append("document")
+                return [[1.0] + [0.0] * (DIM - 1) for _ in texts]
+            def embed_query(self, text):
+                self.calls.append("query")
+                return [1.0] + [0.0] * (DIM - 1)
+
+        p = _Asymmetric()
+        embed_query(p, "这件能机洗吗")
+        assert p.calls == ["query"]
+
+    def test_store_falls_back_for_symmetric_providers(self):
+        """bge-m3 没有 embed_query，退回 embed，行为与从前一致。"""
+        from smartmall_pipeline.rag.embedding import DIM
+        from smartmall_pipeline.rag.store import embed_query
+
+        class _Symmetric:
+            name, dim, max_batch = "stub", DIM, 10
+            def embed(self, texts):
+                return [[1.0] + [0.0] * (DIM - 1) for _ in texts]
+
+        assert len(embed_query(_Symmetric(), "问题")) == DIM
 
     def test_dim_stays_1024_across_models(self, monkeypatch):
         """维度变了就得重建整个索引，不能因为换模型悄悄改掉。"""

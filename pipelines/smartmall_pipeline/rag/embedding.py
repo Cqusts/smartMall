@@ -34,9 +34,19 @@ class EmbeddingProvider(Protocol):
     猜错的后果是跑到一半被服务端拒绝（HTTP 400）。"""
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """批量向量化。返回值必须已 L2 归一化，使内积等价于余弦相似度。
+        """批量向量化**文档**。返回值必须已 L2 归一化，使内积等价于余弦相似度。
 
         实现方负责按 :attr:`max_batch` 内部分批，调用方可以传任意长度。
+        """
+        ...
+
+    def embed_query(self, text: str) -> list[float]:
+        """向量化**查询**。可选方法，用 :func:`embed_one_query` 调用。
+
+        Qwen3-Embedding 这类模型是非对称的：同一句话作为"待检索的问题"
+        和作为"被检索的文档"，应当产出不同的向量。实现方支持这种区分时
+        就实现本方法；不支持的（如 bge-m3 dense）不必实现，
+        :func:`embed_one_query` 会退回 :meth:`embed`。
         """
         ...
 
@@ -78,6 +88,12 @@ class DashScopeEmbedding:
     """v4 与 v3 同价，但免费额度翻倍（100 万 vs 50 万 token）、
     多语言更强，且同样支持 1024 维——没有理由继续用 v3。"""
 
+    NATIVE_URL = (
+        "https://dashscope.aliyuncs.com"
+        "/api/v1/services/embeddings/text-embedding/text-embedding"
+    )
+    """原生接口。只有它支持 ``text_type``——OpenAI 兼容接口没有这个位置。"""
+
     dim = DIM
 
     def __init__(
@@ -87,6 +103,8 @@ class DashScopeEmbedding:
         model: str | None = None,
         timeout: float = 60.0,
         max_batch: int | None = None,
+        native: bool | None = None,
+        query_instruct: str | None = None,
     ) -> None:
         self.model = model or os.environ.get("EMBEDDING_MODEL") or self.DEFAULT_MODEL
         # 模型名进 name：LocalVectorStore 靠它检测混用。
@@ -99,11 +117,17 @@ class DashScopeEmbedding:
             else self.MODEL_BATCH_LIMITS.get(self.model, 10)
         )
         self.api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
+        routed = base_url or os.environ.get("EMBEDDING_BASE_URL")
         self.base_url = (
-            base_url
-            or os.environ.get("EMBEDDING_BASE_URL")
-            or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            routed or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         ).rstrip("/")
+        # 指向网关（LiteLLM）时只能走 OpenAI 兼容协议；直连百炼时走原生，
+        # 因为 text_type 只有原生接口认。这个默认规则不用记：
+        # 配了 base_url 就是在做路由，没配就是直连。
+        self.native = native if native is not None else routed is None
+        self.query_instruct = query_instruct or os.environ.get(
+            "EMBEDDING_QUERY_INSTRUCT"
+        )
         self.timeout = timeout
 
         if not self.api_key:
@@ -114,16 +138,65 @@ class DashScopeEmbedding:
             )
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        return self._embed(texts, text_type="document")
+
+    def embed_query(self, text: str) -> list[float]:
+        """按"查询"语义向量化。
+
+        Qwen3-Embedding 系列是非对称模型——"这件能机洗吗"作为待检索的
+        问题、和作为库里的一条知识，应当产出不同的向量。区分了才用得上
+        这个模型的主要优势。
+
+        只有原生接口支持 ``text_type``；走 OpenAI 兼容模式时它会被忽略，
+        退化成与文档同样的向量（仍然可用，只是少了这份增益）。
+        """
+        return self._embed([text], text_type="query")[0]
+
+    def _payload(self, batch: list[str], text_type: str) -> dict:
+        if not self.native:
+            # OpenAI 兼容接口没有 text_type 这个位置，只能不带
+            return {"model": self.model, "input": batch, "dimensions": self.dim}
+        params: dict[str, object] = {
+            "dimension": self.dim,      # 原生接口是单数 dimension
+            "text_type": text_type,
+            "output_type": "dense",
+        }
+        # instruct 只在 query 侧生效，且必须是英文
+        if text_type == "query" and self.query_instruct:
+            params["instruct"] = self.query_instruct
+        return {"model": self.model, "input": {"texts": batch}, "parameters": params}
+
+    def _vectors(self, body: dict, expected: int) -> list[list[float]]:
+        """从两种响应结构里取出向量，按输入顺序还原。
+
+        接口不保证返回顺序，错位会让向量张冠李戴——症状是检索结果
+        看起来"有点不对"，但不会报错，极难发现。
+        """
+        if self.native:
+            data = (body.get("output") or {}).get("embeddings") or []
+            key = "text_index"
+        else:
+            data = body.get("data") or []
+            key = "index"
+        if len(data) != expected:
+            raise EmbeddingError(f"返回条数不匹配：请求 {expected}，返回 {len(data)}")
+        return [
+            l2_normalize(item["embedding"])
+            for item in sorted(data, key=lambda d: d.get(key, 0))
+        ]
+
+    def _embed(self, texts: Sequence[str], *, text_type: str) -> list[list[float]]:
         import httpx
 
+        url = self.NATIVE_URL if self.native else f"{self.base_url}/embeddings"
         out: list[list[float]] = []
         with httpx.Client(timeout=self.timeout) as client:
             for i in range(0, len(texts), self.max_batch):
                 batch = list(texts[i : i + self.max_batch])
                 resp = client.post(
-                    f"{self.base_url}/embeddings",
+                    url,
                     headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={"model": self.model, "input": batch, "dimensions": self.dim},
+                    json=self._payload(batch, text_type),
                 )
                 if resp.status_code != 200:
                     detail = resp.text[:300]
@@ -146,14 +219,7 @@ class DashScopeEmbedding:
                     raise EmbeddingError(
                         f"向量化失败 HTTP {resp.status_code}: {detail}{hint}"
                     )
-                data = resp.json().get("data") or []
-                if len(data) != len(batch):
-                    raise EmbeddingError(
-                        f"返回条数不匹配：请求 {len(batch)}，返回 {len(data)}"
-                    )
-                # 按 index 排序——接口不保证顺序，错位会让向量张冠李戴
-                for item in sorted(data, key=lambda d: d.get("index", 0)):
-                    out.append(l2_normalize(item["embedding"]))
+                out.extend(self._vectors(resp.json(), len(batch)))
         return out
 
 
