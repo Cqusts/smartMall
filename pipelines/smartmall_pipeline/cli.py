@@ -28,7 +28,7 @@ from . import publish as publish_mod
 from .gates import gate3_model
 from .ingest import synthetic
 from .models import KnowledgeType
-from .orchestrator import run_pipeline
+from .orchestrator import PipelineConfig, run_pipeline
 from .repository import DwsRepository, OdsRepository
 
 EXPECTED_TABLES = 31
@@ -170,6 +170,26 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- clean
 
 
+def _gate3_config_from_env() -> gate3_model.Gate3Config:
+    """允许用环境变量覆盖关卡③的模型名。
+
+    默认值是网关里的别名（chat-light / chat-default），直连时由各 client
+    的别名表翻译成厂商真名。但别名表只覆盖了 DashScope——换成 DeepSeek、
+    Kimi、智谱或本地 vLLM 时它翻译不出来，硬编码就成了拦路虎。
+    留出覆盖口，换厂商不必改代码。
+    """
+    cfg = gate3_model.Gate3Config()
+    for env_key, attr in (
+        ("SMARTMALL_TRIAGE_MODEL", "triage_model"),
+        ("SMARTMALL_EXTRACT_MODEL", "extract_model"),
+        ("SMARTMALL_STYLE_MODEL", "style_model"),
+    ):
+        value = os.environ.get(env_key, "").strip()
+        if value:
+            setattr(cfg, attr, value)
+    return cfg
+
+
 def cmd_clean(args: argparse.Namespace) -> int:
     """从 ODS 拉取未处理对话，跑四道关卡，产出写回 DWS。"""
     ods = OdsRepository.from_env()
@@ -190,6 +210,21 @@ def cmd_clean(args: argparse.Namespace) -> int:
         elif backend == "dashscope":
             print("  直连 DashScope（未经网关，无统一成本记账）")
             llm = gate3_model.DashScopeLlmClient()
+        elif backend == "openai":
+            base = os.environ.get("SMARTMALL_LLM_BASE_URL", "").strip()
+            if not base:
+                print("\n✗ --llm openai 需要指定服务地址。在 deploy/.env 里加：")
+                print("    SMARTMALL_LLM_BASE_URL=https://api.deepseek.com")
+                print("    SMARTMALL_LLM_API_KEY=sk-xxx")
+                print("    SMARTMALL_TRIAGE_MODEL=deepseek-chat")
+                print("    SMARTMALL_EXTRACT_MODEL=deepseek-chat")
+                print("    SMARTMALL_STYLE_MODEL=deepseek-chat")
+                return 1
+            print(f"  直连 OpenAI 兼容服务：{base}")
+            llm = gate3_model.LiteLlmClient(
+                base_url=base,
+                api_key=os.environ.get("SMARTMALL_LLM_API_KEY", ""),
+            )
         else:
             base = os.environ.get("LITELLM_BASE_URL", "http://localhost:9000")
             print(f"  经 ai-gateway 调用模型：{base}")
@@ -199,6 +234,11 @@ def cmd_clean(args: argparse.Namespace) -> int:
     except gate3_model.LlmError as exc:
         print(f"\n✗ {exc}")
         return 1
+
+    cfg3 = _gate3_config_from_env()
+    if backend != "fake":
+        print(f"  模型：粗筛 {cfg3.triage_model} / 抽取 {cfg3.extract_model}"
+              f" / 风格 {cfg3.style_model}")
 
     # 商品→类目映射：知识条目的 category_id 靠它填，
     # 没有它覆盖度矩阵永远是 0%，检索也无法按类目收窄
@@ -216,21 +256,33 @@ def cmd_clean(args: argparse.Namespace) -> int:
     batch_id = f"clean-{datetime.now():%Y%m%d%H%M%S}"
     try:
         out = run_pipeline(
-            dialogues, llm, batch_id=batch_id, product_category=product_category
+            dialogues,
+            llm,
+            batch_id=batch_id,
+            config=PipelineConfig(gate3=cfg3),
+            product_category=product_category,
         )
     except gate3_model.LlmConfigError as exc:
         # 4xx：请求本身有问题，对每条输入都会同样失败，重试无用
         print(f"\n✗ {exc}")
         print("\n  这是「请求被拒绝」而不是「连不上」，重试不会成功。常见原因：")
-        if backend == "dashscope":
+        detail = str(exc)
+        if "Quota" in detail or "quota" in detail or "arrears" in detail:
+            print("    · 额度用尽或账户欠费 —— 这次就是它")
+            print("      百炼控制台 → 费用中心：充值，并关掉「仅使用免费额度」")
+            print("      两件事都要做，只充值不关开关照样 403")
+        elif backend == "dashscope":
             print("    · API Key 无效或没有开通对应模型 → 到百炼控制台确认")
-            print("    · 模型名不对 → DashScopeLlmClient.MODEL_ALIASES 里改")
-            print("    · 账户欠费或未实名 → 控制台会直接返回 4xx")
+            print("    · 模型名不对 → 用 SMARTMALL_TRIAGE_MODEL 等环境变量覆盖")
+        elif backend == "openai":
+            print("    · 模型名与该厂商对不上 → SMARTMALL_*_MODEL 三个变量都要设")
+            print("    · base_url 要写到域名层，不要带 /v1（代码会自己补）")
         else:
             print("    · ai-gateway 的 config.yaml 里没有配这个模型别名")
             print("    · LITELLM_API_KEY 与网关的 master key 不一致")
             print("  先用 --llm dashscope 直连排除网关自身的问题。")
-        print("\n  想先跑通链路不花钱：加 --fake-llm。")
+        print("\n  换个厂商：--llm openai + SMARTMALL_LLM_BASE_URL（见 README）")
+        print("  想先跑通链路不花钱：加 --fake-llm。")
         return 1
     except gate3_model.LlmUnavailableError as exc:
         # 快速失败：连不上模型时不该让几百条一条条超时跑完
@@ -628,9 +680,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fake-llm", action="store_true",
                    help="用假 LLM，不调真实模型、不产生费用")
     s.add_argument("--llm", default="dashscope",
-                   choices=["dashscope", "gateway"],
-                   help="模型通道：dashscope 直连（默认，无需 Docker）"
-                        "或 gateway 经 ai-gateway（有统一记账与降级）")
+                   choices=["dashscope", "openai", "gateway"],
+                   help="模型通道：dashscope 直连（默认，无需 Docker）／"
+                        "openai 任意 OpenAI 兼容服务（DeepSeek、Kimi、本地 vLLM，"
+                        "读 SMARTMALL_LLM_BASE_URL）／"
+                        "gateway 经 ai-gateway（有统一记账与降级）")
     s.add_argument("--items-per-dialogue", type=int, default=2,
                    help="仅 --fake-llm 时有效")
     s.set_defaults(func=cmd_clean)

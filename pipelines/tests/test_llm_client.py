@@ -190,3 +190,51 @@ class TestDashScopeAliases:
         with pytest.raises(g3.LlmError) as exc:
             g3.DashScopeLlmClient()
         assert "--fake-llm" in str(exc.value), "要给出不花钱也能跑通的路径"
+
+
+# ---------------------------------------------------------------- 模型名可替换
+
+
+class TestModelOverride:
+    """换厂商不该需要改代码。
+
+    默认模型名是网关别名，只有 DashScope 的别名表能翻译。额度用尽、
+    厂商涨价、想换本地 vLLM——这些都会发生，而它们都不该逼人去改源码。
+    """
+
+    def test_env_overrides_each_stage(self, monkeypatch):
+        from smartmall_pipeline.cli import _gate3_config_from_env
+
+        monkeypatch.setenv("SMARTMALL_TRIAGE_MODEL", "deepseek-chat")
+        monkeypatch.setenv("SMARTMALL_EXTRACT_MODEL", "deepseek-reasoner")
+        monkeypatch.setenv("SMARTMALL_STYLE_MODEL", "glm-4-flash")
+        cfg = _gate3_config_from_env()
+        assert cfg.triage_model == "deepseek-chat"
+        assert cfg.extract_model == "deepseek-reasoner"
+        assert cfg.style_model == "glm-4-flash"
+
+    def test_unset_keeps_gateway_aliases(self, monkeypatch):
+        from smartmall_pipeline.cli import _gate3_config_from_env
+
+        for k in ("SMARTMALL_TRIAGE_MODEL", "SMARTMALL_EXTRACT_MODEL",
+                  "SMARTMALL_STYLE_MODEL"):
+            monkeypatch.delenv(k, raising=False)
+        cfg = _gate3_config_from_env()
+        assert cfg.triage_model == "chat-light"
+        assert cfg.extract_model == "chat-default"
+
+    def test_blank_env_is_ignored(self, monkeypatch):
+        """.env 里写了空值不该把模型名清空。"""
+        from smartmall_pipeline.cli import _gate3_config_from_env
+
+        monkeypatch.setenv("SMARTMALL_TRIAGE_MODEL", "   ")
+        assert _gate3_config_from_env().triage_model == "chat-light"
+
+    def test_triage_still_uses_the_cheaper_model(self, monkeypatch):
+        """两段式的成本前提：粗筛必须比抽取便宜，别被覆盖搞反。"""
+        from smartmall_pipeline.cli import _gate3_config_from_env
+
+        for k in ("SMARTMALL_TRIAGE_MODEL", "SMARTMALL_EXTRACT_MODEL"):
+            monkeypatch.delenv(k, raising=False)
+        cfg = _gate3_config_from_env()
+        assert cfg.triage_model != cfg.extract_model

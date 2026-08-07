@@ -220,8 +220,30 @@ smartmall-pipeline coverage               # 知识覆盖度矩阵
 smartmall-pipeline publish --version kb-v1
 ```
 
-`--fake-llm` 用假模型跑通链路，不产生 API 费用；去掉它即为真实清洗
-（需先配好 `LITELLM_BASE_URL` 与 `LITELLM_API_KEY`）。
+`--fake-llm` 用假模型跑通链路，不产生 API 费用——但产出的是占位文本，
+只能验证管道，不能当知识库用。真实清洗按下表选一个通道：
+
+| 通道 | 命令 | 需要什么 |
+|---|---|---|
+| 阿里云百炼 | `clean --llm dashscope` | `DASHSCOPE_API_KEY`（默认通道） |
+| 任意 OpenAI 兼容服务 | `clean --llm openai` | `SMARTMALL_LLM_BASE_URL` + `SMARTMALL_LLM_API_KEY` + 三个 `SMARTMALL_*_MODEL` |
+| LiteLLM 网关 | `clean --llm gateway` | Docker 起 `ai-gateway`，统一记账与降级 |
+
+`--llm openai` 接的是**任何** OpenAI 兼容端点——DeepSeek、Kimi、智谱、
+硅基流动、本地 vLLM 都行。模型名三个阶段分开配（粗筛量最大，用便宜的）：
+
+```bash
+export SMARTMALL_LLM_BASE_URL=https://api.deepseek.com
+export SMARTMALL_LLM_API_KEY=sk-xxx
+export SMARTMALL_TRIAGE_MODEL=deepseek-chat    # 粗筛，全量跑
+export SMARTMALL_EXTRACT_MODEL=deepseek-chat   # 抽取，只跑粗筛通过的
+export SMARTMALL_STYLE_MODEL=deepseek-chat
+smartmall-pipeline clean --llm openai --limit 20
+```
+
+先用 `--limit 20` 试水。调用失败一律不会把 ODS 记录标记为已处理，
+修好配置后直接重跑 `clean` 就会接着处理，不会丢数据也不会重复。
 
 Windows PowerShell 用 `$env:MYSQL_HOST="localhost"` 设置环境变量，
-且不支持 `&&`，命令需分行执行。
+且不支持 `&&`，命令需分行执行。也可以把上面这些写进 `deploy/.env`，
+CLI 会自动读取（见 `deploy/.env.example`）。
