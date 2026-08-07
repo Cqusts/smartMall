@@ -223,23 +223,58 @@ class GateStats(BaseModel):
     gate: str
     input_count: int = 0
     output_count: int = 0
-    unit: str = "会话"
-    """处理单元。关卡①②处理「会话」，关卡③把一段会话拆成多条「条目」，
-    单位在此发生变化——漏斗百分比不能跨单位累计，否则会出现
-    "178% 存活率" 这种读不通的数字。"""
+    input_unit: str = "会话"
+    output_unit: str = "会话"
+    """处理单元。关卡①②进出都是「会话」；关卡③把一段会话拆成多条「条目」，
+    进出单位不同——它是换算关卡，不是过滤关卡。
+
+    分成进/出两个字段而不是一个，是因为拿 48 条目除以 20 会话得到的
+    "240% 存活率" 根本不是存活率。换算关卡应该报的是产出倍率。
+    """
     dropped: dict[str, int] = Field(default_factory=dict)
+    drop_units: dict[str, str] = Field(default_factory=dict)
+    """每个淘汰原因对应的单位。关卡③既会整段毙掉会话（判定不通过），
+    也会逐条丢弃抽取结果（置信度过低），两者不能加在一起报一个数。"""
     modified: dict[str, int] = Field(default_factory=dict)
     """按类型统计"被修改"的次数，如 pii_masked、order_no_parameterized"""
 
-    def drop(self, reason: str, n: int = 1) -> None:
+    def drop(self, reason: str, n: int = 1, unit: str | None = None) -> None:
+        """记一次淘汰。
+
+        ``unit`` 默认取 ``input_unit``——淘汰的是流进来的东西。
+        关卡③里逐条丢弃抽取结果时要显式传 "条目"。
+        """
         self.dropped[reason] = self.dropped.get(reason, 0) + n
+        self.drop_units[reason] = unit or self.input_unit
 
     def modify(self, kind: str, n: int = 1) -> None:
         self.modified[kind] = self.modified.get(kind, 0) + n
 
     @property
     def drop_count(self) -> int:
+        """淘汰总数。跨单位时这个数没有意义，展示请用 drop_summary。"""
         return sum(self.dropped.values())
+
+    @property
+    def drops_by_unit(self) -> dict[str, int]:
+        by_unit: dict[str, int] = {}
+        for reason, n in self.dropped.items():
+            u = self.drop_units.get(reason, self.input_unit)
+            by_unit[u] = by_unit.get(u, 0) + n
+        return by_unit
+
+    @property
+    def drop_summary(self) -> str:
+        by_unit = self.drops_by_unit
+        if not by_unit:
+            return "淘汰 0"
+        if len(by_unit) == 1:
+            unit, n = next(iter(by_unit.items()))
+            # 与出口同单位时不必赘述，读者自明
+            return f"淘汰 {n}" if unit == self.output_unit else f"淘汰 {n} {unit}"
+        return "淘汰 " + " + ".join(
+            f"{n} {u}" for u, n in sorted(by_unit.items())
+        )
 
     @property
     def keep_rate(self) -> float:
@@ -251,10 +286,12 @@ class GateStats(BaseModel):
             gate=self.gate,
             input_count=self.input_count + other.input_count,
             output_count=self.output_count + other.output_count,
+            input_unit=self.input_unit,
+            output_unit=self.output_unit,
         )
-        for src in (self.dropped, other.dropped):
-            for k, v in src.items():
-                merged.drop(k, v)
+        for src in (self, other):
+            for k, v in src.dropped.items():
+                merged.drop(k, v, unit=src.drop_units.get(k, src.input_unit))
         for src in (self.modified, other.modified):
             for k, v in src.items():
                 merged.modify(k, v)
@@ -277,16 +314,24 @@ class FunnelReport(BaseModel):
         if not self.stages:
             return "(空)"
         lines = [f"清洗漏斗 batch={self.batch_id}", "=" * 62]
-        # 累计存活率只在同一单位内有意义；单位切换时重置基数
-        base_unit = self.stages[0].unit
+        # 累计存活率只在同一单位内有意义。换算关卡（会话→条目）报产出倍率，
+        # 并把后续关卡的基数换成它的产出——否则 48 条目会被拿去除以 20 会话。
+        base_unit = self.stages[0].input_unit
         base_count = self.stages[0].input_count
         for s in self.stages:
-            if s.unit != base_unit:
-                base_unit, base_count = s.unit, s.input_count
-            pct = s.output_count / base_count * 100 if base_count else 0
+            if s.input_unit != base_unit:
+                base_unit, base_count = s.input_unit, s.input_count
+            if s.output_unit != s.input_unit:
+                ratio = s.output_count / s.input_count if s.input_count else 0
+                metric = f"{ratio:.2f} {s.output_unit}/{s.input_unit}"
+                base_unit, base_count = s.output_unit, s.output_count
+            else:
+                pct = s.output_count / base_count * 100 if base_count else 0
+                metric = f"{pct:.1f}% 存活"
             lines.append(
-                f"{s.gate:<26} {s.input_count:>7} → {s.output_count:>7} {s.unit}"
-                f"  ({pct:5.1f}% 存活, 淘汰 {s.drop_count})"
+                f"{s.gate:<20} {s.input_count:>6} {s.input_unit}"
+                f" → {s.output_count:>6} {s.output_unit}"
+                f"  ({metric}, {s.drop_summary})"
             )
             for reason, n in sorted(s.dropped.items(), key=lambda kv: -kv[1]):
                 lines.append(f"    ✗ {reason:<28} {n:>7}")

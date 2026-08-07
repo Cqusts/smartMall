@@ -371,7 +371,12 @@ def run(
     """
     cat_of = product_category or {}
     cfg = config or Gate3Config()
-    stats = GateStats(gate="③ 模型清洗", input_count=len(dialogues), unit="条目")
+    stats = GateStats(
+        gate="③ 模型清洗",
+        input_count=len(dialogues),
+        input_unit="会话",
+        output_unit="条目",
+    )
     items: list[KnowledgeItem] = []
     samples: list[SftSample] = []
     unavailable: set[int] = set()
@@ -476,12 +481,12 @@ def run(
             question = (raw.get("question") or "").strip()
             answer = (raw.get("answer") or "").strip()
             if not question or not answer:
-                stats.drop("问答不完整")
+                stats.drop("问答不完整", unit="条目")
                 continue
 
             conf = float(raw.get("confidence", 0))
             if conf < cfg.min_extract_confidence:
-                stats.drop("抽取置信度过低")
+                stats.drop("抽取置信度过低", unit="条目")
                 continue
 
             # 含不确定表述的答案不能作为权威知识直接上线，压低置信度推人工改写

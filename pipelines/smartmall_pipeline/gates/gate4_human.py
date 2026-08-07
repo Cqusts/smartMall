@@ -147,7 +147,12 @@ def triage(
     rng = random.Random(cfg.seed)
 
     items = list(items)
-    stats = GateStats(gate="④ 人工清洗", input_count=len(items), unit="条目")
+    stats = GateStats(
+        gate="④ 人工清洗",
+        input_count=len(items),
+        input_unit="条目",
+        output_unit="条目",
+    )
     tasks: list[AnnotationTask] = []
     auto_approved: list[KnowledgeItem] = []
 

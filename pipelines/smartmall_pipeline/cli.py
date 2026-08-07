@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -323,6 +324,66 @@ def cmd_clean(args: argparse.Namespace) -> int:
     if out.unavailable_ods_ids:
         print(f"  ⚠ {len(out.unavailable_ods_ids)} 条因模型服务不可用未处理，"
               "未标记，重跑 clean 会继续处理")
+    if n_items:
+        print("\n  抽查产出：smartmall-pipeline peek")
+    return 0
+
+
+# ---------------------------------------------------------------- peek
+
+
+def cmd_peek(args: argparse.Namespace) -> int:
+    """抽查知识条目的实际内容。
+
+    漏斗报表只说"产出 45 条"，说不了这 45 条是不是人话。用假模型跑出来的
+    "合成答案0" 和真模型抽出来的真实话术，在报表上长得一模一样——
+    所以放大批量之前得先肉眼看一眼。
+    """
+    from sqlalchemy import text
+
+    repo = DwsRepository.from_env()
+    where = ["deleted = 0"]
+    params: dict[str, object] = {"n": args.limit}
+    if args.status:
+        where.append("review_status = :st")
+        params["st"] = args.status
+    if args.type:
+        where.append("knowledge_type = :kt")
+        params["kt"] = args.type
+
+    sql = (
+        "SELECT id, knowledge_type, review_status, confidence, quality_score, "
+        "       category_id, product_ids, title, content, source, source_ref "
+        f"FROM knowledge_item WHERE {' AND '.join(where)} "
+        "ORDER BY id DESC LIMIT :n"
+    )
+    with repo.engine.connect() as conn:
+        rows = list(conn.execute(text(sql), params))
+
+    if not rows:
+        print("没有符合条件的知识条目。先跑 `clean`。")
+        return 0
+
+    print(f"==> 最近 {len(rows)} 条知识条目（按 id 倒序）\n")
+    for r in rows:
+        m = r._mapping
+        print(f"── #{m['id']}  {m['knowledge_type'] or '-'}"
+              f"  {m['review_status']}"
+              f"  置信 {float(m['confidence'] or 0):.2f}"
+              f"  质量 {float(m['quality_score'] or 0):.2f}"
+              f"  类目 {m['category_id'] or '-'}"
+              f"  商品 {m['product_ids'] or '-'}")
+        print(f"   问：{m['title']}")
+        print(f"   答：{m['content']}")
+        print(f"   来源：{m['source']} / {m['source_ref']}\n")
+
+    # 占位符没还原、或答案里还留着手机号，都是脱敏链路出了问题
+    leaked = [
+        m["id"] for m in (r._mapping for r in rows)
+        if re.search(r"1[3-9]\d{9}", f"{m['title']}{m['content']}")
+    ]
+    if leaked:
+        print(f"⚠ 这些条目里疑似残留手机号，PII 脱敏没兜住：{leaked}")
     return 0
 
 
@@ -704,6 +765,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--items-per-dialogue", type=int, default=2,
                    help="仅 --fake-llm 时有效")
     s.set_defaults(func=cmd_clean)
+
+    s = sub.add_parser("peek", help="抽查知识条目的实际内容")
+    s.add_argument("--limit", type=int, default=10)
+    s.add_argument("--status", help="只看某个审核状态，如 approved / pending")
+    s.add_argument("--type", help="只看某个知识类型，如 spec / logistics / sizing")
+    s.set_defaults(func=cmd_peek)
 
     s = sub.add_parser("stats", help="各层数据量概览")
     s.set_defaults(func=cmd_stats)
