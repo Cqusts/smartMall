@@ -218,10 +218,23 @@ def cmd_clean(args: argparse.Namespace) -> int:
         out = run_pipeline(
             dialogues, llm, batch_id=batch_id, product_category=product_category
         )
+    except gate3_model.LlmConfigError as exc:
+        # 4xx：请求本身有问题，对每条输入都会同样失败，重试无用
+        print(f"\n✗ {exc}")
+        print("\n  这是「请求被拒绝」而不是「连不上」，重试不会成功。常见原因：")
+        if backend == "dashscope":
+            print("    · API Key 无效或没有开通对应模型 → 到百炼控制台确认")
+            print("    · 模型名不对 → DashScopeLlmClient.MODEL_ALIASES 里改")
+            print("    · 账户欠费或未实名 → 控制台会直接返回 4xx")
+        else:
+            print("    · ai-gateway 的 config.yaml 里没有配这个模型别名")
+            print("    · LITELLM_API_KEY 与网关的 master key 不一致")
+            print("  先用 --llm dashscope 直连排除网关自身的问题。")
+        print("\n  想先跑通链路不花钱：加 --fake-llm。")
+        return 1
     except gate3_model.LlmUnavailableError as exc:
         # 快速失败：连不上模型时不该让几百条一条条超时跑完
         print(f"\n✗ {exc}")
-        print("\n  这批对话未被标记为已处理，修好后重跑 clean 即可继续。")
         if backend == "gateway":
             print("  没起 ai-gateway 的话，用 --llm dashscope 直连模型。")
         return 1

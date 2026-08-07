@@ -52,12 +52,19 @@ class LlmError(RuntimeError):
 
 
 class LlmUnavailableError(LlmError):
-    """**基础设施**故障：连不上、超时、限流、5xx。
+    """连不上、超时、限流、5xx —— 重试可能成功。"""
 
-    必须与业务性失败（"这段对话没有可复用知识"）区分开——
-    后者是确定的结论，标记为已处理、不再重试是对的；
-    前者只说明这次没跑成，把它当成"已处理"会让这批数据永久丢失，
-    因为 ODS 记录被标记后就再也不会被取出来了。
+
+class LlmConfigError(LlmError):
+    """4xx：请求本身有问题（模型名错、参数不支持、Key 无权限）。
+
+    重试**不会**成功，但它对每一条输入都会同样失败——
+    所以它是配置问题，不是"这条数据的结论"，必须立刻中止而不是
+    逐条失败 385 次。
+
+    关键区分：**业务性结论只能来自成功的响应**（模型明确回答
+    "这段对话没有可复用知识"）。任何 HTTP 层的失败都不是结论，
+    因此都不能把对应的 ODS 记录标记为已处理。
     """
 
 
@@ -70,8 +77,31 @@ class LiteLlmClient:
 
     def __init__(self, base_url: str, api_key: str, timeout: float = 60.0) -> None:
         self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
+        # Key 里混进换行或全角字符会让 h11 在组装请求头时抛 LocalProtocolError，
+        # 报错信息完全看不出是 Key 的问题——在入口处清掉，并尽早报清楚
+        self.api_key = (api_key or "").strip()
+        if self.api_key and not self.api_key.isascii():
+            raise LlmConfigError(
+                "API Key 含非 ASCII 字符（可能是复制时带进了全角引号或中文空格）。"
+                "请重新复制粘贴。"
+            )
         self.timeout = timeout
+        #: 是否在请求里带 response_format。部分服务/模型不支持该参数，
+        #: 首次因它被 400 后自动关闭——反正 parse_json_lenient 能兜住。
+        self.use_response_format = True
+
+    def _payload(self, model: str, system: str, user: str) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0,
+        }
+        if self.use_response_format:
+            body["response_format"] = {"type": "json_object"}
+        return body
 
     def complete_json(self, *, model: str, system: str, user: str) -> dict[str, Any]:
         import httpx
@@ -80,17 +110,21 @@ class LiteLlmClient:
             resp = httpx.post(
                 f"{self.base_url}/v1/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    "temperature": 0,
-                    "response_format": {"type": "json_object"},
-                },
+                json=self._payload(model, system, user),
                 timeout=self.timeout,
             )
+            # response_format 不被所有服务/模型支持（有的还要求 prompt 里出现
+            # 小写 "json"）。为它整批失败不值得——关掉重试一次，
+            # 反正 parse_json_lenient 能兜住没有强制格式的返回。
+            if resp.status_code == 400 and self.use_response_format:
+                self.use_response_format = False
+                print("  ⚠ 模型不接受 response_format，已关闭该参数重试")
+                resp = httpx.post(
+                    f"{self.base_url}/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=self._payload(model, system, user),
+                    timeout=self.timeout,
+                )
         except Exception as exc:  # noqa: BLE001  连不上/超时/协议错误
             raise LlmUnavailableError(
                 f"无法连接模型服务 {self.base_url}：{type(exc).__name__}: {exc}"
@@ -102,7 +136,9 @@ class LiteLlmClient:
                 f"模型服务返回 {resp.status_code}: {resp.text[:200]}"
             )
         if resp.status_code != 200:
-            raise LlmError(f"模型调用失败 HTTP {resp.status_code}: {resp.text[:200]}")
+            raise LlmConfigError(
+                f"模型调用失败 HTTP {resp.status_code}: {resp.text[:400]}"
+            )
 
         content = resp.json()["choices"][0]["message"]["content"]
         return parse_json_lenient(content)
@@ -180,7 +216,7 @@ def parse_json_lenient(text: str) -> dict[str, Any]:
 
 TRIAGE_SYSTEM = """你是电商客服对话的质量审核员。判断一段对话是否值得进入知识库。
 
-只输出 JSON，不要任何解释文字。"""
+只输出 json 格式的结果，不要任何解释文字。"""
 
 TRIAGE_USER = """判断下面这段客服对话是否包含可复用的知识。
 
@@ -201,7 +237,7 @@ TRIAGE_USER = """判断下面这段客服对话是否包含可复用的知识。
 
 EXTRACT_SYSTEM = """你是电商知识库的编辑。把客服对话提炼成独立的问答条目。
 
-只输出 JSON，不要任何解释文字。"""
+只输出 json 格式的结果，不要任何解释文字。"""
 
 EXTRACT_USER = """把下面这段对话拆成若干条**独立的**问答对。
 
@@ -223,7 +259,7 @@ EXTRACT_USER = """把下面这段对话拆成若干条**独立的**问答对。
 
 STYLE_SYSTEM = """你是对话风格分析员。标注客服回复的语气特征，用于风格模型训练。
 
-只输出 JSON，不要任何解释文字。"""
+只输出 json 格式的结果，不要任何解释文字。"""
 
 STYLE_USER = """标注下面客服回复的风格特征。
 
@@ -327,6 +363,39 @@ def run(
     unavailable: set[int] = set()
     consecutive_failures = 0
 
+    def _record_llm_failure(exc: LlmError, dlg: Dialogue, stage: str) -> None:
+        """登记一次 LLM 层失败，必要时中止整批。
+
+        **业务结论只能来自成功的响应**——模型明确回答"这段对话没有可复用
+        知识"才是结论。HTTP 层的任何失败都不是结论，所以对应的 ODS 记录
+        一律不标记为已处理，下次 clean 会重新取到。
+
+        中止条件有两个：
+        · ``LlmConfigError`` —— 4xx 对每一条输入都会同样失败，
+          试满阈值只是把同一个错误重复 385 次。
+        · 连续失败达到阈值 —— 服务大概率整体不可用，快速失败比
+          "耐心地全部失败"有用。
+        """
+        nonlocal consecutive_failures
+        consecutive_failures += 1
+        stats.drop(f"{stage}失败:{type(exc).__name__}")
+        if dlg.ods_id is not None:
+            unavailable.add(dlg.ods_id)
+
+        fatal = isinstance(exc, LlmConfigError)
+        if not fatal and consecutive_failures < MAX_CONSECUTIVE_FAILURES:
+            return
+        cause = (
+            "请求被模型服务拒绝（配置问题，重试无用）"
+            if fatal
+            else f"连续 {consecutive_failures} 次调用失败"
+        )
+        raise type(exc)(
+            f"{cause}，已中止。\n\n  {exc}\n\n"
+            f"  这批 {len(unavailable)} 条对话未被标记为已处理，"
+            f"修好后直接重跑 clean 即可继续。"
+        ) from exc
+
     for dlg in dialogues:
         transcript = _transcript(dlg)
 
@@ -337,22 +406,12 @@ def run(
                 system=TRIAGE_SYSTEM,
                 user=TRIAGE_USER.format(transcript=transcript),
             )
-        except LlmUnavailableError as exc:
-            # 基础设施故障：不标记为已处理，下次重试
-            consecutive_failures += 1
-            stats.drop("模型服务不可用")
-            if dlg.ods_id is not None:
-                unavailable.add(dlg.ods_id)
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                raise LlmUnavailableError(
-                    f"连续 {consecutive_failures} 次调用模型失败，已中止。\n"
-                    f"  最后一次：{exc}\n"
-                    f"  这批 {len(unavailable)} 条对话未被标记，修好后重跑即可继续。"
-                ) from exc
+        except LlmError as exc:
+            _record_llm_failure(exc, dlg, "判定调用")
             continue
-        except Exception as exc:  # noqa: BLE001  业务性失败，确定性结论
+        except Exception as exc:  # noqa: BLE001
             consecutive_failures = 0
-            stats.drop(f"判定失败:{type(exc).__name__}")
+            stats.drop(f"判定异常:{type(exc).__name__}")
             continue
         else:
             consecutive_failures = 0
@@ -384,15 +443,14 @@ def run(
                 system=EXTRACT_SYSTEM,
                 user=EXTRACT_USER.format(transcript=transcript),
             )
-        except LlmUnavailableError:
-            consecutive_failures += 1
-            stats.drop("模型服务不可用")
-            if dlg.ods_id is not None:
-                unavailable.add(dlg.ods_id)
+        except LlmError as exc:
+            _record_llm_failure(exc, dlg, "抽取调用")
             continue
         except Exception as exc:  # noqa: BLE001
-            stats.drop(f"抽取失败:{type(exc).__name__}")
+            stats.drop(f"抽取异常:{type(exc).__name__}")
             continue
+        else:
+            consecutive_failures = 0
 
         raw_items = extracted.get("items") or []
         if not raw_items:

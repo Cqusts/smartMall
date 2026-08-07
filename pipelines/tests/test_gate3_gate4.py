@@ -108,10 +108,13 @@ class TestGate3:
         """单条失败不能拖垮整批。"""
         llm = g3.FakeLlmClient(raise_on="坏样本")
         bad = _dlg("BAD")
+        bad.ods_id = 7001
         bad.turns[0].content = "坏样本"
-        items, _, stats, _ = g3.run([bad, _dlg("OK")], llm)
+        items, _, stats, unavailable = g3.run([bad, _dlg("OK")], llm)
         assert len(items) == 2  # 只有好的那条产出了 2 个 item
-        assert any(k.startswith("判定失败") for k in stats.dropped)
+        assert any(k.startswith("判定调用失败") for k in stats.dropped)
+        # 调用失败不是业务结论，这条必须留给下次重跑
+        assert unavailable == {7001}
 
     def test_items_are_pending_review(self):
         """未审核的知识绝不进索引——出口一律 pending。"""

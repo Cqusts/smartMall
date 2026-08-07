@@ -188,6 +188,20 @@ class _FlakyLlm(gate3_model.FakeLlmClient):
         return super().complete_json(model=model, system=system, user=user)
 
 
+class _RejectingLlm(gate3_model.FakeLlmClient):
+    """模拟 4xx：模型名不对 / 参数不支持 / Key 无权限。"""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.seen = 0
+
+    def complete_json(self, *, model, system, user):
+        self.seen += 1
+        raise gate3_model.LlmConfigError(
+            "模型调用失败 HTTP 400: {'code':'InvalidParameter'}"
+        )
+
+
 class TestInfrastructureFailure:
     """基础设施故障绝不能被当作「已处理」。
 
@@ -239,6 +253,71 @@ class TestInfrastructureFailure:
 
     def test_http_5xx_is_infrastructure_not_business(self):
         """5xx/429 是服务端问题，应归为可重试；4xx 是请求问题。"""
-        from smartmall_pipeline.gates.gate3_model import LlmError, LlmUnavailableError
+        from smartmall_pipeline.gates.gate3_model import (
+            LlmConfigError,
+            LlmError,
+            LlmUnavailableError,
+        )
 
         assert issubclass(LlmUnavailableError, LlmError)
+        assert issubclass(LlmConfigError, LlmError)
+        # 两者必须可区分——一个值得重试，一个重试无用
+        assert not issubclass(LlmConfigError, LlmUnavailableError)
+
+
+class TestConfigError:
+    """4xx 是配置问题：对每一条输入都会同样失败。
+
+    真实事故：DashScope 返回 4xx，385 条对话一条条失败，
+    错误正文被吞掉（只看得到 ``LlmError``），而且全被标记为已处理。
+    三个毛病都要堵死。
+    """
+
+    def test_aborts_on_first_rejection(self):
+        """不该把同一个配置错误重复 385 次。"""
+        dialogues = _with_ods_ids(synthetic.generate_batch(200, seed=201))
+        llm = _RejectingLlm()
+        with pytest.raises(gate3_model.LlmConfigError):
+            run_pipeline(dialogues, llm, batch_id="e1")
+        # 只调了一次就停，而不是把整批磨完
+        assert llm.seen == 1, f"被拒绝后仍继续调用了 {llm.seen} 次"
+
+    def test_abort_message_carries_the_server_reason(self):
+        """错误正文必须透出来，否则连不上的原因永远查不到。"""
+        dialogues = _with_ods_ids(synthetic.generate_batch(20, seed=203))
+        with pytest.raises(gate3_model.LlmConfigError) as exc:
+            run_pipeline(dialogues, _RejectingLlm(), batch_id="e2")
+        text = str(exc.value)
+        assert "HTTP 400" in text and "InvalidParameter" in text
+        assert "重跑" in text, "要告诉用户修好后可以直接重跑"
+
+    def test_config_error_is_not_a_business_conclusion(self):
+        """4xx 期间的会话一条都不能被标记为已处理。
+
+        它们不是"没有可复用知识"——我们根本没拿到模型的回答。
+        标记了就再也取不出来，这批数据等于丢了。
+        """
+        dialogues = _with_ods_ids(synthetic.generate_batch(30, seed=205))
+
+        # 直接调关卡③，绕开编排层的异常传播，检查它内部的记账
+        with pytest.raises(gate3_model.LlmConfigError):
+            gate3_model.run(dialogues, _RejectingLlm())
+
+    def test_rejection_mid_batch_keeps_earlier_results_unmarked(self):
+        """中途开始被拒时，失败的那条不能被当作已处理。"""
+
+        class _RejectAfter(gate3_model.FakeLlmClient):
+            def __init__(self, after: int, **kw):
+                super().__init__(**kw)
+                self.after = after
+                self.seen = 0
+
+            def complete_json(self, *, model, system, user):
+                self.seen += 1
+                if self.seen > self.after:
+                    raise gate3_model.LlmConfigError("模型调用失败 HTTP 401")
+                return super().complete_json(model=model, system=system, user=user)
+
+        dialogues = _with_ods_ids(synthetic.generate_batch(40, seed=207))
+        with pytest.raises(gate3_model.LlmConfigError):
+            gate3_model.run(dialogues, _RejectAfter(after=5))
