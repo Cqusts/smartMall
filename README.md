@@ -250,9 +250,11 @@ CLI 会自动读取（见 `deploy/.env.example`）。
 
 ### 跟客服 Agent 对话
 
-知识库建好之后（`clean` → `index`）就能直接对话，同样只需要 MySQL：
+知识库建好之后（`clean` → `index`）就能直接对话，同样只需要 MySQL。
+注意路径是相对**仓库根**的，上一节结束时还在 `pipelines/` 里：
 
 ```bash
+cd ..                              # 回到仓库根
 pip install -e apps/python/ai-agent
 
 smartmall-agent chat -v                      # 交互式多轮，-v 显示意图与命中分数
