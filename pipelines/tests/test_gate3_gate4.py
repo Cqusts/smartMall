@@ -75,32 +75,32 @@ class TestGate3:
     def test_extracts_multiple_items_from_one_dialogue(self):
         """一段对话里可能藏着多个知识点，要拆成多条。"""
         llm = g3.FakeLlmClient(items_per_dialogue=3)
-        items, samples, stats = g3.run([_dlg()], llm)
+        items, samples, stats, _ = g3.run([_dlg()], llm)
         assert len(items) == 3
         assert stats.output_count == 3
         assert all(i.biz_type is BizType.QA for i in items)
 
     def test_drops_when_no_reusable_knowledge(self):
         llm = g3.FakeLlmClient(has_knowledge=False)
-        items, _, stats = g3.run([_dlg()], llm)
+        items, _, stats, _ = g3.run([_dlg()], llm)
         assert items == []
         assert stats.dropped["无可复用知识"] == 1
 
     def test_drops_outdated(self):
         llm = g3.FakeLlmClient(is_outdated=True)
-        items, _, stats = g3.run([_dlg()], llm)
+        items, _, stats, _ = g3.run([_dlg()], llm)
         assert items == []
         assert stats.dropped["已过期"] == 1
 
     def test_drops_not_generalizable(self):
         llm = g3.FakeLlmClient(generalizable=0.2)
-        items, _, stats = g3.run([_dlg()], llm)
+        items, _, stats, _ = g3.run([_dlg()], llm)
         assert items == []
         assert stats.dropped["不可泛化"] == 1
 
     def test_drops_low_quality(self):
         llm = g3.FakeLlmClient(quality=0.1)
-        items, _, stats = g3.run([_dlg()], llm)
+        items, _, stats, _ = g3.run([_dlg()], llm)
         assert items == []
         assert stats.dropped["质量分过低"] == 1
 
@@ -109,26 +109,26 @@ class TestGate3:
         llm = g3.FakeLlmClient(raise_on="坏样本")
         bad = _dlg("BAD")
         bad.turns[0].content = "坏样本"
-        items, _, stats = g3.run([bad, _dlg("OK")], llm)
+        items, _, stats, _ = g3.run([bad, _dlg("OK")], llm)
         assert len(items) == 2  # 只有好的那条产出了 2 个 item
         assert any(k.startswith("判定失败") for k in stats.dropped)
 
     def test_items_are_pending_review(self):
         """未审核的知识绝不进索引——出口一律 pending。"""
         llm = g3.FakeLlmClient()
-        items, _, _ = g3.run([_dlg()], llm)
+        items, _, _, _ = g3.run([_dlg()], llm)
         assert all(i.review_status is ReviewStatus.PENDING for i in items)
 
     def test_promotion_gets_expiry(self):
         """活动类必须设有效期，否则客服会一直播报过期活动。"""
         llm = g3.FakeLlmClient(knowledge_type="promotion")
-        items, _, stats = g3.run([_dlg()], llm)
+        items, _, stats, _ = g3.run([_dlg()], llm)
         assert all(i.valid_to is not None for i in items)
         assert stats.modified["活动类设置有效期"] >= 1
 
     def test_non_promotion_has_no_expiry(self):
         llm = g3.FakeLlmClient(knowledge_type="spec")
-        items, _, _ = g3.run([_dlg()], llm)
+        items, _, _, _ = g3.run([_dlg()], llm)
         assert all(i.valid_to is None for i in items)
 
     def test_source_ref_is_traceable(self):
@@ -136,7 +136,7 @@ class TestGate3:
         llm = g3.FakeLlmClient()
         d = _dlg("TRACE1")
         d.ods_id = 4242
-        items, _, _ = g3.run([d], llm)
+        items, _, _, _ = g3.run([d], llm)
         assert all(i.source_ref == "ods:4242" for i in items)
 
     def test_uses_cheap_model_for_triage(self):
@@ -153,7 +153,7 @@ class TestGate3:
         回答别的商品时也说羊毛（docs/10-finetune.md 的失败模式）。
         """
         llm = g3.FakeLlmClient()
-        _, samples, _ = g3.run([_dlg()], llm)
+        _, samples, _, _ = g3.run([_dlg()], llm)
         assert len(samples) == 1
         sample = samples[0]
         system = sample.messages[0]
@@ -180,7 +180,7 @@ class TestGate3Uncertainty:
                     }
                 return super().complete_json(model=model, system=system, user=user)
 
-        items, _, stats = g3.run([_dlg()], Uncertain())
+        items, _, stats, _ = g3.run([_dlg()], Uncertain())
         assert len(items) == 1
         assert items[0].confidence < g3.Gate3Config().human_review_below
         assert stats.modified["含不确定表述→降置信度"] == 1

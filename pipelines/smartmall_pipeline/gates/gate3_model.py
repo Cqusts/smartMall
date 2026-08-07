@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from ..models import (
     BizType,
@@ -48,7 +48,17 @@ class LlmClient(Protocol):
 
 
 class LlmError(RuntimeError):
-    pass
+    """模型调用失败的基类。"""
+
+
+class LlmUnavailableError(LlmError):
+    """**基础设施**故障：连不上、超时、限流、5xx。
+
+    必须与业务性失败（"这段对话没有可复用知识"）区分开——
+    后者是确定的结论，标记为已处理、不再重试是对的；
+    前者只说明这次没跑成，把它当成"已处理"会让这批数据永久丢失，
+    因为 ODS 记录被标记后就再也不会被取出来了。
+    """
 
 
 class LiteLlmClient:
@@ -66,23 +76,80 @@ class LiteLlmClient:
     def complete_json(self, *, model: str, system: str, user: str) -> dict[str, Any]:
         import httpx
 
-        resp = httpx.post(
-            f"{self.base_url}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0,
-                "response_format": {"type": "json_object"},
-            },
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
+        try:
+            resp = httpx.post(
+                f"{self.base_url}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": 0,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=self.timeout,
+            )
+        except Exception as exc:  # noqa: BLE001  连不上/超时/协议错误
+            raise LlmUnavailableError(
+                f"无法连接模型服务 {self.base_url}：{type(exc).__name__}: {exc}"
+            ) from exc
+
+        # 5xx 与 429 是服务端问题，重试可能成功；4xx 是请求本身有问题
+        if resp.status_code >= 500 or resp.status_code == 429:
+            raise LlmUnavailableError(
+                f"模型服务返回 {resp.status_code}: {resp.text[:200]}"
+            )
+        if resp.status_code != 200:
+            raise LlmError(f"模型调用失败 HTTP {resp.status_code}: {resp.text[:200]}")
+
         content = resp.json()["choices"][0]["message"]["content"]
         return parse_json_lenient(content)
+
+
+class DashScopeLlmClient(LiteLlmClient):
+    """直连 DashScope，不经网关。
+
+    网关（LiteLLM）提供成本记账与失败降级，是生产环境的正确选择；
+    但它需要 Docker，本地开发时未必起得来。这个类让没有网关也能跑，
+    代价是失去统一记账——按里程碑推进时这个取舍是划算的。
+
+    模型名走 DashScope 的真实名称，而不是网关里的别名。
+    """
+
+    #: 网关别名 → DashScope 真实模型名
+    MODEL_ALIASES = {
+        "chat-light": "qwen-turbo",
+        "chat-default": "qwen-plus",
+        "chat-fallback": "qwen-plus",
+        "reasoning": "qwen-max",
+        "vision": "qwen-vl-max",
+    }
+
+    def __init__(self, api_key: str | None = None, timeout: float = 60.0) -> None:
+        import os as _os
+
+        key = api_key or _os.environ.get("DASHSCOPE_API_KEY", "")
+        if not key:
+            raise LlmError(
+                "缺少 DASHSCOPE_API_KEY。\n"
+                "  · 到 https://bailian.console.aliyun.com/ 申请，填进 deploy/.env\n"
+                "  · 或先用 --fake-llm 跑通链路（不调真实模型、不产生费用）"
+            )
+        super().__init__(
+            base_url=_os.environ.get(
+                "DASHSCOPE_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode",
+            ),
+            api_key=key,
+            timeout=timeout,
+        )
+
+    def complete_json(self, *, model: str, system: str, user: str) -> dict[str, Any]:
+        return super().complete_json(
+            model=self.MODEL_ALIASES.get(model, model), system=system, user=user
+        )
 
 
 def parse_json_lenient(text: str) -> dict[str, Any]:
@@ -197,6 +264,27 @@ class Gate3Config:
     """活动类知识的默认有效期。不设期限的话客服会一直播报过期活动。"""
 
 
+class Gate3Result(NamedTuple):
+    """关卡③的产出。
+
+    ``unavailable_ods_ids`` 是因基础设施故障而没跑成的会话——
+    它们**不能**被标记为已处理，否则下次清洗取不到，数据就永久丢了。
+    """
+
+    items: list[KnowledgeItem]
+    samples: list[SftSample]
+    stats: GateStats
+    unavailable_ods_ids: set[int]
+
+
+MAX_CONSECUTIVE_FAILURES = 10
+"""连续这么多次基础设施故障就中止整批。
+
+配错网关地址时 386 条会一条条超时重试，白白耗掉十几分钟和 API 额度——
+快速失败并明确报错，比"耐心地全部失败"有用得多。
+"""
+
+
 # ---------------------------------------------------------------- 执行
 
 
@@ -216,7 +304,7 @@ def run(
     config: Gate3Config | None = None,
     *,
     product_category: dict[int, int] | None = None,
-) -> tuple[list[KnowledgeItem], list[SftSample], GateStats]:
+) -> Gate3Result:
     """执行关卡③。
 
     Args:
@@ -236,6 +324,8 @@ def run(
     stats = GateStats(gate="③ 模型清洗", input_count=len(dialogues), unit="条目")
     items: list[KnowledgeItem] = []
     samples: list[SftSample] = []
+    unavailable: set[int] = set()
+    consecutive_failures = 0
 
     for dlg in dialogues:
         transcript = _transcript(dlg)
@@ -247,9 +337,25 @@ def run(
                 system=TRIAGE_SYSTEM,
                 user=TRIAGE_USER.format(transcript=transcript),
             )
-        except (LlmError, Exception) as exc:  # noqa: BLE001
+        except LlmUnavailableError as exc:
+            # 基础设施故障：不标记为已处理，下次重试
+            consecutive_failures += 1
+            stats.drop("模型服务不可用")
+            if dlg.ods_id is not None:
+                unavailable.add(dlg.ods_id)
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                raise LlmUnavailableError(
+                    f"连续 {consecutive_failures} 次调用模型失败，已中止。\n"
+                    f"  最后一次：{exc}\n"
+                    f"  这批 {len(unavailable)} 条对话未被标记，修好后重跑即可继续。"
+                ) from exc
+            continue
+        except Exception as exc:  # noqa: BLE001  业务性失败，确定性结论
+            consecutive_failures = 0
             stats.drop(f"判定失败:{type(exc).__name__}")
             continue
+        else:
+            consecutive_failures = 0
 
         if not verdict.get("has_reusable_knowledge"):
             stats.drop("无可复用知识")
@@ -278,7 +384,13 @@ def run(
                 system=EXTRACT_SYSTEM,
                 user=EXTRACT_USER.format(transcript=transcript),
             )
-        except (LlmError, Exception) as exc:  # noqa: BLE001
+        except LlmUnavailableError:
+            consecutive_failures += 1
+            stats.drop("模型服务不可用")
+            if dlg.ods_id is not None:
+                unavailable.add(dlg.ods_id)
+            continue
+        except Exception as exc:  # noqa: BLE001
             stats.drop(f"抽取失败:{type(exc).__name__}")
             continue
 
@@ -359,7 +471,7 @@ def run(
                 )
 
     stats.output_count = len(items)
-    return items, samples, stats
+    return Gate3Result(items, samples, stats, unavailable)
 
 
 def _build_sft_sample(

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from smartmall_pipeline import coverage
 from smartmall_pipeline.gates import gate3_model
 from smartmall_pipeline.ingest import synthetic
@@ -159,3 +161,84 @@ class TestCategoryPropagation:
         assert all(
             i.knowledge_type is KnowledgeType.LOGISTICS for i in out.knowledge_items
         )
+
+
+# ---------------------------------------------------------------- 基础设施故障
+
+
+class _UnavailableLlm(gate3_model.FakeLlmClient):
+    """模拟模型服务不可用（连不上网关、超时、5xx）。"""
+
+    def complete_json(self, *, model, system, user):
+        raise gate3_model.LlmUnavailableError("connection refused")
+
+
+class _FlakyLlm(gate3_model.FakeLlmClient):
+    """前 N 次失败，之后恢复正常。"""
+
+    def __init__(self, fail_first: int = 3, **kw):
+        super().__init__(**kw)
+        self.fail_first = fail_first
+        self.seen = 0
+
+    def complete_json(self, *, model, system, user):
+        self.seen += 1
+        if self.seen <= self.fail_first:
+            raise gate3_model.LlmUnavailableError("temporary outage")
+        return super().complete_json(model=model, system=system, user=user)
+
+
+class TestInfrastructureFailure:
+    """基础设施故障绝不能被当作「已处理」。
+
+    真实事故：网关没起，386 条对话全部失败，却全被标记为已处理，
+    从此再也取不出来重跑——数据等于丢了。
+    """
+
+    def test_unavailable_sessions_get_no_outcome(self):
+        # 批量小于快速失败阈值，走正常返回路径而非中止路径
+        dialogues = _with_ods_ids(synthetic.generate_batch(8, seed=101))
+        out = run_pipeline(dialogues, _UnavailableLlm(), batch_id="f1")
+
+        assert out.knowledge_items == []
+        # 关键断言：进到关卡③的会话不能出现在 outcomes 里
+        assert out.unavailable_ods_ids
+        for ods_id in out.unavailable_ods_ids:
+            assert ods_id not in out.ods_outcomes, (
+                f"ods {ods_id} 因基础设施故障未处理，却被标记了结论——"
+                "这会导致它再也不会被重新清洗"
+            )
+
+    def test_fails_fast_instead_of_grinding_through(self):
+        """连不上时不该让几百条一条条超时跑完。"""
+        dialogues = _with_ods_ids(synthetic.generate_batch(200, seed=103))
+        with pytest.raises(gate3_model.LlmUnavailableError) as exc:
+            run_pipeline(dialogues, _UnavailableLlm(), batch_id="f2")
+        assert "已中止" in str(exc.value)
+        assert "重跑" in str(exc.value)
+
+    def test_transient_failure_recovers(self):
+        """偶发故障不该中止整批，恢复后继续处理。"""
+        dialogues = _with_ods_ids(synthetic.generate_batch(60, seed=105))
+        out = run_pipeline(dialogues, _FlakyLlm(fail_first=3), batch_id="f3")
+
+        assert out.knowledge_items, "恢复后应继续产出"
+        # 失败的那几条不被标记，成功的正常标记
+        assert out.unavailable_ods_ids
+        assert set(out.ods_outcomes) & out.unavailable_ods_ids == set()
+
+    def test_business_failure_still_marked(self):
+        """业务性失败（确实没有可复用知识）是确定结论，应当标记。"""
+        dialogues = _with_ods_ids(synthetic.generate_batch(40, seed=107))
+        out = run_pipeline(
+            dialogues, gate3_model.FakeLlmClient(has_knowledge=False), batch_id="f4"
+        )
+        assert out.unavailable_ods_ids == set()
+        assert set(out.ods_outcomes) == {d.ods_id for d in dialogues}
+        assert all(o == "dropped" for o, _ in out.ods_outcomes.values())
+
+    def test_http_5xx_is_infrastructure_not_business(self):
+        """5xx/429 是服务端问题，应归为可重试；4xx 是请求问题。"""
+        from smartmall_pipeline.gates.gate3_model import LlmError, LlmUnavailableError
+
+        assert issubclass(LlmUnavailableError, LlmError)

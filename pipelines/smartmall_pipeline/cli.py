@@ -182,15 +182,23 @@ def cmd_clean(args: argparse.Namespace) -> int:
         return 0
     print(f"  取到 {len(dialogues)} 条")
 
-    if args.fake_llm:
-        print("  使用 FakeLlmClient（不调用真实模型，不产生费用）")
-        llm = gate3_model.FakeLlmClient(items_per_dialogue=args.items_per_dialogue)
-    else:
-        base = os.environ.get("LITELLM_BASE_URL", "http://localhost:9000")
-        print(f"  经 ai-gateway 调用模型：{base}")
-        llm = gate3_model.LiteLlmClient(
-            base_url=base, api_key=os.environ.get("LITELLM_API_KEY", "")
-        )
+    backend = "fake" if args.fake_llm else args.llm
+    try:
+        if backend == "fake":
+            print("  使用 FakeLlmClient（不调用真实模型，不产生费用）")
+            llm = gate3_model.FakeLlmClient(items_per_dialogue=args.items_per_dialogue)
+        elif backend == "dashscope":
+            print("  直连 DashScope（未经网关，无统一成本记账）")
+            llm = gate3_model.DashScopeLlmClient()
+        else:
+            base = os.environ.get("LITELLM_BASE_URL", "http://localhost:9000")
+            print(f"  经 ai-gateway 调用模型：{base}")
+            llm = gate3_model.LiteLlmClient(
+                base_url=base, api_key=os.environ.get("LITELLM_API_KEY", "")
+            )
+    except gate3_model.LlmError as exc:
+        print(f"\n✗ {exc}")
+        return 1
 
     # 商品→类目映射：知识条目的 category_id 靠它填，
     # 没有它覆盖度矩阵永远是 0%，检索也无法按类目收窄
@@ -206,9 +214,17 @@ def cmd_clean(args: argparse.Namespace) -> int:
     print(f"  加载 {len(product_category)} 个商品的类目映射")
 
     batch_id = f"clean-{datetime.now():%Y%m%d%H%M%S}"
-    out = run_pipeline(
-        dialogues, llm, batch_id=batch_id, product_category=product_category
-    )
+    try:
+        out = run_pipeline(
+            dialogues, llm, batch_id=batch_id, product_category=product_category
+        )
+    except gate3_model.LlmUnavailableError as exc:
+        # 快速失败：连不上模型时不该让几百条一条条超时跑完
+        print(f"\n✗ {exc}")
+        print("\n  这批对话未被标记为已处理，修好后重跑 clean 即可继续。")
+        if backend == "gateway":
+            print("  没起 ai-gateway 的话，用 --llm dashscope 直连模型。")
+        return 1
 
     print()
     print(out.report.render())
@@ -223,6 +239,9 @@ def cmd_clean(args: argparse.Namespace) -> int:
     print(f"  ✓ 写入 knowledge_item {n_items} 条、sft_sample {n_samples} 条")
     print(f"  ✓ 待人工处理 {out.pending_human} 条（Label Studio 队列）")
     print(f"  ✓ 已标记 {n_marked} 条 ODS 记录为已处理")
+    if out.unavailable_ods_ids:
+        print(f"  ⚠ {len(out.unavailable_ods_ids)} 条因模型服务不可用未处理，"
+              "未标记，重跑 clean 会继续处理")
     return 0
 
 
@@ -595,6 +614,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--limit", type=int, default=5000)
     s.add_argument("--fake-llm", action="store_true",
                    help="用假 LLM，不调真实模型、不产生费用")
+    s.add_argument("--llm", default="dashscope",
+                   choices=["dashscope", "gateway"],
+                   help="模型通道：dashscope 直连（默认，无需 Docker）"
+                        "或 gateway 经 ai-gateway（有统一记账与降级）")
     s.add_argument("--items-per-dialogue", type=int, default=2,
                    help="仅 --fake-llm 时有效")
     s.set_defaults(func=cmd_clean)
