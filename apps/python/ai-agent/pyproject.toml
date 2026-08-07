@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smartmall-agent"
+version = "0.1.0"
+description = "smartMall 客服 Agent：LangGraph 状态机、混合检索、引用溯源、转人工"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.9",
+]
+
+[project.optional-dependencies]
+# 图运行时。不装也能跑——run_turn 是普通函数，图只是它的一层封装
+graph = ["langgraph>=0.2"]
+# 本地检索：直连 MySQL 复用数据中台已建好的索引，不需要 Milvus
+local = ["smartmall-pipeline"]
+# HTTP 服务形态
+server = ["fastapi>=0.115", "uvicorn[standard]>=0.32", "ai-common"]
+dev = ["pytest>=8.3"]
+
+[project.scripts]
+smartmall-agent = "app.agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

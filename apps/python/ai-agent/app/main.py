@@ -1,6 +1,6 @@
 """ai-agent —— LangGraph 编排：客服 Agent · 运营 Agent · 考核 Agent
 
-M0 阶段只提供骨架与探针，业务能力在 M2 落地。
+M2 已落地客服 Agent（见 app/agent/）；运营与考核 Agent 待后续里程碑。
 """
 
 from __future__ import annotations
@@ -9,12 +9,15 @@ from ai_common import create_app
 from ai_common.checks import http_check, kafka_check, tcp_check
 
 from .config import settings
+from .routers import chat
 
 app = create_app(settings, description="LangGraph 编排：客服 Agent · 运营 Agent · 考核 Agent")
 
 # 依赖检查：M0 用连通性探测，接入真实客户端后替换为深度检查
 reg = app.state.health
 s = settings
+app.include_router(chat.router)
+
 reg.register("litellm", http_check(f"{s.litellm_base_url}/health/liveliness"))
 reg.register("ai-rag", http_check(f"{s.rag_base_url}/health"))
 reg.register("redis", tcp_check(s.redis_host, s.redis_port))
@@ -29,5 +32,5 @@ async def info():
         "version": settings.version,
         "milestone": "M2",
         "capabilities": ["customer_service", "marketing", "sales_kpi_judge"],
-        "implemented": False,
+        "implemented": ["customer_service"],
     }

@@ -247,3 +247,22 @@ smartmall-pipeline clean --llm openai --limit 20
 Windows PowerShell 用 `$env:MYSQL_HOST="localhost"` 设置环境变量，
 且不支持 `&&`，命令需分行执行。也可以把上面这些写进 `deploy/.env`，
 CLI 会自动读取（见 `deploy/.env.example`）。
+
+### 跟客服 Agent 对话
+
+知识库建好之后（`clean` → `index`）就能直接对话，同样只需要 MySQL：
+
+```bash
+pip install -e apps/python/ai-agent
+
+smartmall-agent chat -v                      # 交互式多轮，-v 显示意图与命中分数
+smartmall-agent ask "这件是什么面料" -v
+smartmall-agent trace "会起球吗"              # 单轮 + 完整 Trace
+smartmall-agent chat --product-id 1024       # 带商品上下文，检索按商品收窄
+```
+
+`-v` 会打印意图分类结果、命中的知识条目与相似度、以及为什么转人工——
+调阈值时这些是唯一有用的信息。答不上来时它会转人工并生成交接摘要，
+而不是硬编一个答案。
+
+HTTP 形态：`POST /chat`，返回 `answer` / `citations` / `trace_id` / `handover`。
