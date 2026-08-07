@@ -190,6 +190,22 @@ def _gate3_config_from_env() -> gate3_model.Gate3Config:
     return cfg
 
 
+def _resolve_llm_backend(args: argparse.Namespace) -> str:
+    """选定模型通道。
+
+    显式 ``--llm`` 优先；没写时按环境变量推断——配了
+    ``SMARTMALL_LLM_BASE_URL`` 就说明厂商已经选好了，此时还默认走
+    dashscope 只会撞上一个他明明不打算用的通道（比如免费额度已用尽）。
+    """
+    if args.fake_llm:
+        return "fake"
+    if args.llm:
+        return args.llm
+    if os.environ.get("SMARTMALL_LLM_BASE_URL", "").strip():
+        return "openai"
+    return "dashscope"
+
+
 def cmd_clean(args: argparse.Namespace) -> int:
     """从 ODS 拉取未处理对话，跑四道关卡，产出写回 DWS。"""
     ods = OdsRepository.from_env()
@@ -202,7 +218,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
         return 0
     print(f"  取到 {len(dialogues)} 条")
 
-    backend = "fake" if args.fake_llm else args.llm
+    backend = _resolve_llm_backend(args)
     try:
         if backend == "fake":
             print("  使用 FakeLlmClient（不调用真实模型，不产生费用）")
@@ -679,11 +695,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--limit", type=int, default=5000)
     s.add_argument("--fake-llm", action="store_true",
                    help="用假 LLM，不调真实模型、不产生费用")
-    s.add_argument("--llm", default="dashscope",
+    s.add_argument("--llm", default=None,
                    choices=["dashscope", "openai", "gateway"],
-                   help="模型通道：dashscope 直连（默认，无需 Docker）／"
-                        "openai 任意 OpenAI 兼容服务（DeepSeek、Kimi、本地 vLLM，"
-                        "读 SMARTMALL_LLM_BASE_URL）／"
+                   help="模型通道。不指定时：配了 SMARTMALL_LLM_BASE_URL 走 openai，"
+                        "否则走 dashscope。"
+                        "openai 接任何 OpenAI 兼容服务（DeepSeek、Kimi、本地 vLLM）；"
                         "gateway 经 ai-gateway（有统一记账与降级）")
     s.add_argument("--items-per-dialogue", type=int, default=2,
                    help="仅 --fake-llm 时有效")

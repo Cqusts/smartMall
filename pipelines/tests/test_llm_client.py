@@ -238,3 +238,96 @@ class TestModelOverride:
             monkeypatch.delenv(k, raising=False)
         cfg = _gate3_config_from_env()
         assert cfg.triage_model != cfg.extract_model
+
+
+class TestBackendResolution:
+    """通道选择不该在配好厂商之后还撞回默认通道。
+
+    真实场景：.env 里 DashScope 和 DeepSeek 两套都留着（一个额度用尽，
+    一个是新换的）。忘了加 --llm openai 就又撞上 403——
+    这种坑不该靠人记住。
+    """
+
+    def _args(self, llm=None, fake=False):
+        import argparse
+
+        return argparse.Namespace(llm=llm, fake_llm=fake)
+
+    def test_explicit_flag_always_wins(self, monkeypatch):
+        from smartmall_pipeline.cli import _resolve_llm_backend
+
+        monkeypatch.setenv("SMARTMALL_LLM_BASE_URL", "https://api.deepseek.com")
+        assert _resolve_llm_backend(self._args(llm="dashscope")) == "dashscope"
+
+    def test_base_url_implies_openai(self, monkeypatch):
+        from smartmall_pipeline.cli import _resolve_llm_backend
+
+        monkeypatch.setenv("SMARTMALL_LLM_BASE_URL", "https://api.deepseek.com")
+        assert _resolve_llm_backend(self._args()) == "openai"
+
+    def test_falls_back_to_dashscope(self, monkeypatch):
+        from smartmall_pipeline.cli import _resolve_llm_backend
+
+        monkeypatch.delenv("SMARTMALL_LLM_BASE_URL", raising=False)
+        assert _resolve_llm_backend(self._args()) == "dashscope"
+
+    def test_blank_base_url_does_not_imply_openai(self, monkeypatch):
+        """.env 模板里留的空行不该把通道带偏。"""
+        from smartmall_pipeline.cli import _resolve_llm_backend
+
+        monkeypatch.setenv("SMARTMALL_LLM_BASE_URL", "  ")
+        assert _resolve_llm_backend(self._args()) == "dashscope"
+
+    def test_fake_beats_everything(self, monkeypatch):
+        from smartmall_pipeline.cli import _resolve_llm_backend
+
+        monkeypatch.setenv("SMARTMALL_LLM_BASE_URL", "https://api.deepseek.com")
+        assert _resolve_llm_backend(self._args(llm="openai", fake=True)) == "fake"
+
+
+class TestChatUrl:
+    """base_url 该写到哪一层，各家文档给的答案不一样。
+
+    DeepSeek 写 https://api.deepseek.com，OpenAI/Kimi 写到 /v1，
+    智谱写到 /api/paas/v4。照抄哪一份都合理，代码得都认。
+    """
+
+    def _url(self, base: str) -> str:
+        return g3.LiteLlmClient(base_url=base, api_key="k").chat_url
+
+    def test_bare_host_gets_v1(self):
+        assert self._url("https://api.deepseek.com") == (
+            "https://api.deepseek.com/v1/chat/completions"
+        )
+
+    def test_v1_is_not_doubled(self):
+        """粘了带 /v1 的地址不该拼成 /v1/v1 然后 404。"""
+        assert self._url("https://api.moonshot.cn/v1") == (
+            "https://api.moonshot.cn/v1/chat/completions"
+        )
+
+    def test_other_version_segments_respected(self):
+        """智谱是 v4，硬补 /v1 会打到不存在的路径。"""
+        assert self._url("https://open.bigmodel.cn/api/paas/v4") == (
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        )
+
+    def test_trailing_slash_with_version(self):
+        assert self._url("https://api.moonshot.cn/v1/") == (
+            "https://api.moonshot.cn/v1/chat/completions"
+        )
+
+    def test_path_containing_v1_midway_still_gets_suffix(self):
+        """只有结尾的版本段算数，中间出现的不算。"""
+        assert self._url("http://host/v1proxy") == (
+            "http://host/v1proxy/v1/chat/completions"
+        )
+
+    def test_dashscope_compatible_mode_unchanged(self):
+        """已验证可用的 DashScope 路径不能被这次改动带偏。"""
+        c = g3.LiteLlmClient(
+            base_url="https://dashscope.aliyuncs.com/compatible-mode", api_key="k"
+        )
+        assert c.chat_url == (
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+        )

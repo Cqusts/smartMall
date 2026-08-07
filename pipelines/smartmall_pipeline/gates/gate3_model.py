@@ -90,6 +90,20 @@ class LiteLlmClient:
         #: 首次因它被 400 后自动关闭——反正 parse_json_lenient 能兜住。
         self.use_response_format = True
 
+    @property
+    def chat_url(self) -> str:
+        """补全 chat/completions 路径。
+
+        各家文档给的 base_url 不一致：DeepSeek 写 ``https://api.deepseek.com``，
+        OpenAI 和 Kimi 写到 ``/v1``，智谱写到 ``/api/paas/v4``。
+        照抄哪一份都合理，但直接拼 ``/v1/chat/completions`` 就会拼出
+        ``/v1/v1/...`` 然后 404——而 404 的报错完全看不出是多了一段路径。
+        已经带版本号的就不再补。
+        """
+        if re.search(r"/v\d+$", self.base_url):
+            return f"{self.base_url}/chat/completions"
+        return f"{self.base_url}/v1/chat/completions"
+
     def _payload(self, model: str, system: str, user: str) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": model,
@@ -108,7 +122,7 @@ class LiteLlmClient:
 
         try:
             resp = httpx.post(
-                f"{self.base_url}/v1/chat/completions",
+                self.chat_url,
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json=self._payload(model, system, user),
                 timeout=self.timeout,
@@ -120,7 +134,7 @@ class LiteLlmClient:
                 self.use_response_format = False
                 print("  ⚠ 模型不接受 response_format，已关闭该参数重试")
                 resp = httpx.post(
-                    f"{self.base_url}/v1/chat/completions",
+                    self.chat_url,
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     json=self._payload(model, system, user),
                     timeout=self.timeout,
