@@ -150,7 +150,7 @@ make health       # 存活检查
 |---|---|---|
 | **M0 基础设施** | ✅ 已完成 | monorepo 骨架、11 个服务、compose 三件套、30 张表、Kafka 契约、健康探针 |
 | **M1 数据中台 + RAG** | 🟡 核心已完成 | 四道清洗关卡、`knowledge_item`、混合检索、发版门禁、覆盖度矩阵、3 个 DAG（142 测试）<br/>待接真实环境：JDDC 导入、Milvus 集成验证、Label Studio 项目配置 |
-| M2 文本 AI 客服 | ⬜ | LangGraph、MCP 工具、Trace 回流 |
+| **M2 文本 AI 客服** | 🟡 核心已完成 | LangGraph 状态机、七类意图分流、引用溯源、转人工、Trace 落库、点赞点踩、知识盲点回流（89 测试）<br/>待做：MCP 工具层、WebSocket 流式、Redis 会话、意图分类评测集 |
 | M3 素材中心 + 运营 Agent | ⬜ | ComfyUI / Wan2.2 / CosyVoice2 |
 | M4 多模态客服 | ⬜ | 图片理解入口、素材挂载 |
 | M5 直播切片 | ⬜ | SRS + FunASR + 语义分段 |
@@ -268,3 +268,34 @@ smartmall-agent chat --product-id 1024       # 带商品上下文，检索按商
 而不是硬编一个答案。
 
 HTTP 形态：`POST /chat`，返回 `answer` / `citations` / `trace_id` / `handover`。
+
+### 数据飞轮的后半圈
+
+前半圈把历史对话变成知识；后半圈把**答不上来的问题**变成知识。
+后者更值钱——它由真实用户的真实提问驱动，而不是从存量数据里挖。
+
+先建表（一次性）：
+
+```bash
+mysql -u root -p smartmall < deploy/sql/migrations/003_agent_trace_and_handover.sql
+```
+
+之后每一轮对话都会自动落 `agent_trace`，每一次转人工都会开一张工单：
+
+```bash
+smartmall-agent traces                       # 最近的埋点：意图、命中分数、反馈
+smartmall-agent feedback <trace_id> down --reason 太啰嗦
+
+smartmall-pipeline handover list             # 知识盲点，按被问次数排序
+smartmall-pipeline handover answer 7 "建议手洗，水温不超过30度"
+smartmall-pipeline approve 813               # 人工确认后才允许进索引
+smartmall-pipeline index                     # 下次同样的问题就能自动回答了
+```
+
+`handover list` 按题面聚合：同一个问题反复转人工，说明它既是真需求
+又确实没有知识，补写顺序直接按频次排，比看覆盖度矩阵拍脑袋准。
+
+回流进来的知识一律 `review_status=pending`，**不会**自动进索引。
+人工客服的回答是为眼前这一个用户写的，可能带着这单特有的让步
+（"这次给您补个运费"），直接当通用知识上线就是把一次性特例
+变成对所有人的承诺。`approve` 是刻意留的这道闸。

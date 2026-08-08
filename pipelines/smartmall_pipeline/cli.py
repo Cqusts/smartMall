@@ -411,6 +411,97 @@ def cmd_peek(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- handover
+
+
+def cmd_handover(args: argparse.Namespace) -> int:
+    """转人工工单：看盲点、补答案、回灌知识库。
+
+    这是数据飞轮的后半圈。前半圈把历史对话变成知识，后半圈把
+    「答不上来的问题」变成知识——后者更值钱，因为它由真实用户的
+    真实提问驱动，而不是从存量数据里挖。
+    """
+    from .handover import HandoverImportError, render_blind_spots, to_knowledge_item
+
+    repo = DwsRepository.from_env()
+
+    if args.action == "list":
+        spots = repo.blind_spots(limit=args.limit)
+        print(f"==> 知识盲点（按被问次数排序）\n")
+        print(render_blind_spots(spots))
+        if spots:
+            print(f"\n  补一条：smartmall-pipeline handover answer "
+                  f"{spots[0].ticket_id} \"你的答案\"")
+        return 0
+
+    ticket = repo.fetch_ticket(args.ticket_id)
+    if ticket is None:
+        print(f"✗ 找不到工单 #{args.ticket_id}")
+        return 1
+    if ticket.status == "imported" and not args.force:
+        print(f"✗ 工单 #{ticket.id} 已经回流过了（knowledge_item 已生成）。")
+        print("  想重新回流加 --force，但会产生重复知识。")
+        return 1
+
+    print(f"==> 工单 #{ticket.id}")
+    print(f"  问题：{ticket.question}")
+    print(f"  原因：{ticket.reason}")
+
+    # 类目要填上，否则覆盖度矩阵漏算这条——而"补上了哪块空白"
+    # 正是回流最想回答的问题
+    from sqlalchemy import text as _sql
+
+    with repo.engine.connect() as conn:
+        product_category = {
+            r[0]: r[1] for r in conn.execute(
+                _sql("SELECT id, category_id FROM product WHERE deleted = 0")
+            )
+        }
+
+    try:
+        item = to_knowledge_item(
+            ticket, args.answer, product_category=product_category
+        )
+    except HandoverImportError as exc:
+        print(f"✗ {exc}")
+        return 1
+
+    item_id = repo.save_knowledge_item_returning_id(item)
+    repo.answer_ticket(ticket.id, args.answer, item_id)
+
+    print(f"  ✓ 已生成知识条目 #{item_id}（{item.knowledge_type.value}，"
+          f"类目 {item.category_id or '未知'}）")
+    print("  ✓ 状态置为 imported")
+    print("\n  它是 pending 状态，**不会**自动进索引——未经审核的知识")
+    print("  绝不上线。人工确认后跑：")
+    print(f"    smartmall-pipeline approve {item_id}")
+    print("    smartmall-pipeline index")
+    return 0
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    """人工确认知识条目，使其可以进索引。
+
+    这一步不能省。回流进来的答案是人工客服为**眼前这一个用户**写的，
+    可能带着这单特有的让步（"这次给您补个运费"），直接当通用知识
+    上线会把一次性的特例变成对所有人的承诺。
+    """
+    from sqlalchemy import text
+
+    repo = DwsRepository.from_env()
+    ids = ", ".join(str(int(i)) for i in args.item_ids)
+    with repo.engine.begin() as conn:
+        n = conn.execute(text(
+            f"UPDATE knowledge_item SET review_status = 'approved',"
+            f" embedding_status = 'pending' WHERE id IN ({ids})"
+            f" AND review_status = 'pending'"
+        )).rowcount
+    print(f"  ✓ 已通过 {n} 条（原本就不是 pending 的不会被改）")
+    if n:
+        print("  下一步：smartmall-pipeline index")
+    return 0
+
+
 # ---------------------------------------------------------------- stats
 
 
@@ -437,6 +528,13 @@ def cmd_stats(args: argparse.Namespace) -> int:
         ("微调样本", "SELECT COUNT(*) FROM sft_sample WHERE deleted=0"),
         ("数据集版本", "SELECT COUNT(*) FROM dataset_version"),
         ("清洗任务记录", "SELECT COUNT(*) FROM ds_job"),
+        ("Agent 对话埋点", "SELECT COUNT(*) FROM agent_trace"),
+        ("  点赞 / 点踩", "SELECT CONCAT(SUM(thumb=1), ' / ', SUM(thumb=-1)) "
+                        "FROM agent_trace WHERE thumb IS NOT NULL"),
+        ("转人工工单", "SELECT COUNT(*) FROM handover_ticket"),
+        ("  待补答案", "SELECT COUNT(*) FROM handover_ticket WHERE status='open'"),
+        ("  已回灌知识库", "SELECT COUNT(*) FROM handover_ticket "
+                        "WHERE status='imported'"),
     ]
 
     print(f"==> {_env_summary()}\n")
@@ -831,6 +929,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--status", help="只看某个审核状态，如 approved / pending")
     s.add_argument("--type", help="只看某个知识类型，如 spec / logistics / sizing")
     s.set_defaults(func=cmd_peek)
+
+    s = sub.add_parser("handover", help="转人工工单：看盲点、补答案、回灌")
+    hsub = s.add_subparsers(dest="action", required=True)
+    h = hsub.add_parser("list", help="按被问次数排序的知识盲点")
+    h.add_argument("--limit", type=int, default=30)
+    h = hsub.add_parser("answer", help="补上人工答案并生成待审核知识")
+    h.add_argument("ticket_id", type=int)
+    h.add_argument("answer")
+    h.add_argument("--force", action="store_true", help="允许对已回流的工单重做")
+    s.set_defaults(func=cmd_handover)
+
+    s = sub.add_parser("approve", help="人工确认知识条目，使其可进索引")
+    s.add_argument("item_ids", type=int, nargs="+")
+    s.set_defaults(func=cmd_approve)
 
     s = sub.add_parser("stats", help="各层数据量概览")
     s.set_defaults(func=cmd_stats)

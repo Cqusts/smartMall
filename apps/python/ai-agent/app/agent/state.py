@@ -175,6 +175,8 @@ class AgentState:
     handover: bool = False
     handover_reason: HandoverReason | None = None
     handover_summary: dict[str, Any] = field(default_factory=dict)
+    handover_ticket_id: int | None = None
+    """落库后的工单号。人工按它接手，也是补写任务的句柄。"""
     postcheck_flags: list[str] = field(default_factory=list)
     blocked: bool = False
     """输入安全检查未通过，直接回绝，不进入后续任何节点。"""

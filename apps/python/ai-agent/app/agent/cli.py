@@ -97,7 +97,20 @@ def _build_deps(args: argparse.Namespace) -> Deps:
             print("  ⚠ 索引是空的。先跑 smartmall-pipeline clean 和 index。")
 
     print(f"  模型：意图 {cfg.intent_model} / 回答 {cfg.answer_model}")
-    return Deps(llm=llm, retriever=retriever, config=cfg)
+
+    store = None
+    if not args.no_trace:
+        from .store import MySqlTraceStore
+
+        try:
+            store = MySqlTraceStore.from_env()
+            print("  埋点：写入 agent_trace / handover_ticket")
+        except Exception as exc:  # noqa: BLE001
+            # 埋点起不来不该挡住对话——它是数据管道，不是功能依赖
+            print(f"  ⚠ 埋点不可用（{type(exc).__name__}），本次不落库")
+            print("    建表：deploy/sql/migrations/003_agent_trace_and_handover.sql")
+
+    return Deps(llm=llm, retriever=retriever, config=cfg, store=store)
 
 
 def _new_state(args: argparse.Namespace) -> AgentState:
@@ -134,6 +147,13 @@ def _render(state: AgentState, *, verbose: bool) -> None:
         action = state.handover_summary.get("suggested_action")
         if action:
             print(f"    建议：{action}")
+    if state.handover_ticket_id:
+        print(f"\n  已建工单 #{state.handover_ticket_id} —— 这是一个知识盲点。")
+        print(f"    补上答案：smartmall-pipeline handover answer "
+              f"{state.handover_ticket_id} \"...\"")
+    if state.trace.trace_id:
+        print(f"\n  trace {state.trace.trace_id[:12]}"
+              f"  （点踩：smartmall-agent feedback {state.trace.trace_id} down）")
 
 
 # ---------------------------------------------------------------- 命令
@@ -184,6 +204,53 @@ def cmd_trace(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_feedback(args: argparse.Namespace) -> int:
+    """点赞点踩回写。
+
+    点踩的回复直接作为 DPO 负例；原因里的「态度生硬」「太啰嗦」
+    正对应微调要解决的风格问题——那两个选项的信息量最大。
+    """
+    from .store import MySqlTraceStore
+
+    store = MySqlTraceStore.from_env()
+    ok = store.record_feedback(
+        args.trace_id, 1 if args.thumb == "up" else -1, args.reason
+    )
+    if not ok:
+        print(f"✗ 没有找到 trace {args.trace_id}")
+        if store.errors:
+            print(f"  {store.errors[-1]}")
+        return 1
+    print(f"  ✓ 已记录{'点赞' if args.thumb == 'up' else '点踩'}")
+    return 0
+
+
+def cmd_traces(args: argparse.Namespace) -> int:
+    """最近的对话埋点。
+
+    调阈值时最有用的一张表：把命中分数和"这次答得好不好"放在一起看，
+    才知道 handover_below 该定在哪。
+    """
+    from .store import MySqlTraceStore
+
+    rows = MySqlTraceStore.from_env().recent(
+        args.limit, handover_only=args.handover_only
+    )
+    if not rows:
+        print("  还没有埋点。先跑 `smartmall-agent chat` 聊几句。")
+        return 0
+
+    print(f"{'时间':<17} {'意图':<20} {'命中':>4} {'最高分':>7} {'反馈':<4} 问题")
+    print("─" * 96)
+    for r in rows:
+        thumb = {1: "👍", -1: "👎"}.get(r["thumb"], "")
+        mark = "转人工 " if r["handover"] else ""
+        print(f"{r['created_at']:%m-%d %H:%M:%S}   {r['intent']:<20}"
+              f" {r['retrieval_hit_count']:>4} {float(r['retrieval_max_score']):>7.3f}"
+              f" {thumb:<4} {mark}{r['input_text'][:28]}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="smartmall-agent", description="smartMall 客服 Agent 调试台"
@@ -204,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="用假模型，不调真实 API、不产生费用")
     common.add_argument("-v", "--verbose", action="store_true",
                         help="打印意图、命中与分数")
+    common.add_argument("--no-trace", action="store_true",
+                        help="不写埋点。默认写——Trace 是训练数据的原料")
 
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("chat", parents=[common], help="交互式多轮对话").set_defaults(
@@ -215,6 +284,18 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("trace", parents=[common], help="单轮提问并打印完整 Trace")
     s.add_argument("question")
     s.set_defaults(func=cmd_trace)
+
+    s = sub.add_parser("feedback", help="给某次回复点赞或点踩")
+    s.add_argument("trace_id")
+    s.add_argument("thumb", choices=["up", "down"])
+    s.add_argument("--reason", default="",
+                   help="答非所问 / 信息错误 / 态度生硬 / 太啰嗦")
+    s.set_defaults(func=cmd_feedback)
+
+    s = sub.add_parser("traces", help="看最近的对话埋点")
+    s.add_argument("--limit", type=int, default=15)
+    s.add_argument("--handover-only", action="store_true")
+    s.set_defaults(func=cmd_traces)
 
     args = p.parse_args(argv)
 

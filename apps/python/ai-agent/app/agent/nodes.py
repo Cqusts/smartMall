@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from . import guard, prompts
 from .llm import LlmClient, LlmError
@@ -51,6 +52,9 @@ class Deps:
     llm: LlmClient
     retriever: Retriever
     config: AgentConfig = field(default_factory=AgentConfig)
+    store: Any = None
+    """埋点与工单落库。为 None 时不落库——这是刻意的默认值：
+    Agent 在没有数据库的环境里（测试、离线调试）必须照样能跑。"""
 
 
 # ---------------------------------------------------------------- 辅助
@@ -327,7 +331,7 @@ def handover(state: AgentState, deps: Deps) -> AgentState:
 
 
 def emit(state: AgentState, deps: Deps) -> AgentState:
-    """收尾：写回会话历史，补齐 Trace。"""
+    """收尾：写回会话历史，补齐并落库 Trace。"""
     if state.answer:
         state.session.append("assistant", state.answer)
     state.trace.answer = state.answer
@@ -335,4 +339,14 @@ def emit(state: AgentState, deps: Deps) -> AgentState:
     state.trace.latency_ms["total"] = sum(
         v for k, v in state.trace.latency_ms.items() if k != "total"
     )
+
+    # 落库放在最后一个节点，且失败不影响返回给用户的答案。
+    # Trace 是训练数据的原料，但用户等的是回复——
+    # "这一轮没记上"的代价远小于"这一轮没回复"。
+    if deps.store is not None:
+        deps.store.save(state.trace)
+        if state.handover:
+            # 每一次转人工都是一个已经暴露的知识盲点。它比覆盖度矩阵
+            # 推断出来的空格子更值钱——带着用户的原话，证明真的有人问
+            state.handover_ticket_id = deps.store.save_handover(state)
     return state

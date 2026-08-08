@@ -282,6 +282,92 @@ class DwsRepository(_Base):
                      "indexed_at=NOW() WHERE id IN :ids").bindparams(ids=tuple(item_ids))
             )
 
+    # ------------------------------------------------------------ 转人工回流
+
+    def blind_spots(self, limit: int = 30) -> list["BlindSpot"]:
+        """按题面聚合的知识盲点。
+
+        同一个问题反复转人工，说明它既是真需求又确实没有知识——
+        频次就是补写优先级，比拍脑袋准得多。
+        """
+        from sqlalchemy import text
+
+        from .handover import BlindSpot
+
+        with self.engine.connect() as conn:
+            return [
+                BlindSpot(
+                    question=r["question"], times=r["times"], reason=r["reason"],
+                    ticket_id=r["ticket_id"], status=r["status"],
+                )
+                for r in conn.execute(text(
+                    "SELECT question, COUNT(*) AS times, MAX(reason) AS reason,"
+                    " MIN(id) AS ticket_id, MIN(status) AS status "
+                    "FROM handover_ticket GROUP BY question "
+                    "ORDER BY times DESC, ticket_id ASC LIMIT :n"
+                ), {"n": limit}).mappings()
+            ]
+
+    def fetch_ticket(self, ticket_id: int) -> "Ticket | None":
+        from sqlalchemy import text
+
+        from .handover import Ticket
+
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT id, question, reason, intent, product_id, status,"
+                " human_answer FROM handover_ticket WHERE id = :i"
+            ), {"i": ticket_id}).mappings().first()
+        if row is None:
+            return None
+        return Ticket(
+            id=row["id"], question=row["question"], reason=row["reason"],
+            intent=row["intent"] or "", product_id=row["product_id"],
+            status=row["status"], human_answer=row["human_answer"],
+        )
+
+    def answer_ticket(
+        self, ticket_id: int, answer: str, knowledge_item_id: int | None
+    ) -> None:
+        """回填人工答案并关联生成的知识条目。
+
+        两件事必须在同一个事务里：只写答案不关联条目，就无从判断
+        这张工单有没有真的回流；只写条目不改状态，重跑会重复生成。
+        """
+        from sqlalchemy import text
+
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE handover_ticket SET human_answer = :a, status = :st,"
+                " knowledge_item_id = :kid, answered_at = CURRENT_TIMESTAMP"
+                " WHERE id = :i"
+            ), {
+                "a": answer,
+                "st": "imported" if knowledge_item_id else "answered",
+                "kid": knowledge_item_id,
+                "i": ticket_id,
+            })
+
+    def save_knowledge_item_returning_id(self, item: KnowledgeItem) -> int | None:
+        """写一条知识并拿回自增 ID。
+
+        回流链路需要这个 ID 把工单和知识条目关联起来——
+        "这张工单补出了哪条知识"是飞轮能否被验证的关键。
+        """
+        before = self._max_knowledge_id()
+        if not self.save_knowledge_items([item]):
+            return None
+        after = self._max_knowledge_id()
+        return after if after != before else None
+
+    def _max_knowledge_id(self) -> int:
+        from sqlalchemy import text
+
+        with self.engine.connect() as conn:
+            return conn.execute(
+                text("SELECT COALESCE(MAX(id), 0) FROM knowledge_item")
+            ).scalar() or 0
+
     def record_job(self, batch_id: str, stats: dict[str, Any]) -> None:
         from sqlalchemy import text
 
