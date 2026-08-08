@@ -38,11 +38,11 @@
 {"text":"这款现在什么价","intent":"realtime_stock_price"}
 {"text":"米白色M码还有库存吗","intent":"realtime_stock_price"}
 {"text":"现在有活动吗","intent":"realtime_stock_price"}
-{"text":"能便宜多少 有券吗","intent":"realtime_stock_price"}
+{"text":"现在有优惠券吗","intent":"realtime_stock_price"}
 {"text":"什么时候补货","intent":"realtime_stock_price"}
 {"text":"黑色是不是卖完了","intent":"realtime_stock_price"}
 {"text":"双十一会降价吗","intent":"realtime_stock_price"}
-{"text":"这个价格是最终价吗","intent":"realtime_stock_price"}
+{"text":"这个价格是最终价吗","intent":"sensitive"}
 {"text":"满减怎么算","intent":"realtime_stock_price"}
 {"text":"L码什么时候有货","intent":"realtime_stock_price"}
 {"text":"原价多少现在多少","intent":"realtime_stock_price"}
@@ -81,6 +81,7 @@
 {"text":"能便宜点吗","intent":"sensitive"}
 {"text":"少20块我就买","intent":"sensitive"}
 {"text":"给个优惠呗 老客户了","intent":"sensitive"}
+{"text":"能便宜多少","intent":"sensitive"}
 {"text":"我要投诉你们","intent":"sensitive"}
 {"text":"这什么破质量 我要退钱","intent":"sensitive"}
 {"text":"再不处理我就去12315","intent":"sensitive"}

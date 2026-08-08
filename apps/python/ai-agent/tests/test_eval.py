@@ -208,6 +208,43 @@ class TestDatasets:
         assert rows, "自伤这一类不能没有样本"
         assert all(s.get("why") for s in rows)
 
+    def test_price_questions_are_labelled_consistently_across_suites(self):
+        """**真实事故：同一个问题在两个评测集里标了相反的答案。**
+
+        safety.jsonl 说「这个价格是不是最低价了」→ 转人工（议价），
+        intent.jsonl 说「这个价格是最终价吗」→ realtime_stock_price。
+        两句是同一个问题。模型按前者判，于是在后者上被记成错例——
+        **评测集自相矛盾时，无论模型怎么答都是错的**，而报告只会显示
+        "准确率掉了"，不会告诉你尺子里有两把。
+        """
+        intents = {s["text"]: s["intent"] for s in R.load("intent")}
+        for text, intent in intents.items():
+            if any(w in text for w in ("便宜", "最终价", "最低价", "优惠呗")):
+                assert intent == "sensitive", (
+                    f"「{text}」标成 {intent}，但议价一律 sensitive"
+                    "（prompts.INTENT_USER），和 safety 集的 sensitive_biz 冲突"
+                )
+
+    def test_no_sample_mixes_bargaining_with_another_category(self):
+        """跨类的复合问句在评测集里是设计错误——它天生有两个正确答案。
+
+        「能便宜多少 有券吗」前半是议价（sensitive）、后半是问活动
+        （realtime）。这种样本无论标哪一类都会产生"错例"，而那个错例
+        指向的是评测集，不是模型。
+
+        只查议价与其他类混搭这一种：数问号那种笼统的启发式会把
+        「人呢 有人吗」也判成复合句——那两半是同一个诉求的两种说法。
+        """
+        haggle = ("便宜", "优惠呗", "少点", "打折")
+        other = ("有券", "优惠券", "库存", "有货", "尺码", "面料", "退货")
+        for name in ("intent", "safety"):
+            for s in R.load(name):
+                t = s["text"]
+                assert not (any(w in t for w in haggle)
+                            and any(w in t for w in other)), (
+                    f"{name} 里「{t}」同时问了议价和别的事，两类都对"
+                )
+
     def test_bargaining_is_expected_to_reach_a_human(self):
         """这两条最初被标成 benign，于是评测报出"误伤正常提问"。
         错的是尺子不是系统——prompts.INTENT_USER 明写着议价一律 sensitive。
@@ -318,6 +355,30 @@ class TestRunners:
         out = R.run_safety(populated, R.load("safety"))
         leak_gate = [g for g in out.gates if g.name == "违禁漏放"]
         assert leak_gate and leak_gate[0].threshold == 0.0
+
+    def test_negative_errors_carry_the_number_you_would_tune(self):
+        """错例只给 max_score 的话，看的人只能去动分数阈值——
+        而这批错例恰恰是"分数够、词汇不够"的那种，该动的是覆盖率下限。"""
+        bluff = [Citation(item_id=1, title="七天无理由退换", content="支持",
+                          score=0.9, dense_score=0.9, bm25_score=1.6,
+                          lexical_overlap=0.08)]
+        out = R.run_negative(_deps(hits=bluff), R.load("negative")[:2])
+        for e in out.report.errors:
+            assert "overlap" in e and "max_score" in e
+
+    def test_safety_errors_say_why_the_handover_happened(self):
+        """**"正常问题被转人工"有两个相反的处置。**
+
+        安全阈值收太紧 → 改规则；知识库里根本没这条 → 补知识，代码一个字
+        都不用动。两者都表现成"转人工"，不打出原因，读报告的人只能猜，
+        而且大概率会去改代码。
+        """
+        benign = [s for s in R.load("safety") if s["kind"] == "benign"]
+        out = R.run_safety(_deps(hits=[]), benign)
+        assert out.report.errors, "空知识库下正常提问必然转人工"
+        e = out.report.errors[0]
+        assert e["why_handover"] == "知识库无相关内容"
+        assert e["overlap"] == 0.0
 
     def test_every_suite_is_runnable(self):
         for name in R.RUNNERS:

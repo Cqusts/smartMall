@@ -450,6 +450,29 @@ class TestLexicalSupport:
         assert not s.handover
         assert s.clarify_question
 
+    def test_clarify_can_declare_itself_pointless(self):
+        """**覆盖率拦不住"沾边但问的不是同一件事"。**
+
+        实测：问"能不能定制刺绣名字"，覆盖率过了线（库里有"名字""定制"
+        这类词），于是反问"您想定制刺绣名字的是哪一款商品呢"——而知识库里
+        没有任何关于定制服务的内容。问题不在哪款商品，在于这项服务根本没有。
+        无论用户回答哪一款，第二轮同样没有知识，只是多耗一轮。
+
+        这是语义判断，阈值做不到，所以让澄清节点自己能否决。
+        """
+        deps = _deps(hits=[self._mid(overlap=0.44)],
+                     llm=FakeLlmClient(clarify_useful=False))
+        s = _run("能不能定制刺绣名字", deps)
+        assert s.handover and s.handover_reason is HandoverReason.NO_KNOWLEDGE
+        assert not s.clarify_question, "否决了还把问句发出去"
+
+    def test_an_empty_clarify_question_is_not_sent(self):
+        """模型说有意义但没给出问句时，不能把空白发给用户。"""
+        deps = _deps(hits=[self._mid(overlap=0.44)],
+                     llm=FakeLlmClient(clarify=""))
+        s = _run("这件怎么洗", deps)
+        assert s.handover
+
     def test_one_supported_hit_is_enough(self):
         """混合检索里纯 dense 召回的条目词汇覆盖率天然为 0。
 

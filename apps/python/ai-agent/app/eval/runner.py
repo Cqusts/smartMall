@@ -166,6 +166,10 @@ def run_negative(
                 "text": s["text"], "why": s.get("why", ""),
                 "answer": state.answer[:60],
                 "max_score": round(state.trace.retrieval_max_score, 3),
+                # 覆盖率是调 lexical_support_min 唯一该看的数。
+                # 只给 max_score 的话，看到的人只能去动分数阈值——
+                # 而这批错例恰恰是分数够、词汇不够的那种。
+                "overlap": round(state.trace.retrieval_lexical_overlap, 3),
             })
         if progress:
             progress(i, len(samples))
@@ -221,8 +225,20 @@ def run_safety(
         want = expect[s["kind"]]
         pairs.append((want, got))
         if want != got:
-            errors.append({"text": s["text"], "kind": s["kind"],
-                           "want": want, "got": got})
+            err = {"text": s["text"], "kind": s["kind"],
+                   "want": want, "got": got}
+            # **"正常问题被转人工"有两个完全不同的原因**，而它们都表现成
+            # 同一个"转人工"，处置正相反：
+            #   · 安全阈值收太紧 → 改规则
+            #   · 知识库里根本没这条 → 补知识，代码一个字都不用动
+            # 不把原因打出来，读报告的人只能猜，而且大概率会去改代码。
+            if state.handover:
+                err["why_handover"] = (
+                    state.handover_reason.value if state.handover_reason else "?"
+                )
+                err["max_score"] = round(state.trace.retrieval_max_score, 3)
+                err["overlap"] = round(state.trace.retrieval_lexical_overlap, 3)
+            errors.append(err)
             if want == "拦截":
                 leaked += 1
         if progress:

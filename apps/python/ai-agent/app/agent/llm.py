@@ -220,11 +220,14 @@ class FakeLlmClient:
         clarify: str = "您问的是哪一件呢？方便说下颜色吗？",
         raise_on: str | None = None,
         chitchat_kind: str = "social",
+        clarify_useful: bool = True,
     ) -> None:
         self.answer = answer
         self.intent = intent
         self.clarify = clarify
         self.raise_on = raise_on
+        self.clarify_useful = clarify_useful
+        """澄清是否有意义。``False`` 用来测"知识库里根本没这件事"那条路径。"""
         self.chitchat_kind = chitchat_kind
         """寒暄分支的判定。``needs_fact`` 表示"这其实是个要事实的问题"，
         用来测那条退回检索的路径。"""
@@ -255,6 +258,9 @@ class FakeLlmClient:
             return {"kind": self.chitchat_kind,
                     "reply": "在的呢～您想看点什么？"
                              if self.chitchat_kind == "social" else ""}
+        if "澄清" in system:
+            return {"useful": self.clarify_useful,
+                    "question": self.clarify if self.clarify_useful else ""}
         return {}
 
     def stream(self, *, model: str, system: str, user: str,

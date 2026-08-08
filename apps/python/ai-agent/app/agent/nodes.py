@@ -256,20 +256,39 @@ def rewrite_query(state: AgentState, deps: Deps) -> AgentState:
 
 
 def clarify(state: AgentState, deps: Deps) -> AgentState:
-    """生成一个具体的澄清问题。"""
+    """生成一个具体的澄清问题——**或者判定澄清没有意义**。
+
+    ``lexical_support_min`` 那道阈值拦的是"词汇上完全不沾边"；拦不住的是
+    "沾边但问的不是同一件事"。实测两条：问"能不能定制刺绣名字"，覆盖率
+    过了线（知识库里有"名字""定制"这类词），于是反问"您想定制刺绣名字的是
+    哪一款商品呢"——而知识库里没有任何关于定制服务的内容。
+    问"能不能延长保修到三年"同理。
+
+    **问题不在哪款商品，在于这项服务根本没有。** 无论用户回答哪一款，
+    第二轮同样没有知识可用，只是把人多耗一轮。这个判断是语义的，
+    阈值做不到，所以交给模型——它手上同时有问题和检索结果。
+    """
     try:
-        state.clarify_question = deps.llm.complete(
+        data = deps.llm.complete_json(
             model=deps.config.clarify_model,
             system=prompts.CLARIFY_SYSTEM,
             user=prompts.CLARIFY_USER.format(
                 message=state.message, knowledge=_knowledge_text(state.hits)
             ),
-        ).strip()
+        )
     except LlmError:
         state.to_handover(HandoverReason.TOOL_FAILURE)
         return state
 
-    state.answer = state.clarify_question
+    question = str(data.get("question") or "").strip()
+    if not data.get("useful") or not question:
+        # 澄清没意义就转人工，原因记 NO_KNOWLEDGE——这条正是知识盲点，
+        # 人工答完要把它补进知识库
+        state.to_handover(HandoverReason.NO_KNOWLEDGE)
+        return state
+
+    state.clarify_question = question
+    state.answer = question
     return state
 
 
