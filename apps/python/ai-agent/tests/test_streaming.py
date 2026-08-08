@@ -297,6 +297,20 @@ class TestWebPage:
         assert not emoji, f"页面里还有 emoji：{set(emoji)}"
         assert "<symbol id=\"i-svc\"" in text, "图标 sprite 没了"
 
+    def test_chat_has_an_image_entry(self):
+        text = self._client().get("/").text
+        assert 'id="cfile"' in text and "image/jpeg" in text
+        assert "image: pendingImage" in text, "选了图但没发出去"
+
+    def test_diagnostics_show_the_pii_mask_count(self):
+        """**不显示就永远不知道那道防线在不在工作。**
+
+        脱敏命中平时应该是 0；非 0 说明提示词没拦住、模型把个人信息
+        转述出来了，只是被规则兜住了——那正是需要有人看一眼的时候。
+        """
+        text = self._client().get("/").text
+        assert "image_pii_hits" in text and "脱敏命中" in text
+
     def test_product_images_are_served_locally(self):
         """图存在仓库里而不是引外链——演示环境常常没有外网。"""
         c = self._client()

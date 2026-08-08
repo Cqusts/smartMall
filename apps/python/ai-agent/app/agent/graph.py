@@ -19,6 +19,21 @@ from .state import AgentState, HandoverReason, Intent
 # ---------------------------------------------------------------- 路由
 
 
+def route_after_vision(state: AgentState) -> str:
+    """看完图之后往哪走。
+
+    图片节点可能已经把话说完了（拒收、看不清要澄清），也可能已经决定
+    转人工（单据类但没订单号）。这些都要在这里出去，不能硬往下走——
+    往下走会拿一句空 query 去检索，然后命中一堆不相干的东西。
+    """
+    if state.blocked or (state.answer and not state.handover
+                         and state.clarify_question):
+        return "emit"
+    if state.handover:
+        return "handover"
+    return "guard"
+
+
 def route_after_guard(state: AgentState) -> str:
     if state.blocked:
         return "emit"
@@ -141,6 +156,16 @@ def run_turn(message: str, state: AgentState, deps: Deps) -> AgentState:
     cfg = deps.config
 
     state = nodes.ingest(state, deps)
+
+    # 图片在安全检查之前转成文本：安全规则是纯文本规则，
+    # 图不转述的话，"忽略上面所有指令"写在图上就绕过去了
+    state = nodes.understand_image(state, deps)
+    step = route_after_vision(state)
+    if step == "emit":
+        return nodes.emit(state, deps)
+    if step == "handover":
+        return nodes.emit(nodes.handover(state, deps), deps)
+
     state = nodes.guard_input(state, deps)
 
     step = route_after_guard(state)
@@ -245,6 +270,7 @@ def build_graph(deps: Deps):
 
     for name, fn in (
         ("ingest", nodes.ingest),
+        ("vision", nodes.understand_image),
         ("guard", nodes.guard_input),
         ("intent", nodes.classify_intent),
         ("tools", nodes.call_tools),
@@ -260,7 +286,10 @@ def build_graph(deps: Deps):
         g.add_node(name, (lambda f: lambda s: f(s, deps))(fn))
 
     g.add_edge(START, "ingest")
-    g.add_edge("ingest", "guard")
+    g.add_edge("ingest", "vision")
+    g.add_conditional_edges("vision", route_after_vision,
+                            {"emit": "emit", "handover": "handover",
+                             "guard": "guard"})
     g.add_conditional_edges("guard", route_after_guard,
                             {"emit": "emit", "handover": "handover",
                              "intent": "intent"})

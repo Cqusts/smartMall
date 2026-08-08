@@ -143,6 +143,11 @@ class TraceRecord:
     retrieval_hit_count: int = 0
     retrieval_max_score: float = 0.0
     retrieval_item_ids: list[int] = field(default_factory=list)
+    image_kind: str = ""
+    image_pii_hits: dict[str, int] = field(default_factory=dict)
+    """脱敏规则在图片转述里命中了什么。**非零说明提示词没拦住**，
+    这个数要能被看见，否则永远不知道那道防线在不在工作。"""
+
     retrieval_lexical_overlap: float = 0.0
     """最高的词汇覆盖率。和 max_score 一起看才能判断"到底有没有"——
     分数中等而覆盖率接近 0，说明这点相似度纯粹是向量空间的基线。"""
@@ -174,6 +179,16 @@ class AgentState:
     # ---- 输入 ----
     message: str = ""
     session: SessionContext = field(default_factory=SessionContext)
+
+    # ---- 图片输入 ----
+    image: bytes | None = None
+    image_mime: str = ""
+    image_kind: str = ""
+    """VLM 判定的图片类型：product / document / other。
+    document 意味着图上大概率有个人信息，处置和商品图不一样。"""
+    image_observations: str = ""
+    """转述结果（已脱敏）。放进生成上下文，也写进转人工工单——
+    人工接手时看得到用户发的是什么，不用再问一遍。"""
 
     # ---- 中间产物 ----
     intent: Intent = Intent.PRODUCT_KNOWLEDGE

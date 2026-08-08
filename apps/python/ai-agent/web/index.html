@@ -243,7 +243,18 @@ table.size th{background:#fafafa;color:var(--ink-2);font-weight:500}
 .quick button{font-size:12px;border:1px solid var(--line);border-radius:13px;
               padding:3px 11px;color:var(--ink-2);background:#fff}
 .quick button:hover{border-color:var(--orange);color:var(--orange)}
-.cform{display:flex;gap:8px;padding:10px 14px 14px}
+.pending{padding:0 14px}
+.pending .thumb{position:relative;display:inline-block;margin-top:8px}
+.pending img{height:64px;border-radius:4px;display:block;border:1px solid var(--line)}
+.pending .rm{position:absolute;top:-6px;right:-6px;width:20px;height:20px;
+             border-radius:50%;background:rgba(0,0,0,.65);color:#fff;
+             font-size:13px;line-height:20px;text-align:center}
+.msg img{max-width:180px;border-radius:6px;display:block;margin-bottom:6px}
+.cform{display:flex;gap:8px;padding:10px 14px 14px;align-items:center}
+.pick{display:flex;align-items:center;justify-content:center;width:36px;height:36px;
+      border:1px solid var(--line);border-radius:4px;color:var(--ink-2);
+      cursor:pointer;flex:none;font-size:18px}
+.pick:hover{border-color:var(--orange);color:var(--orange)}
 .cform input{flex:1;border:1px solid var(--line);border-radius:4px;padding:9px 11px;
              outline:none;font-size:14px;min-width:0}
 .cform input:focus{border-color:var(--orange)}
@@ -290,6 +301,7 @@ footer code{background:#ececec;padding:1px 5px;border-radius:2px}
   <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 2l10 19H2L12 2zm-1 7v6h2V9h-2zm0 8v2h2v-2h-2z"/></symbol>
   <symbol id="i-up" viewBox="0 0 24 24"><path d="M2 21h4V9H2v12zM23 10a2 2 0 00-2-2h-6.3l1-4.6v-.3a1.5 1.5 0 00-.4-1L14 1 7.6 7.4A2 2 0 007 8.8V19a2 2 0 002 2h9a2 2 0 001.8-1.2l3-7.1V10z"/></symbol>
   <symbol id="i-down" viewBox="0 0 24 24"><path d="M22 3h-4v12h4V3zM1 14a2 2 0 002 2h6.3l-1 4.6v.3a1.5 1.5 0 00.4 1L10 23l6.4-6.4a2 2 0 00.6-1.4V5a2 2 0 00-2-2H6a2 2 0 00-1.8 1.2l-3 7.1V14z"/></symbol>
+  <symbol id="i-img" viewBox="0 0 24 24"><path d="M21 3H3a1 1 0 00-1 1v16a1 1 0 001 1h18a1 1 0 001-1V4a1 1 0 00-1-1zm-1 15l-5-6-4 5-3-3-4 5V5h16v13zM8.5 10a1.5 1.5 0 100-3 1.5 1.5 0 000 3z"/></symbol>
 </svg>
 
 <div class="topbar"><div class="wrap">
@@ -412,8 +424,14 @@ footer code{background:#ececec;padding:1px 5px;border-radius:2px}
       <div class="clog" id="clog"></div>
       <div class="cstatus" id="cstatus"></div>
       <div class="quick" id="quick"></div>
+      <div class="pending" id="pending"></div>
       <form class="cform" onsubmit="send(event)">
-        <input id="cinput" placeholder="说点什么…" autocomplete="off">
+        <label class="pick" title="发图片">
+          <svg class="ico"><use href="#i-img"/></svg>
+          <input type="file" id="cfile" accept="image/jpeg,image/png,image/webp"
+                 onchange="pickImage(this)" hidden>
+        </label>
+        <input id="cinput" placeholder="说点什么，或发张图…" autocomplete="off">
         <button type="submit">发送</button>
       </form>
     </div>
@@ -640,19 +658,55 @@ function bubble(cls, text){
   return el;
 }
 
+/* 待发送的图片。前端只做大小与类型的初筛——真正的校验在服务端
+   （vision.check_image），前端那道拦不住手写的 WebSocket 请求 */
+let pendingImage = null;
+const MAX_IMG = 8 * 1024 * 1024;
+
+function pickImage(input){
+  const f = input.files?.[0];
+  input.value = '';                       // 允许连续选同一张
+  if (!f) return;
+  if (f.size > MAX_IMG){
+    bubble('sys', '图片有点大（超过 8MB），压缩一下再发可以吗？');
+    return;
+  }
+  const r = new FileReader();
+  r.onload = () => { pendingImage = r.result; renderPending(); };
+  r.readAsDataURL(f);
+}
+
+function renderPending(){
+  $('#pending').innerHTML = pendingImage
+    ? `<div class="thumb"><img src="${pendingImage}" alt="">
+       <span class="rm" onclick="clearImage()">×</span></div>` : '';
+}
+function clearImage(){ pendingImage = null; renderPending(); }
+
 function send(e){
   e?.preventDefault?.();
   const text = $('#cinput').value.trim();
-  if (!text || !connected) return;
-  bubble('me', text);
+  // 只发图不打字是常见用法，不能要求文字非空
+  if ((!text && !pendingImage) || !connected) return;
+
+  const el = bubble('me', '');
+  if (pendingImage){
+    const im = document.createElement('img');
+    im.src = pendingImage;
+    el.appendChild(im);
+  }
+  if (text) el.appendChild(document.createTextNode(text));
+
   $('#cinput').value = '';
   $('#cstatus').innerHTML = '<span class="pill live">思考</span>';
   ws.send(JSON.stringify({
     message: text,
+    image: pendingImage,
     session_id: sessionId,
     user_id: parseInt($('#user').value) || null,
     product_id: current ? current.id : null,
   }));
+  clearImage();
 }
 
 function handle(ev){
@@ -736,6 +790,22 @@ function renderDiag(ev){
         + kv('最高相似度', (d.max_score ?? 0).toFixed(3))
         + kv('耗时', (d.latency_ms?.total ?? 0) + ' ms');
   if (d.rewritten_query) h += kv('改写', esc(d.rewritten_query));
+  if (d.image_kind){
+    h += '<h3>图片理解</h3>' + kv('类型', {
+      product:'商品图', document:'单据/截图', other:'看不清'
+    }[d.image_kind] || d.image_kind);
+    if (d.latency_ms?.vision != null) h += kv('看图耗时', d.latency_ms.vision + ' ms');
+    // 脱敏命中平时应该是 0。**非 0 要显眼**——那说明提示词没拦住，
+    // 模型把个人信息转述出来了，只是被规则兜住了
+    const pii = d.image_pii_hits || {};
+    const n = Object.values(pii).reduce((a,b) => a + b, 0);
+    h += kv('脱敏命中', n
+      ? `<span class="tag no">${esc(Object.entries(pii)
+          .map(([k,v]) => k + '×' + v).join(' '))}</span>`
+      : '<span class="tag yes">0</span>');
+    if (d.image_observations)
+      h += `<div class="hit">${esc(d.image_observations)}</div>`;
+  }
   if (ev.handover) h += kv('转人工', esc(ev.handover_reason));
   if (ev.postcheck_flags?.length) h += kv('合规', ev.postcheck_flags.map(esc).join('、'));
 

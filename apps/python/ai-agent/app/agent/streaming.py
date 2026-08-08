@@ -71,6 +71,12 @@ def turn_result(state: AgentState) -> dict[str, Any]:
             ],
             "tools_called": state.trace.tools_called,
             "latency_ms": state.trace.latency_ms,
+            "image_kind": state.trace.image_kind,
+            "image_observations": state.image_observations,
+            # 脱敏命中数要露在面板上。**不显示就永远不知道那道防线在
+            # 不在工作**——它平时应该是 0，非 0 说明提示词没拦住，
+            # 而那正是需要有人看一眼的时候
+            "image_pii_hits": state.trace.image_pii_hits,
         },
     }
 

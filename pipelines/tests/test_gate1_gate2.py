@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from smartmall_pipeline.gates import gate1_machine as g1
 from smartmall_pipeline.gates import gate2_rules as g2
 from smartmall_pipeline.gates import pii
@@ -53,6 +55,35 @@ class TestPii:
         r = pii.mask("地址是浙江省杭州市西湖区文三路100号")
         assert "<ADDRESS>" in r.text
         assert "文三路" not in r.text
+
+    @pytest.mark.parametrize("addr", [
+        "北京市朝阳区建国路88号",
+        "上海市浦东新区世纪大道1号",
+        "天津市和平区南京路12号",
+        "重庆市渝中区解放碑步行街5号",
+    ])
+    def test_masks_municipality_addresses(self, addr):
+        """**这里漏过一个真实的洞。**
+
+        规则原先是 ``[一-龥]{2,8}(?:省|自治区)?``——省字可选，但那 2-8 个
+        汉字是必需的。于是"北京市朝阳区…"匹配不上，因为"北京市"前面
+        什么都没有。四个直辖市的收货地址就这样从关卡①穿了过去，
+        而北京上海恰恰是地址最密集的地方。
+
+        是做图片转述那条路时撞出来的：一张快递面单，电话被脱敏了，
+        地址原样留着。
+        """
+        assert pii.mask(f"收货地址 {addr}").text.count("<ADDRESS>") == 1
+
+    @pytest.mark.parametrize("text", [
+        "退货区域的运费5号之前免",
+        "这个小区不让进",
+        "市区内当天送达",
+    ])
+    def test_does_not_swallow_ordinary_sentences(self, text):
+        """把省市整段放宽以后要防过度匹配——脱敏误伤的是正常语料，
+        知识库会莫名其妙缺一块。"""
+        assert pii.mask(text).text == text
 
     def test_masks_email(self):
         r = pii.mask("发我邮箱 zhang.san+1@example.com 谢谢")

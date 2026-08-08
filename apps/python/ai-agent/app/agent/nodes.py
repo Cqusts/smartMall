@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import guard, prompts
+from . import guard, prompts, vision
 from .llm import LlmClient, LlmError
 from .retriever import RetrievalError, Retriever
 from .tools import (
@@ -77,6 +77,9 @@ class Deps:
     tools: ToolBox | None = None
     """业务数据工具集。为 None 时实时类问题转人工——
     宁可转人工，也不能拿知识库里三个月前的"目前有货"糊弄过去。"""
+    vision: Any = None
+    """看图模型。为 None 时不接受图片——**失败关闭**：
+    这条路径带着脱敏责任，不可用时正确的行为是不收图，不是不脱敏照收。"""
     on_event: Any = None
     """流式事件回调 ``(dict) -> None``。为 None 时整条链路完全同步，
     行为与从前一致——**流式不另起一套编排**，否则两条路径必然分叉。"""
@@ -132,6 +135,86 @@ def ingest(state: AgentState, deps: Deps) -> AgentState:
     state.trace.user_id = state.session.user_id
     state.trace.input_text = state.message
     state.session.append("user", state.message)
+    return state
+
+
+def understand_image(state: AgentState, deps: Deps) -> AgentState:
+    """把用户发的图转成文本，接回主链路。
+
+    转出来的文本**替换或补足** ``state.query``，后面的检索、闸门、生成、
+    出口检查一概复用——图片这条入口不需要自己再长一遍这些能力。
+
+    三种图三种处置：
+
+    * ``product`` —— 转述当检索词，正常往下走。
+    * ``document`` —— 订单截图、面单、聊天记录。这类图上大概率有个人
+      信息，而且用户发它通常是要查单或投诉，**知识库回答不了**。
+      有订单号就交给工具查，没有就转人工。
+    * ``other`` —— 看不清或与购物无关。问一句比猜一句好。
+    """
+    if not state.image:
+        return state
+    if deps.vision is None:
+        # 没配看图模型就不收图。装作没看见比"看了但没脱敏"安全得多
+        state.answer = "我这边暂时看不了图片，麻烦用文字描述一下可以吗？"
+        state.blocked = True
+        state.trace.postcheck_flags.append("图片拒收:未配置视觉模型")
+        return state
+
+    t0 = time.time()
+    try:
+        result = vision.understand(
+            deps.vision, state.image, state.image_mime, state.message
+        )
+    except vision.ImageRejected as exc:
+        # 入口校验没过（格式、大小、脱敏模块缺失）。给用户一句能照做的话，
+        # 而不是一个错误码
+        state.answer = exc.reply
+        state.blocked = True
+        state.trace.postcheck_flags.append(f"图片拒收:{exc.reason}")
+        return state
+    except LlmError as exc:
+        # 看图失败 ≠ 图里没内容。和检索、打标同一条原则：
+        # 业务结论只能来自成功的响应
+        state.to_handover(HandoverReason.TOOL_FAILURE)
+        state.trace.error = f"{type(exc).__name__}: {exc}"
+        return state
+
+    state.trace.latency_ms["vision"] = int((time.time() - t0) * 1000)
+    state.image_kind = state.trace.image_kind = result.kind
+    state.image_observations = result.observations
+    state.trace.image_pii_hits = result.pii_hits
+    deps.emit_event(type="status", stage="vision", detail=result.kind)
+
+    if result.kind == "other":
+        state.clarify_question = (
+            "这张图我没太看清，方便说一下您想问的是哪方面吗？"
+        )
+        state.answer = state.clarify_question
+        return state
+
+    if result.is_document:
+        # 单据类：把订单号补进消息里交给下游，**但不在这里定意图**。
+        # 定了也没用——classify_intent 在后面跑，会盖掉；而且也不该定：
+        # 用户可能是发着订单截图问"这件还有货吗"，订单号只是上下文，
+        # 不是问题本身。谁问的问题谁清楚，那是分类器的活。
+        if result.order_no:
+            state.message = f"{state.message} 订单号{result.order_no}".strip()
+            state.query = state.message
+            state.trace.input_text = state.message
+        else:
+            # 一张看不出单号的单据，知识库答不了——硬检索只会命中一堆
+            # 不相干的物流知识，然后一本正经地说错
+            state.to_handover(HandoverReason.NO_KNOWLEDGE)
+        return state
+
+    # 商品图：转述作为检索词。用户自己打的字优先——他写的"起球怎么办"
+    # 比模型转述的"米白色针织衫"更接近他真正想问的
+    parts = [p for p in (state.message.strip(), result.query) if p]
+    state.query = " ".join(parts) or result.observations
+    if not state.message.strip():
+        state.message = result.query or "（用户发来一张图片）"
+        state.trace.input_text = state.message
     return state
 
 

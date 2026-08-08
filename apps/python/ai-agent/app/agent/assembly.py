@@ -107,4 +107,20 @@ def build_deps(
             log(f"  ⚠ 工具集不可用（{type(exc).__name__}），实时类问题会转人工")
             log("    建表与种子：deploy/sql/migrations/004_order_and_tool_seed.sql")
 
-    return Deps(llm=llm, retriever=retriever, config=cfg, store=store, tools=tools)
+    vlm = None
+    if fake_llm:
+        from .vision import FakeVisionClient
+
+        vlm = FakeVisionClient()
+    else:
+        from .vision import DashScopeVisionClient
+
+        try:
+            vlm = DashScopeVisionClient()
+            log("  看图：qwen-vl-max（转述后走同一套脱敏与检索）")
+        except Exception as exc:  # noqa: BLE001
+            # 失败关闭：不配就不收图。装作没看见比"看了但没脱敏"安全得多
+            log(f"  ⚠ 看图不可用（{type(exc).__name__}），发图会被婉拒")
+
+    return Deps(llm=llm, retriever=retriever, config=cfg, store=store,
+                tools=tools, vision=vlm)

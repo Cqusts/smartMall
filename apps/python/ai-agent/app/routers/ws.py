@@ -9,6 +9,8 @@ async，是因为那要连带改掉 httpx、SQLAlchemy 两层的调用方式，
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import re
 from pathlib import Path
 from typing import Any
@@ -105,7 +107,9 @@ async def ws_chat(ws: WebSocket) -> None:
                 continue
 
             message = (payload.get("message") or "").strip()
-            if not message:
+            image, mime = _decode_image(payload.get("image"))
+            # 只发图不打字是常见用法，所以不能要求 message 非空
+            if not message and not image:
                 continue
 
             ctx = _sessions.get(
@@ -118,7 +122,7 @@ async def ws_chat(ws: WebSocket) -> None:
             if payload.get("product_id") is not None:
                 ctx.current_product_id = payload["product_id"]
 
-            state = AgentState(session=ctx)
+            state = AgentState(session=ctx, image=image, image_mime=mime)
             await _pump(ws, loop, message, state)
             _sessions.touch(ctx)
 
@@ -134,6 +138,33 @@ async def ws_chat(ws: WebSocket) -> None:
             })
         except Exception:  # noqa: BLE001
             pass
+
+
+#: data URL 前缀。前端 FileReader 读出来就是这个形状
+_DATA_URL = re.compile(r"^data:(image/[a-z+]{2,12});base64,(.+)$", re.S)
+
+#: base64 后的上限。比 MAX_IMAGE_BYTES 略宽（base64 涨 4/3），
+#: 在这里先挡一道是为了**不把超大串解码出来**——解完再判大小，
+#: 内存已经吃进去了
+_MAX_B64 = 12 * 1024 * 1024
+
+
+def _decode_image(raw: Any) -> tuple[bytes | None, str]:
+    """把前端传来的 data URL 解成字节。
+
+    解不出来就当没有图，让下游按纯文本处理——这里返回错误没有意义，
+    用户看到的会是一个技术细节，而他能做的仍然只是重发一次。
+    真正的格式与大小校验在 vision.check_image，那里有给用户的话术。
+    """
+    if not isinstance(raw, str) or len(raw) > _MAX_B64:
+        return None, ""
+    m = _DATA_URL.match(raw.strip())
+    if not m:
+        return None, ""
+    try:
+        return base64.b64decode(m.group(2), validate=True), m.group(1)
+    except (ValueError, binascii.Error):
+        return None, ""
 
 
 async def _pump(
