@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
+from . import dedup as dedup_mod
 from .gates import gate1_machine, gate2_rules, gate3_model, gate4_human
 from .models import Dialogue, FunnelReport, KnowledgeItem, SftSample
 
@@ -110,6 +111,12 @@ def run_pipeline(
         outcomes[ods_id] = (
             ("passed", None) if ods_id in produced else ("dropped", s3.gate)
         )
+
+    # 去重必须在关卡④**之前**：置信度是自动通过的判据，而多信源印证
+    # 会提高置信度。放在后面的话，五条同题条目会各自按单条的置信度
+    # 被判断，其中四条还会白白占掉人工的抽检名额。
+    items, s_dedup = dedup_mod.merge_duplicates(items)
+    report.add(s_dedup)
 
     tasks, auto_approved, s4 = gate4_human.triage(
         items, cfg.gate4, product_attrs=product_attrs, question_freq=question_freq

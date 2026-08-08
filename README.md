@@ -216,6 +216,8 @@ smartmall-pipeline check                  # 校验连通性、表结构、中文
 smartmall-pipeline ingest --count 400     # 生成合成对话写入 ODS
 smartmall-pipeline clean --fake-llm       # 跑四道关卡，打印漏斗报表
 smartmall-pipeline stats                  # 各层数据量
+smartmall-pipeline peek                   # 抽查产出的实际内容
+smartmall-pipeline dedup --yes            # 清掉同题重复（清洗流水线已内置，这条修存量）
 smartmall-pipeline coverage               # 知识覆盖度矩阵
 smartmall-pipeline publish --version kb-v1
 ```

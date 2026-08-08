@@ -23,7 +23,7 @@ def test_full_pipeline_produces_publishable_knowledge():
     report = out.report
 
     # ---- 漏斗形状：逐关递减，每关都真的淘汰了东西 ----
-    assert len(report.stages) == 4
+    assert len(report.stages) == 5  # 四道关卡 + 知识去重
     assert report.stages[0].gate.startswith("①")
     assert report.stages[-1].gate.startswith("④")
     for i in range(1, 3):

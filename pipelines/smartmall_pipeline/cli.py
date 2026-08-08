@@ -411,6 +411,79 @@ def cmd_peek(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- dedup
+
+
+def cmd_dedup(args: argparse.Namespace) -> int:
+    """清掉库里已有的同题重复知识。
+
+    去重现在是清洗流水线的一环，但**已经入库的数据不会自动受益**。
+    这条命令让人不必为了去重把几百段对话重新清洗一遍（还要再付一次
+    模型调用的钱）。
+
+    判据与流水线里完全一致：同 biz_type + 同标题 + 同关联商品即为同题。
+    """
+    from sqlalchemy import text
+
+    repo = DwsRepository.from_env()
+
+    # 只看已审核的：待审核的还没定稿，去重意义不大且会干扰人工判断
+    with repo.engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, biz_type, title, product_ids, confidence, quality_score,"
+            " CHAR_LENGTH(content) AS clen "
+            "FROM knowledge_item WHERE deleted = 0 "
+            "AND review_status IN ('approved','revised') ORDER BY id"
+        )).mappings().fetchall()
+
+    groups: dict[tuple, list] = {}
+    for r in rows:
+        key = (r["biz_type"], (r["title"] or "").strip(), r["product_ids"] or "[]")
+        groups.setdefault(key, []).append(r)
+
+    dupes = {k: v for k, v in groups.items() if len(v) > 1}
+    if not dupes:
+        print(f"  {len(rows)} 条已审核知识，没有同题重复。")
+        return 0
+
+    # 每组留最优的一条，判据与 dedup.merge_duplicates 一致
+    to_delete: list[int] = []
+    for members in dupes.values():
+        members.sort(
+            key=lambda r: (r["confidence"] or 0, r["quality_score"] or 0, r["clen"]),
+            reverse=True,
+        )
+        to_delete.extend(r["id"] for r in members[1:])
+
+    print(f"==> {len(rows)} 条已审核知识")
+    print(f"  同题分组 {len(dupes)} 组，将删除 {len(to_delete)} 条重复")
+    print(f"  重复率 {len(to_delete) / len(rows):.1%}")
+    print("\n  样例：")
+    for key, members in list(dupes.items())[:5]:
+        ids = "、".join(f"#{m['id']}" for m in members[:6])
+        print(f"    ×{len(members):<3} {key[1][:34]:<36} {ids}")
+
+    if not args.yes:
+        print("\n  这是不可逆操作。确认无误后加 --yes 重新执行。")
+        return 1
+
+    from .rag import LocalVectorStore
+
+    store = LocalVectorStore(engine=repo.engine)
+    ids = ", ".join(str(i) for i in to_delete)
+    with repo.engine.begin() as conn:
+        conn.execute(text(
+            f"UPDATE knowledge_item SET deleted = 1 WHERE id IN ({ids})"
+        ))
+    # 向量必须同时删掉，否则检索照样命中已删除的条目——
+    # 软删只挡住了 SQL 查询，挡不住已经加载进内存的索引
+    store.delete_by_item(to_delete)
+
+    print(f"\n✅ 已删除 {len(to_delete)} 条重复知识及其向量")
+    print("  重新加载索引：smartmall-agent chat（会自动读最新的）")
+    return 0
+
+
 # ---------------------------------------------------------------- handover
 
 
@@ -929,6 +1002,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--status", help="只看某个审核状态，如 approved / pending")
     s.add_argument("--type", help="只看某个知识类型，如 spec / logistics / sizing")
     s.set_defaults(func=cmd_peek)
+
+    s = sub.add_parser("dedup", help="清掉库里已有的同题重复知识")
+    s.add_argument("--yes", action="store_true", help="确认执行")
+    s.set_defaults(func=cmd_dedup)
 
     s = sub.add_parser("handover", help="转人工工单：看盲点、补答案、回灌")
     hsub = s.add_subparsers(dest="action", required=True)
