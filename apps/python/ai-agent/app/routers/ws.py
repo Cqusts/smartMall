@@ -24,12 +24,44 @@ router = APIRouter(tags=["客服"])
 _WEB = Path(__file__).resolve().parents[2] / "web"
 
 
-@router.get("/", response_class=HTMLResponse, summary="对话调试台")
+@router.get("/", response_class=HTMLResponse, summary="店铺首页（含客服入口）")
 async def index() -> str:
     page = _WEB / "index.html"
     if not page.is_file():  # pragma: no cover
         return "<h1>缺少 web/index.html</h1>"
     return page.read_text(encoding="utf-8")
+
+
+@router.get("/api/products", summary="商品列表")
+async def products() -> dict[str, Any]:
+    """店铺首页的商品数据。
+
+    直接读工具层——前端看到的价格库存与客服回答用的**是同一个数据源**。
+    分成两条路的话，页面显示"有货"而客服说"缺货"，用户会以为系统在骗人。
+    """
+    from ..agent.tools import MySqlToolBox
+
+    try:
+        box = MySqlToolBox.from_env()
+        items = []
+        for pid in (9001, 9002, 9003, 9004):
+            detail = box.get_product_detail(pid)
+            if not detail:
+                continue
+            skus = box.get_sku_stock_price(pid)
+            prices = [s["price"] for s in skus] or [0]
+            detail["price"] = min(prices)
+            detail["origin_price"] = next(
+                (s["origin_price"] for s in skus if s.get("origin_price")), None
+            )
+            detail["skus"] = skus
+            detail["in_stock"] = any(s["in_stock"] for s in skus)
+            detail["size_chart"] = box.get_size_chart(pid)
+            items.append(detail)
+        return {"ok": True, "items": items}
+    except Exception as exc:  # noqa: BLE001
+        # 商品挂了不该让整个页面白屏——前端会退化成只有客服入口
+        return {"ok": False, "items": [], "error": type(exc).__name__}
 
 
 @router.websocket("/ws/chat")

@@ -266,8 +266,96 @@ class TestWebPage:
         assert not re.findall(r"https?://[^\"'\s<]*", r.text)
 
     def test_diagnostics_panel_is_present(self):
-        """这块面板是这个页面存在的主要理由——
-        聊天界面谁都能做，能看见"为什么这么答"的不多。"""
+        """诊断面板：这个项目的亮点，但对普通用户是噪音，所以默认收起。"""
         text = self._client().get("/").text
-        for marker in ("本轮诊断", "词汇", "工单"):
+        for marker in ("诊断", "词汇", "工单"):
             assert marker in text
+
+    def test_storefront_has_a_customer_service_entry(self):
+        """做成店铺而不是裸聊天页，是因为"当前商品"是客服最重要的上下文。
+
+        它决定检索的过滤范围、决定查哪个 SKU 的库存。从商品详情页点
+        「联系客服」自然带上 product_id；裸聊天页只能靠一个下拉框假装。
+        """
+        text = self._client().get("/").text
+        assert "联系客服" in text and "商品列表" in text
+        assert "product_id: current ? current.id : null" in text, (
+            "客服窗口必须把当前商品带过去"
+        )
+
+    def test_products_api_degrades_instead_of_500(self):
+        """商品查不到不该让整页白屏——前端退化成只有客服入口。"""
+        r = self._client().get("/api/products")
+        assert r.status_code == 200
+        body = r.json()
+        assert "items" in body and isinstance(body["items"], list)
+
+
+class TestDepsAssemblyIsShared:
+    """CLI 与服务端必须共用同一份装配。
+
+    真实事故：服务端自己 new 了一个 AgentConfig()，于是拿着网关别名
+    "chat-default" 去调 DeepSeek，直接 400。用户看到的是"这个问题我
+    不太确定，帮您转接人工"——**症状离病因隔了三层**，而 CLI 问同一句
+    话完全正常。装配逻辑重复一次就会漂移一次。
+    """
+
+    def test_env_overrides_the_gateway_aliases(self, monkeypatch):
+        """默认模型名是网关别名，直连厂商时必须换成真实模型名。"""
+        from app.agent.assembly import config_from_env
+
+        monkeypatch.setenv("SMARTMALL_TRIAGE_MODEL", "deepseek-chat")
+        monkeypatch.setenv("SMARTMALL_EXTRACT_MODEL", "deepseek-chat")
+        cfg = config_from_env()
+
+        assert cfg.answer_model == "deepseek-chat"
+        assert cfg.intent_model == "deepseek-chat"
+        # 澄清、寒暄、改写、摘要也得换，漏一个就在那条分支上 400
+        assert cfg.clarify_model == cfg.chitchat_model == "deepseek-chat"
+        assert cfg.rewrite_model == cfg.summary_model == "deepseek-chat"
+
+    def test_no_gateway_alias_survives_an_override(self, monkeypatch):
+        from app.agent.assembly import config_from_env
+
+        monkeypatch.setenv("SMARTMALL_TRIAGE_MODEL", "deepseek-chat")
+        monkeypatch.setenv("SMARTMALL_EXTRACT_MODEL", "deepseek-chat")
+        cfg = config_from_env()
+        names = [getattr(cfg, f"{k}_model") for k in
+                 ("intent", "answer", "clarify", "chitchat", "rewrite", "summary")]
+        assert not [n for n in names if n.startswith("chat-")], (
+            f"仍有网关别名没被覆盖：{names}"
+        )
+
+    def test_unset_env_keeps_the_defaults(self, monkeypatch):
+        from app.agent.assembly import config_from_env
+
+        for k in ("SMARTMALL_TRIAGE_MODEL", "SMARTMALL_EXTRACT_MODEL",
+                  "SMARTMALL_INTENT_MODEL", "SMARTMALL_ANSWER_MODEL"):
+            monkeypatch.delenv(k, raising=False)
+        cfg = config_from_env()
+        assert cfg.intent_model == "chat-light"
+        assert cfg.answer_model == "chat-default"
+
+    def test_explicit_overrides_win(self, monkeypatch):
+        from app.agent.assembly import config_from_env
+
+        cfg = config_from_env(top_k=9, handover_below=0.42)
+        assert cfg.top_k == 9 and cfg.handover_below == 0.42
+
+    def test_server_and_cli_call_the_same_builder(self):
+        """两边都必须走 assembly.build_deps，不能各自 new。
+
+        断言看的是**代码**而不是源码文本——扫源码会把注释里提到的
+        名字也算进去（这条测试第一版就是这么误报的）。
+        co_names 只包含真正引用到的全局名字。
+        """
+        from app.agent import cli
+        from app.routers import chat
+
+        server = chat.get_deps.__code__.co_names
+        client = cli._build_deps.__code__.co_names
+
+        assert "build_deps" in server and "build_deps" in client
+        assert "AgentConfig" not in server, (
+            "服务端自己造配置正是漂移的起点：CLI 会覆盖模型名，它不会"
+        )

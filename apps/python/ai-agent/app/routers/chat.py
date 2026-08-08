@@ -14,8 +14,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from ..agent import AgentState, SessionContext, safe_run_turn
-from ..agent.llm import OpenAiCompatClient
-from ..agent.nodes import AgentConfig, Deps
+from ..agent.nodes import Deps
 
 router = APIRouter(prefix="/chat", tags=["客服"])
 
@@ -60,16 +59,17 @@ def get_deps() -> Deps:
 
     进程启动时不建连接：模型网关或数据库暂时不可用不应该让整个服务
     起不来——健康探针会如实报告依赖状态，而 /health 仍然可用。
+
+    装配走 :func:`~app.agent.assembly.build_deps`，与 CLI **共用同一份**。
+    这里曾经自己 new 了一个 AgentConfig()，于是服务端拿着网关别名
+    chat-default 去调 DeepSeek，直接 400，最后表现成"答不上来"——
+    装配逻辑重复一次就会漂移一次。
     """
     global _deps
     if _deps is None:
-        from ..agent.retriever import LocalRetriever
+        from ..agent.assembly import build_deps
 
-        _deps = Deps(
-            llm=OpenAiCompatClient(),
-            retriever=LocalRetriever(),
-            config=AgentConfig(),
-        )
+        _deps = build_deps(log=lambda m: None)
     return _deps
 
 

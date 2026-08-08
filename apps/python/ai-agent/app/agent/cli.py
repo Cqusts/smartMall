@@ -61,67 +61,21 @@ def _default_env_files() -> list[Path]:
 
 
 def _build_deps(args: argparse.Namespace) -> Deps:
-    cfg = AgentConfig()
-    for env_key, attr in (
-        ("SMARTMALL_INTENT_MODEL", "intent_model"),
-        ("SMARTMALL_ANSWER_MODEL", "answer_model"),
-        ("SMARTMALL_EXTRACT_MODEL", "answer_model"),
-    ):
-        value = os.environ.get(env_key, "").strip()
-        if value:
-            setattr(cfg, attr, value)
-    # 三个轻量节点（意图/澄清/寒暄/改写/摘要）共用便宜模型
-    light = os.environ.get("SMARTMALL_TRIAGE_MODEL", "").strip()
-    if light:
-        for attr in ("intent_model", "clarify_model", "chitchat_model",
-                     "rewrite_model", "summary_model"):
-            setattr(cfg, attr, light)
-    cfg.top_k = args.top_k
-    cfg.handover_below = args.handover_below
-    cfg.clarify_below = args.clarify_below
+    """CLI 侧装配。只负责把命令行参数翻成配置，装配本身走 assembly。"""
+    from .assembly import build_deps, config_from_env
 
-    llm = FakeLlmClient() if args.fake_llm else OpenAiCompatClient()
-
-    if args.rag_url:
-        from .retriever import HttpRetriever
-
-        retriever = HttpRetriever(args.rag_url)
-        print(f"  检索：ai-rag {args.rag_url}")
-    else:
-        from .retriever import LocalRetriever
-
-        retriever = LocalRetriever()
-        print(f"  检索：本地 MySQL，已加载 {retriever.size} 条切片"
-              f"（{retriever.provider_name}）")
-        if retriever.size == 0:
-            print("  ⚠ 索引是空的。先跑 smartmall-pipeline clean 和 index。")
-
-    print(f"  模型：意图 {cfg.intent_model} / 回答 {cfg.answer_model}")
-
-    store = None
-    if not args.no_trace:
-        from .store import MySqlTraceStore
-
-        try:
-            store = MySqlTraceStore.from_env()
-            print("  埋点：写入 agent_trace / handover_ticket")
-        except Exception as exc:  # noqa: BLE001
-            # 埋点起不来不该挡住对话——它是数据管道，不是功能依赖
-            print(f"  ⚠ 埋点不可用（{type(exc).__name__}），本次不落库")
-            print("    建表：deploy/sql/migrations/003_agent_trace_and_handover.sql")
-
-    tools = None
-    if not args.no_tools:
-        from .tools import MySqlToolBox
-
-        try:
-            tools = MySqlToolBox.from_env()
-            print("  工具：商品/SKU/尺码表/订单（只读，含越权校验）")
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ⚠ 工具集不可用（{type(exc).__name__}），实时类问题会转人工")
-            print("    建表与种子：deploy/sql/migrations/004_order_and_tool_seed.sql")
-
-    return Deps(llm=llm, retriever=retriever, config=cfg, store=store, tools=tools)
+    cfg = config_from_env(
+        top_k=args.top_k,
+        handover_below=args.handover_below,
+        clarify_below=args.clarify_below,
+    )
+    return build_deps(
+        fake_llm=args.fake_llm,
+        rag_url=args.rag_url,
+        with_store=not args.no_trace,
+        with_tools=not args.no_tools,
+        config=cfg,
+    )
 
 
 def _new_state(args: argparse.Namespace) -> AgentState:

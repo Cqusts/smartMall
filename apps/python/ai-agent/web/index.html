@@ -3,186 +3,413 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>smartMall 客服调试台</title>
+<title>smartMall — 电商 AI 客服</title>
 <!--
-  单文件、零外部依赖：不引 CDN、不打包。演示环境常常没有外网，
-  而"打不开"比"不好看"严重得多。
+  电商店铺前台 + 客服浮窗。
 
-  右侧调试面板是这个页面存在的主要理由。聊天界面谁都能做，
-  但意图分到哪一类、检索命中了什么、分数多少、有没有词汇支撑、
-  为什么转人工——这些平时全是隐形的，而它们才是判断这套系统
-  好不好用的依据。
+  为什么要做成店铺而不是裸聊天页：客服 Agent 的关键上下文是「当前商品」，
+  它决定检索过滤范围、决定库存查哪个 SKU。从商品详情页点「联系客服」
+  自然带上 product_id，这条链路只有在真的有商品页时才说得清；
+  裸聊天页得靠一个下拉框假装，演示时反而绕。
+
+  零外部依赖：不引 CDN、不用图片文件。商品图用 CSS 渐变 + emoji 占位——
+  演示环境常常没有外网，"打不开"比"不好看"严重得多。
 -->
 <style>
   :root{
-    --bg:#f6f7f9; --panel:#fff; --line:#e5e7eb; --text:#1f2328;
-    --muted:#6b7280; --me:#2563eb; --ok:#059669; --warn:#d97706;
-    --bad:#dc2626; --code:#f3f4f6;
+    --bg:#f4f5f7; --card:#fff; --line:#e8eaed; --text:#1d1f23; --muted:#8b919b;
+    --brand:#ff5000; --brand-2:#ff8a00; --ok:#00a870; --warn:#ff8f1f; --bad:#e5453a;
+    --code:#f2f3f5; --shadow:0 2px 12px rgba(0,0,0,.06);
   }
   @media (prefers-color-scheme: dark){
     :root{
-      --bg:#0f1115; --panel:#171a21; --line:#272b33; --text:#e6e8eb;
-      --muted:#9aa1ab; --me:#3b82f6; --code:#1e222a;
+      --bg:#0e1013; --card:#171a1f; --line:#262a31; --text:#e8eaed; --muted:#8b919b;
+      --code:#1d2127; --shadow:0 2px 12px rgba(0,0,0,.4);
     }
   }
-  *{box-sizing:border-box}
-  body{margin:0;font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
-       background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column}
-  header{padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);
-         display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-  header h1{font-size:15px;margin:0;font-weight:600}
-  header .sp{flex:1}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
-  .dot.on{background:var(--ok)} .dot.off{background:var(--bad)}
-  select,input,button{font:inherit;color:inherit;background:var(--panel);
-       border:1px solid var(--line);border-radius:8px;padding:6px 10px}
-  button{cursor:pointer}
-  button:hover{border-color:var(--me)}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--text);min-height:100vh}
+  button,input,select{font:inherit;color:inherit}
+  button{cursor:pointer;border:none;background:none}
 
-  main{flex:1;display:flex;min-height:0}
-  #chat{flex:1;display:flex;flex-direction:column;min-width:0}
-  #log{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px}
+  /* ---------------- 顶栏 ---------------- */
+  .topbar{background:linear-gradient(90deg,var(--brand),var(--brand-2));
+          padding:10px 20px;display:flex;align-items:center;gap:16px;color:#fff}
+  .logo{font-size:19px;font-weight:700;letter-spacing:-.02em;white-space:nowrap}
+  .logo small{font-weight:400;opacity:.85;font-size:12px;margin-left:6px}
+  .search{flex:1;max-width:520px;display:flex;background:#fff;border-radius:20px;
+          overflow:hidden}
+  .search input{flex:1;border:none;padding:8px 16px;outline:none;color:#1d1f23}
+  .search button{padding:0 20px;background:#2b2b2b;color:#fff;font-size:13px}
+  .topbar .me{margin-left:auto;font-size:13px;opacity:.95;display:flex;
+              align-items:center;gap:6px}
+  .topbar .me input{width:64px;background:rgba(255,255,255,.2);border:none;
+        border-radius:4px;padding:2px 6px;color:#fff;text-align:center}
 
-  .msg{max-width:min(680px,86%);padding:10px 14px;border-radius:14px;
-       background:var(--panel);border:1px solid var(--line);white-space:pre-wrap;
-       word-break:break-word}
-  .msg.me{align-self:flex-end;background:var(--me);color:#fff;border-color:transparent}
-  .msg.sys{align-self:center;font-size:13px;color:var(--muted);background:transparent;
-       border:none;max-width:100%}
-  .msg.draft{opacity:.75;border-style:dashed}
+  .nav{background:var(--card);border-bottom:1px solid var(--line);padding:0 20px;
+       display:flex;gap:22px;font-size:13px;overflow-x:auto}
+  .nav a{padding:10px 0;color:var(--muted);text-decoration:none;white-space:nowrap;
+         border-bottom:2px solid transparent}
+  .nav a.on{color:var(--brand);border-bottom-color:var(--brand)}
 
-  .cite{margin-top:8px;padding-top:8px;border-top:1px dashed var(--line);font-size:13px}
-  .cite b{color:var(--muted);font-weight:500}
-  .cite details{margin-top:4px}
-  .cite summary{cursor:pointer;color:var(--me)}
-  .cite p{margin:4px 0 0;color:var(--muted)}
+  .wrap{max-width:1080px;margin:0 auto;padding:18px 20px 90px}
 
-  .handover{margin-top:8px;padding:8px 10px;border-radius:8px;font-size:13px;
-       background:color-mix(in srgb,var(--warn) 12%,transparent);
-       border:1px solid color-mix(in srgb,var(--warn) 40%,transparent)}
+  /* ---------------- 商品列表 ---------------- */
+  .banner{background:linear-gradient(120deg,#ffe8d6,#ffd9c0);border-radius:12px;
+          padding:22px 26px;margin-bottom:18px;color:#7a2e00}
+  @media (prefers-color-scheme: dark){ .banner{background:linear-gradient(120deg,#3a2417,#2a1a12);color:#ffc9a3} }
+  .banner h2{font-size:19px;margin-bottom:4px}
+  .banner p{font-size:13px;opacity:.85}
 
-  .fb{margin-top:8px;display:flex;gap:6px;align-items:center}
-  .fb button{padding:2px 8px;font-size:13px;border-radius:6px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px}
+  .card{background:var(--card);border-radius:12px;overflow:hidden;cursor:pointer;
+        box-shadow:var(--shadow);transition:transform .15s}
+  .card:hover{transform:translateY(-3px)}
+  .thumb{aspect-ratio:1;display:grid;place-items:center;font-size:54px}
+  .p9001{background:linear-gradient(135deg,#f5efe6,#e6dccb)}
+  .p9002{background:linear-gradient(135deg,#e8f1fa,#cfe0f2)}
+  .p9003{background:linear-gradient(135deg,#fbeaf0,#f3d3e0)}
+  .p9004{background:linear-gradient(135deg,#efe6dd,#d9c5b0)}
+  .card .body{padding:10px 12px 14px}
+  .card .name{font-size:13px;line-height:1.45;height:2.9em;overflow:hidden}
+  .price{color:var(--brand);font-weight:700;font-size:18px;margin-top:6px}
+  .price small{font-size:12px;font-weight:400}
+  .price del{color:var(--muted);font-size:12px;font-weight:400;margin-left:6px}
+  .soldout{color:var(--bad);font-size:12px;margin-left:6px}
+
+  /* ---------------- 商品详情 ---------------- */
+  .detail{background:var(--card);border-radius:12px;box-shadow:var(--shadow);
+          padding:20px;display:grid;grid-template-columns:300px 1fr;gap:24px}
+  @media (max-width:760px){ .detail{grid-template-columns:1fr} }
+  .detail .hero{aspect-ratio:1;border-radius:10px;display:grid;place-items:center;
+                font-size:100px}
+  .detail h2{font-size:18px;margin-bottom:10px}
+  .pricebox{background:linear-gradient(90deg,#fff2ea,#fff8f4);border-radius:8px;
+            padding:12px 14px;margin-bottom:14px}
+  @media (prefers-color-scheme: dark){ .pricebox{background:#241a14} }
+  .pricebox .big{color:var(--brand);font-size:26px;font-weight:700}
+  .attrs{font-size:13px;color:var(--muted);margin-bottom:14px}
+  .attrs div{padding:3px 0}
+  .skus{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+  .sku{border:1px solid var(--line);border-radius:6px;padding:5px 12px;font-size:13px}
+  .sku.out{opacity:.45;text-decoration:line-through}
+  .sku .n{color:var(--muted);font-size:12px;margin-left:6px}
+  table{border-collapse:collapse;font-size:13px;margin-bottom:14px}
+  th,td{border:1px solid var(--line);padding:5px 10px;text-align:center}
+  th{background:var(--code);color:var(--muted);font-weight:500}
+  .actions{display:flex;gap:10px;flex-wrap:wrap}
+  .btn{padding:10px 26px;border-radius:22px;font-size:14px;font-weight:600}
+  .btn.buy{background:var(--brand);color:#fff}
+  .btn.cart{background:var(--brand-2);color:#fff}
+  .btn.ask{background:var(--card);color:var(--brand);border:1px solid var(--brand)}
+  .back{color:var(--muted);font-size:13px;margin-bottom:12px;display:inline-block}
+
+  /* ---------------- 客服浮窗 ---------------- */
+  .fab{position:fixed;right:22px;bottom:22px;width:56px;height:56px;border-radius:50%;
+       background:linear-gradient(135deg,var(--brand),var(--brand-2));color:#fff;
+       font-size:24px;box-shadow:0 6px 20px rgba(255,80,0,.4);z-index:40}
+  .fab.hide{display:none}
+
+  .chat{position:fixed;right:22px;bottom:22px;width:380px;height:min(620px,86vh);
+        background:var(--card);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.22);
+        display:none;flex-direction:column;overflow:hidden;z-index:50}
+  .chat.open{display:flex}
+  @media (max-width:520px){ .chat{right:0;bottom:0;width:100vw;height:100vh;border-radius:0} }
+  .chat.wide{width:720px}
+  @media (max-width:820px){ .chat.wide{width:calc(100vw - 44px)} }
+
+  .chead{background:linear-gradient(90deg,var(--brand),var(--brand-2));color:#fff;
+         padding:10px 14px;display:flex;align-items:center;gap:8px}
+  .chead .t{font-weight:600;font-size:14px}
+  .chead .s{font-size:11px;opacity:.9}
+  .chead .sp{flex:1}
+  .chead button{color:#fff;font-size:13px;padding:2px 8px;border-radius:6px;
+                background:rgba(255,255,255,.18)}
+
+  .ctx{padding:8px 12px;background:var(--code);font-size:12px;color:var(--muted);
+       display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--line)}
+  .ctx .sw{width:30px;height:30px;border-radius:6px;display:grid;place-items:center;
+           font-size:17px;flex:none}
+
+  .cbody{flex:1;display:flex;min-height:0}
+  .clog{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;
+        gap:10px;min-width:0}
+
+  .msg{max-width:84%;padding:8px 12px;border-radius:12px;white-space:pre-wrap;
+       word-break:break-word;font-size:14px;background:var(--code)}
+  .msg.me{align-self:flex-end;background:var(--brand);color:#fff}
+  .msg.sys{align-self:center;background:transparent;color:var(--muted);font-size:12px;
+           max-width:100%;text-align:center}
+  .msg.draft{opacity:.7;border:1px dashed var(--line)}
+
+  .cite{margin-top:7px;padding-top:7px;border-top:1px dashed var(--line);font-size:12px}
+  .cite summary{cursor:pointer;color:var(--brand)}
+  .cite p{margin-top:3px;color:var(--muted)}
+  .handover{margin-top:7px;padding:7px 9px;border-radius:7px;font-size:12px;
+            background:rgba(255,143,31,.14);border:1px solid rgba(255,143,31,.4)}
+  .fb{margin-top:7px;display:flex;gap:5px;align-items:center}
+  .fb button{padding:1px 7px;font-size:12px;border-radius:5px;border:1px solid var(--line)}
   .fb button.done{border-color:var(--ok);color:var(--ok)}
-  .fb .tid{font-size:12px;color:var(--muted);font-family:ui-monospace,monospace}
+  .fb .tid{font-size:11px;color:var(--muted);font-family:ui-monospace,monospace}
 
-  #status{padding:0 20px 6px;min-height:24px;font-size:13px;color:var(--muted)}
-  .pill{display:inline-block;padding:2px 10px;border-radius:999px;
-        background:var(--code);margin-right:6px}
-  .pill.live::after{content:"…";animation:dots 1.2s steps(4) infinite}
+  .cstatus{padding:0 14px 5px;min-height:20px;font-size:12px;color:var(--muted)}
+  .pill{display:inline-block;padding:1px 9px;border-radius:999px;background:var(--code);
+        margin-right:5px}
+  .pill.live::after{content:"";animation:dots 1.2s steps(4) infinite}
   @keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
 
-  #compose{display:flex;gap:8px;padding:12px 20px 16px;border-top:1px solid var(--line);
-           background:var(--panel)}
-  #compose input{flex:1}
-  #compose button{padding:6px 18px;background:var(--me);color:#fff;border-color:transparent}
+  .quick{padding:0 14px 8px;display:flex;gap:6px;flex-wrap:wrap}
+  .quick button{font-size:12px;padding:3px 10px;border:1px solid var(--line);
+                border-radius:12px;color:var(--muted)}
+  .quick button:hover{border-color:var(--brand);color:var(--brand)}
 
-  #panel{width:340px;border-left:1px solid var(--line);background:var(--panel);
-         overflow-y:auto;padding:14px;font-size:13px}
-  #panel h2{font-size:13px;margin:0 0 10px;color:var(--muted);font-weight:600;
-            text-transform:uppercase;letter-spacing:.04em}
-  .kv{display:flex;justify-content:space-between;gap:8px;padding:3px 0;
+  .cinput{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line)}
+  .cinput input{flex:1;border:1px solid var(--line);border-radius:18px;padding:7px 14px;
+                background:var(--bg);outline:none}
+  .cinput button{background:var(--brand);color:#fff;border-radius:18px;padding:0 18px;
+                 font-size:13px}
+
+  /* 诊断面板：这个项目的亮点，但对普通用户是噪音，所以默认收起 */
+  .diag{width:300px;border-left:1px solid var(--line);overflow-y:auto;padding:12px;
+        font-size:12px;display:none;background:var(--bg)}
+  .chat.wide .diag{display:block}
+  .diag h3{font-size:11px;color:var(--muted);margin:12px 0 6px;text-transform:uppercase;
+           letter-spacing:.05em}
+  .diag h3:first-child{margin-top:0}
+  .kv{display:flex;justify-content:space-between;gap:8px;padding:2px 0;
       border-bottom:1px dotted var(--line)}
   .kv span:last-child{font-family:ui-monospace,monospace}
-  .hit{padding:6px 8px;margin:6px 0;border-radius:6px;background:var(--code)}
-  .hit .t{display:flex;justify-content:space-between;gap:8px;font-family:ui-monospace,monospace;
-          color:var(--muted);font-size:12px}
-  .tag{font-size:11px;padding:0 6px;border-radius:4px}
-  .tag.yes{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}
-  .tag.no{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}
-  .empty{color:var(--muted);padding:20px 0;text-align:center}
-  @media (max-width:900px){ #panel{display:none} }
+  .hit{padding:5px 7px;margin:5px 0;border-radius:5px;background:var(--card)}
+  .hit .t{display:flex;justify-content:space-between;gap:6px;color:var(--muted);
+          font-family:ui-monospace,monospace;font-size:11px}
+  .tag{font-size:10px;padding:0 5px;border-radius:3px}
+  .tag.yes{background:rgba(0,168,112,.18);color:var(--ok)}
+  .tag.no{background:rgba(229,69,58,.16);color:var(--bad)}
+  .empty{color:var(--muted);text-align:center;padding:16px 0}
 </style>
 </head>
 <body>
-<header>
-  <h1>smartMall 客服</h1>
-  <span class="dot" id="conn"></span><span id="connText" style="font-size:13px;color:var(--muted)">连接中</span>
-  <span class="sp"></span>
-  <label style="font-size:13px;color:var(--muted)">商品
-    <select id="product">
-      <option value="">未指定</option>
-      <option value="9001" selected>9001 米白针织衫</option>
-      <option value="9002">9002 白鸭绒羽绒服</option>
-      <option value="9003">9003 碎花连衣裙</option>
-      <option value="9004">9004 牛皮单肩包</option>
-    </select>
-  </label>
-  <label style="font-size:13px;color:var(--muted)">用户
-    <input id="user" value="10086" style="width:80px">
-  </label>
-  <button id="reset">新会话</button>
-</header>
 
-<main>
-  <section id="chat">
-    <div id="log">
-      <div class="msg sys">
-        试试：这件是什么面料 · 还有货吗 · 160cm穿什么码 · 我的订单2026080100001到哪了<br>
-        越权演示：把订单号换成 2026080400004（属于用户 10087）
-      </div>
-    </div>
-    <div id="status"></div>
-    <form id="compose">
-      <input id="input" placeholder="说点什么…" autocomplete="off" autofocus>
-      <button type="submit">发送</button>
-    </form>
-  </section>
+<div class="topbar">
+  <div class="logo">smartMall<small>AI 客服演示</small></div>
+  <form class="search" onsubmit="event.preventDefault();askAbout(this.q.value)">
+    <input name="q" placeholder="搜索商品，或直接问客服…">
+    <button type="submit">搜索</button>
+  </form>
+  <div class="me">用户 <input id="user" value="10086" title="改成 10087 可演示订单越权拦截"></div>
+</div>
 
-  <aside id="panel">
-    <h2>本轮诊断</h2>
-    <div id="debug"><div class="empty">发一条消息看看</div></div>
-  </aside>
-</main>
+<nav class="nav">
+  <a href="#" class="on">首页</a><a href="#">女装</a><a href="#">男装</a>
+  <a href="#">箱包</a><a href="#">我的订单</a><a href="#">购物车</a>
+</nav>
+
+<div class="wrap" id="page"></div>
+
+<button class="fab" id="fab" onclick="openChat()" title="联系客服">💬</button>
+
+<section class="chat" id="chat">
+  <div class="chead">
+    <span>🎧</span>
+    <div><div class="t">smartMall 智能客服</div>
+         <div class="s"><span id="connText">连接中</span> · 答不上来会转人工</div></div>
+    <span class="sp"></span>
+    <button onclick="toggleDiag()" id="diagBtn" title="看看它是怎么答的">诊断</button>
+    <button onclick="closeChat()">✕</button>
+  </div>
+  <div class="ctx" id="ctx" style="display:none"></div>
+  <div class="cbody">
+    <div class="clog" id="clog"></div>
+    <aside class="diag" id="diag"><div class="empty">发一条消息看看</div></aside>
+  </div>
+  <div class="cstatus" id="cstatus"></div>
+  <div class="quick" id="quick"></div>
+  <form class="cinput" onsubmit="send(event)">
+    <input id="cinput" placeholder="说点什么…" autocomplete="off">
+    <button type="submit">发送</button>
+  </form>
+</section>
 
 <script>
 const $ = s => document.querySelector(s);
-const log = $('#log'), statusEl = $('#status'), debugEl = $('#debug');
-let ws, sessionId = null, draft = null, connected = false;
+const esc = s => String(s ?? '').replace(/[&<>"]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ICON = {9001:'🧶', 9002:'🧥', 9003:'👗', 9004:'👜'};
+const STAGES = {intent:'理解意图', retrieve:'查找资料', tools:'查询实时数据', generate:'组织语言'};
 
-const STAGES = {
-  intent:'理解意图', retrieve:'查找资料', tools:'查询实时数据', generate:'组织语言',
-};
+let products = [], current = null, ws, sessionId = null, draft = null, connected = false;
+let greeted = false;
+
+// ---------------------------------------------------------------- 商品
+
+async function loadProducts(){
+  try{
+    const r = await (await fetch('/api/products')).json();
+    products = r.items || [];
+  }catch(e){ products = []; }
+  renderList();
+}
+
+function renderList(){
+  current = null;
+  if (!products.length){
+    $('#page').innerHTML = `<div class="banner"><h2>商品数据未就绪</h2>
+      <p>导入 deploy/sql/migrations/004_order_and_tool_seed.sql 后刷新。
+         客服仍可正常使用。</p></div>`;
+    return;
+  }
+  $('#page').innerHTML = `
+    <div class="banner">
+      <h2>秋冬新品 · 限时特惠</h2>
+      <p>点开任意商品，再点「联系客服」——客服会自动带上当前商品的上下文</p>
+    </div>
+    <div class="grid">${products.map(card).join('')}</div>`;
+}
+
+const card = p => `
+  <div class="card" onclick="openDetail(${p.id})">
+    <div class="thumb p${p.id}">${ICON[p.id] || '🛍'}</div>
+    <div class="body">
+      <div class="name">${esc(p.name)}</div>
+      <div class="price"><small>¥</small>${p.price.toFixed(0)}
+        ${p.origin_price ? `<del>¥${p.origin_price.toFixed(0)}</del>` : ''}
+        ${p.in_stock ? '' : '<span class="soldout">缺货</span>'}</div>
+    </div>
+  </div>`;
+
+function openDetail(id){
+  const p = products.find(x => x.id === id);
+  if (!p) return;
+  current = p;
+  const attrs = Object.entries(p.attrs || {})
+    .map(([k,v]) => `<div>${esc(k)}：${esc(v)}</div>`).join('');
+  const skus = (p.skus || []).map(s => {
+    const spec = Object.values(typeof s.spec === 'string' ? JSON.parse(s.spec) : s.spec).join(' ');
+    return `<span class="sku ${s.in_stock ? '' : 'out'}">${esc(spec)}
+            <span class="n">${s.in_stock ? '库存 '+s.stock : '缺货'}</span></span>`;
+  }).join('');
+
+  let chart = '';
+  const c = p.size_chart?.chart;
+  if (c){
+    chart = `<h4 style="font-size:13px;margin:14px 0 6px">尺码表</h4><table>
+      <tr>${c['表头'].map(h => `<th>${esc(h)}</th>`).join('')}</tr>
+      ${c['行'].map(r => `<tr>${r.map(v => `<td>${esc(v)}</td>`).join('')}</tr>`).join('')}
+    </table>${p.size_chart.note ? `<div class="attrs">${esc(p.size_chart.note)}</div>` : ''}`;
+  }
+
+  $('#page').innerHTML = `
+    <a class="back" href="#" onclick="renderList();return false">‹ 返回商品列表</a>
+    <div class="detail">
+      <div class="hero p${p.id}">${ICON[p.id] || '🛍'}</div>
+      <div>
+        <h2>${esc(p.name)}</h2>
+        <div class="pricebox"><span class="big">¥${p.price.toFixed(0)}</span>
+          ${p.origin_price ? `<del style="color:var(--muted);margin-left:8px">¥${p.origin_price.toFixed(0)}</del>` : ''}
+        </div>
+        <div class="attrs">${attrs}</div>
+        <div class="skus">${skus}</div>
+        ${chart}
+        <div class="actions">
+          <button class="btn cart">加入购物车</button>
+          <button class="btn buy">立即购买</button>
+          <button class="btn ask" onclick="openChat()">🎧 联系客服</button>
+        </div>
+      </div>
+    </div>`;
+  window.scrollTo(0,0);
+}
+
+// ---------------------------------------------------------------- 客服
 
 function connect(){
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws/chat`);
-  ws.onopen = () => setConn(true);
-  ws.onclose = () => { setConn(false); setTimeout(connect, 2000); };
+  ws.onopen = () => { connected = true; $('#connText').textContent = '在线'; };
+  ws.onclose = () => { connected = false; $('#connText').textContent = '重连中';
+                       setTimeout(connect, 2000); };
   ws.onmessage = e => handle(JSON.parse(e.data));
 }
-function setConn(ok){
-  connected = ok;
-  $('#conn').className = 'dot ' + (ok ? 'on' : 'off');
-  $('#connText').textContent = ok ? '已连接' : '重连中';
+
+function openChat(){
+  $('#chat').classList.add('open');
+  $('#fab').classList.add('hide');
+  renderCtx();
+  if (!greeted){
+    greeted = true;
+    bubble('sys', '智能客服为您服务。答不上来会转接人工，并把这个问题记成知识盲点。');
+  }
+  $('#cinput').focus();
+}
+function closeChat(){
+  $('#chat').classList.remove('open');
+  $('#fab').classList.remove('hide');
+}
+function toggleDiag(){
+  const on = $('#chat').classList.toggle('wide');
+  $('#diagBtn').style.background = on ? 'rgba(255,255,255,.4)' : '';
+}
+
+function renderCtx(){
+  const ctx = $('#ctx'), quick = $('#quick');
+  if (current){
+    // 当前商品是客服最重要的上下文：它决定检索过滤范围和查哪个 SKU 的库存
+    ctx.style.display = 'flex';
+    ctx.innerHTML = `<div class="sw p${current.id}">${ICON[current.id] || '🛍'}</div>
+      <div>正在咨询：${esc(current.short_name || current.name)}
+      <span style="color:var(--brand)">¥${current.price.toFixed(0)}</span></div>`;
+    quick.innerHTML = ['这件是什么面料','还有货吗','160cm穿什么码','怎么洗']
+      .map(q => `<button onclick="askAbout('${q}')">${q}</button>`).join('');
+  } else {
+    ctx.style.display = 'none';
+    quick.innerHTML = ['我的订单2026080100001到哪了','怎么退货','支持花呗分期吗']
+      .map(q => `<button onclick="askAbout('${q}')">${q}</button>`).join('');
+  }
+}
+
+function askAbout(text){
+  if (!text) return;
+  openChat();
+  $('#cinput').value = text;
+  send();
 }
 
 function bubble(cls, text){
   const el = document.createElement('div');
   el.className = 'msg ' + cls;
   el.textContent = text || '';
-  log.appendChild(el);
-  log.scrollTop = log.scrollHeight;
+  $('#clog').appendChild(el);
+  $('#clog').scrollTop = $('#clog').scrollHeight;
   return el;
+}
+
+function send(e){
+  e?.preventDefault?.();
+  const text = $('#cinput').value.trim();
+  if (!text || !connected) return;
+  bubble('me', text);
+  $('#cinput').value = '';
+  $('#cstatus').innerHTML = '<span class="pill live">思考</span>';
+  ws.send(JSON.stringify({
+    message: text,
+    session_id: sessionId,
+    user_id: parseInt($('#user').value) || null,
+    product_id: current ? current.id : null,
+  }));
 }
 
 function handle(ev){
   if (ev.type === 'status'){
-    statusEl.innerHTML = `<span class="pill live">${STAGES[ev.stage] || ev.stage}</span>`
-      + (ev.detail ? `<span class="pill">${ev.detail}</span>` : '');
+    $('#cstatus').innerHTML = `<span class="pill live">${STAGES[ev.stage] || ev.stage}</span>`
+      + (ev.detail ? `<span class="pill">${esc(ev.detail)}</span>` : '');
     return;
   }
   if (ev.type === 'delta'){
     // 草稿：合规检查还没跑，最终文本以 done 为准
     if (!draft) draft = bubble('draft', '');
     draft.textContent += ev.text;
-    log.scrollTop = log.scrollHeight;
-    return;
-  }
-  if (ev.type === 'error'){
-    statusEl.innerHTML = '';
-    if (draft){ draft.remove(); draft = null; }
-    bubble('', ev.answer);
+    $('#clog').scrollTop = $('#clog').scrollHeight;
     return;
   }
   if (ev.type === 'feedback_ack'){
@@ -190,14 +417,18 @@ function handle(ev){
     if (b){ b.classList.remove('pending'); b.classList.add('done'); }
     return;
   }
+  if (ev.type === 'error'){
+    $('#cstatus').innerHTML = '';
+    if (draft){ draft.remove(); draft = null; }
+    bubble('', ev.answer);
+    return;
+  }
   if (ev.type !== 'done') return;
 
-  statusEl.innerHTML = '';
+  $('#cstatus').innerHTML = '';
   sessionId = ev.session_id;
 
-  // 定稿：用 done 里的文本整段替换草稿。
-  // 合规检查可能改写过（"保证明天到"→"通常明天到"）或整段拦下转人工，
-  // 流式推出去的那些字只是草稿
+  // 定稿：合规检查可能改写过（"保证明天到"→"通常明天到"）或整段拦下
   const el = draft || bubble('', '');
   draft = null;
   el.className = 'msg';
@@ -206,33 +437,28 @@ function handle(ev){
   if (ev.citations?.length){
     const box = document.createElement('div');
     box.className = 'cite';
-    box.innerHTML = '<b>引用</b>';
     ev.citations.forEach(c => {
       const d = document.createElement('details');
-      d.innerHTML = `<summary>[#${c.item_id}] ${esc(c.title)}</summary>`
+      d.innerHTML = `<summary>📎 [#${c.item_id}] ${esc(c.title)}</summary>`
                   + `<p>${esc(c.content)}</p>`;
       box.appendChild(d);
     });
     el.appendChild(box);
   }
-
   if (ev.handover){
     const h = document.createElement('div');
     h.className = 'handover';
-    h.innerHTML = `⚠ 已转人工：${esc(ev.handover_reason)}`
-      + (ev.handover_ticket_id
-          ? `<br>工单 #${ev.handover_ticket_id} —— 这是一个知识盲点，`
-          + `补答后回灌知识库，下次就能自动回答`
-          : '');
+    h.innerHTML = `⚠ 已转接人工：${esc(ev.handover_reason)}`
+      + (ev.handover_ticket_id ? `<br>工单 #${ev.handover_ticket_id}，`
+        + `补答后会回灌知识库，下次就能自动回答` : '');
     el.appendChild(h);
   }
-
   if (ev.trace_id){
     const fb = document.createElement('div');
     fb.className = 'fb';
     fb.dataset.fb = ev.trace_id;
     fb.innerHTML = `<button data-t="up">👍</button><button data-t="down">👎</button>`
-                 + `<span class="tid">${ev.trace_id.slice(0,12)}</span>`;
+                 + `<span class="tid">${ev.trace_id.slice(0,8)}</span>`;
     fb.querySelectorAll('button').forEach(b => b.onclick = () => {
       b.classList.add('pending');
       ws.send(JSON.stringify({type:'feedback', trace_id:ev.trace_id, thumb:b.dataset.t}));
@@ -240,69 +466,42 @@ function handle(ev){
     el.appendChild(fb);
   }
 
-  renderDebug(ev);
-  log.scrollTop = log.scrollHeight;
+  renderDiag(ev);
+  $('#clog').scrollTop = $('#clog').scrollHeight;
 }
 
-function renderDebug(ev){
+function renderDiag(ev){
   const d = ev.debug || {};
   const kv = (k,v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
-  let html = kv('意图', ev.intent || '-')
-           + kv('命中', d.hit_count ?? 0)
-           + kv('最高相似度', (d.max_score ?? 0).toFixed(3))
-           + kv('总耗时', (d.latency_ms?.total ?? 0) + ' ms');
-  if (d.rewritten_query) html += kv('改写查询', esc(d.rewritten_query));
-  if (ev.handover) html += kv('转人工', esc(ev.handover_reason));
-  if (ev.postcheck_flags?.length)
-    html += kv('合规标记', ev.postcheck_flags.map(esc).join('、'));
+  let h = '<h3>本轮</h3>' + kv('意图', ev.intent || '-')
+        + kv('命中', d.hit_count ?? 0)
+        + kv('最高相似度', (d.max_score ?? 0).toFixed(3))
+        + kv('耗时', (d.latency_ms?.total ?? 0) + ' ms');
+  if (d.rewritten_query) h += kv('改写', esc(d.rewritten_query));
+  if (ev.handover) h += kv('转人工', esc(ev.handover_reason));
+  if (ev.postcheck_flags?.length) h += kv('合规', ev.postcheck_flags.map(esc).join('、'));
 
   if (d.tools_called?.length){
-    html += '<h2 style="margin-top:14px">工具调用</h2>';
-    d.tools_called.forEach(t => {
-      html += `<div class="hit"><div class="t"><span>🔧 ${esc(t.name)}</span>`
-            + `<span>${t.latency_ms}ms ${t.hit ? '命中' : '无数据'}</span></div></div>`;
-    });
+    h += '<h3>工具调用</h3>';
+    d.tools_called.forEach(t => h += `<div class="hit"><div class="t">
+      <span>🔧 ${esc(t.name)}</span>
+      <span>${t.latency_ms}ms ${t.hit ? '命中' : '无数据'}</span></div></div>`);
   }
-
   if (d.hits?.length){
-    html += '<h2 style="margin-top:14px">检索命中</h2>';
-    d.hits.forEach(h => {
-      // 词汇支撑是判断"真沾边"还是"只是向量基线相似度"的关键信号
-      const tag = h.lexical ? '<span class="tag yes">词汇✓</span>'
+    h += '<h3>检索命中</h3>';
+    d.hits.forEach(x => {
+      // 词汇支撑区分"真沾边"与"只是向量基线相似度"
+      const tag = x.lexical ? '<span class="tag yes">词汇✓</span>'
                             : '<span class="tag no">无词汇</span>';
-      html += `<div class="hit"><div class="t"><span>#${h.item_id}</span>`
-            + `<span>${h.dense.toFixed(3)} ${tag}</span></div>`
-            + `<div>${esc(h.title)}</div></div>`;
+      h += `<div class="hit"><div class="t"><span>#${x.item_id}</span>
+            <span>${x.dense.toFixed(3)} ${tag}</span></div>
+            <div>${esc(x.title)}</div></div>`;
     });
   }
-  debugEl.innerHTML = html;
+  $('#diag').innerHTML = h;
 }
 
-const esc = s => String(s ?? '').replace(/[&<>"]/g,
-  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-
-$('#compose').onsubmit = e => {
-  e.preventDefault();
-  const text = $('#input').value.trim();
-  if (!text || !connected) return;
-  bubble('me', text);
-  $('#input').value = '';
-  statusEl.innerHTML = '<span class="pill live">思考</span>';
-  const pid = $('#product').value;
-  ws.send(JSON.stringify({
-    message: text,
-    session_id: sessionId,
-    user_id: parseInt($('#user').value) || null,
-    product_id: pid ? parseInt(pid) : null,
-  }));
-};
-
-$('#reset').onclick = () => {
-  sessionId = null;
-  log.querySelectorAll('.msg:not(.sys)').forEach(m => m.remove());
-  debugEl.innerHTML = '<div class="empty">发一条消息看看</div>';
-};
-
+loadProducts();
 connect();
 </script>
 </body>
