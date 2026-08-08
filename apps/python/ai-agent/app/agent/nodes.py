@@ -68,6 +68,13 @@ class Deps:
     tools: ToolBox | None = None
     """业务数据工具集。为 None 时实时类问题转人工——
     宁可转人工，也不能拿知识库里三个月前的"目前有货"糊弄过去。"""
+    on_event: Any = None
+    """流式事件回调 ``(dict) -> None``。为 None 时整条链路完全同步，
+    行为与从前一致——**流式不另起一套编排**，否则两条路径必然分叉。"""
+
+    def emit_event(self, **event: Any) -> None:
+        if self.on_event is not None:
+            self.on_event(event)
 
 
 # ---------------------------------------------------------------- 辅助
@@ -165,6 +172,7 @@ def classify_intent(state: AgentState, deps: Deps) -> AgentState:
 
     state.trace.intent = state.intent.value
     state.trace.latency_ms["intent"] = int((time.time() - t0) * 1000)
+    deps.emit_event(type="status", stage="intent", detail=state.intent.value)
 
     if state.intent is Intent.SENSITIVE:
         state.to_handover(HandoverReason.SENSITIVE_INTENT)
@@ -179,6 +187,7 @@ def retrieve(state: AgentState, deps: Deps) -> AgentState:
     对用户说"没找到相关信息"而真相是服务宕了，那是撒谎。
     """
     t0 = time.time()
+    deps.emit_event(type="status", stage="retrieve")
     try:
         state.hits = deps.retriever.search(
             state.query,
@@ -279,6 +288,7 @@ def call_tools(state: AgentState, deps: Deps) -> AgentState:
         return state
 
     t0 = time.time()
+    deps.emit_event(type="status", stage="tools")
     product_id = state.session.current_product_id
 
     try:
@@ -353,17 +363,32 @@ def _tool_size_chart(state: AgentState, deps: Deps, product_id: int | None) -> N
 def generate(state: AgentState, deps: Deps) -> AgentState:
     """基于检索到的知识生成答案。"""
     t0 = time.time()
+    deps.emit_event(type="status", stage="generate")
+    user_prompt = prompts.ANSWER_USER.format(
+        knowledge=_knowledge_text(state.hits),
+        tools=_tools_text(state),
+        history=_history_text(state, deps.config.max_history_turns),
+        message=state.message,
+    )
     try:
-        state.answer = deps.llm.complete(
-            model=deps.config.answer_model,
-            system=prompts.ANSWER_SYSTEM,
-            user=prompts.ANSWER_USER.format(
-                knowledge=_knowledge_text(state.hits),
-                tools=_tools_text(state),
-                history=_history_text(state, deps.config.max_history_turns),
-                message=state.message,
-            ),
-        ).strip()
+        if deps.on_event is not None:
+            # 流式：逐块推给前端。但**这些是草稿**——合规检查还没跑。
+            # 前端必须等 done 事件里的最终文本再定稿，见 post_check 的注释。
+            pieces: list[str] = []
+            for piece in deps.llm.stream(
+                model=deps.config.answer_model,
+                system=prompts.ANSWER_SYSTEM,
+                user=user_prompt,
+            ):
+                pieces.append(piece)
+                deps.emit_event(type="delta", text=piece)
+            state.answer = "".join(pieces).strip()
+        else:
+            state.answer = deps.llm.complete(
+                model=deps.config.answer_model,
+                system=prompts.ANSWER_SYSTEM,
+                user=user_prompt,
+            ).strip()
     except LlmError as exc:
         state.to_handover(HandoverReason.TOOL_FAILURE)
         state.trace.error = str(exc)
@@ -379,7 +404,16 @@ def generate(state: AgentState, deps: Deps) -> AgentState:
 
 
 def post_check(state: AgentState, deps: Deps) -> AgentState:
-    """输出合规检查。纯规则。"""
+    """输出合规检查。纯规则。
+
+    **流式输出与合规检查天然冲突**：要逐字推给用户就得在检查之前推，
+    而广告法违规内容一旦到了用户眼前，撤回不等于拦截。
+
+    这里的取舍是：流式推的内容前端按**草稿**处理，最终文本以 ``done``
+    事件为准；被改写或拦截时前端整段替换。做不到"违规内容一个字都不
+    出现"，但做到了"用户最终看到并留存的内容一定过了检查"。
+    真要做到前者只能放弃流式——那会让 P95 三秒的等待变成纯白屏。
+    """
     result = guard.check_output(
         state.answer, max_length=deps.config.max_answer_length
     )

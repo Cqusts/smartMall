@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>smartMall 客服调试台</title>
+<!--
+  单文件、零外部依赖：不引 CDN、不打包。演示环境常常没有外网，
+  而"打不开"比"不好看"严重得多。
+
+  右侧调试面板是这个页面存在的主要理由。聊天界面谁都能做，
+  但意图分到哪一类、检索命中了什么、分数多少、有没有词汇支撑、
+  为什么转人工——这些平时全是隐形的，而它们才是判断这套系统
+  好不好用的依据。
+-->
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#fff; --line:#e5e7eb; --text:#1f2328;
+    --muted:#6b7280; --me:#2563eb; --ok:#059669; --warn:#d97706;
+    --bad:#dc2626; --code:#f3f4f6;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1115; --panel:#171a21; --line:#272b33; --text:#e6e8eb;
+      --muted:#9aa1ab; --me:#3b82f6; --code:#1e222a;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column}
+  header{padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);
+         display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  header h1{font-size:15px;margin:0;font-weight:600}
+  header .sp{flex:1}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
+  .dot.on{background:var(--ok)} .dot.off{background:var(--bad)}
+  select,input,button{font:inherit;color:inherit;background:var(--panel);
+       border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+  button{cursor:pointer}
+  button:hover{border-color:var(--me)}
+
+  main{flex:1;display:flex;min-height:0}
+  #chat{flex:1;display:flex;flex-direction:column;min-width:0}
+  #log{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px}
+
+  .msg{max-width:min(680px,86%);padding:10px 14px;border-radius:14px;
+       background:var(--panel);border:1px solid var(--line);white-space:pre-wrap;
+       word-break:break-word}
+  .msg.me{align-self:flex-end;background:var(--me);color:#fff;border-color:transparent}
+  .msg.sys{align-self:center;font-size:13px;color:var(--muted);background:transparent;
+       border:none;max-width:100%}
+  .msg.draft{opacity:.75;border-style:dashed}
+
+  .cite{margin-top:8px;padding-top:8px;border-top:1px dashed var(--line);font-size:13px}
+  .cite b{color:var(--muted);font-weight:500}
+  .cite details{margin-top:4px}
+  .cite summary{cursor:pointer;color:var(--me)}
+  .cite p{margin:4px 0 0;color:var(--muted)}
+
+  .handover{margin-top:8px;padding:8px 10px;border-radius:8px;font-size:13px;
+       background:color-mix(in srgb,var(--warn) 12%,transparent);
+       border:1px solid color-mix(in srgb,var(--warn) 40%,transparent)}
+
+  .fb{margin-top:8px;display:flex;gap:6px;align-items:center}
+  .fb button{padding:2px 8px;font-size:13px;border-radius:6px}
+  .fb button.done{border-color:var(--ok);color:var(--ok)}
+  .fb .tid{font-size:12px;color:var(--muted);font-family:ui-monospace,monospace}
+
+  #status{padding:0 20px 6px;min-height:24px;font-size:13px;color:var(--muted)}
+  .pill{display:inline-block;padding:2px 10px;border-radius:999px;
+        background:var(--code);margin-right:6px}
+  .pill.live::after{content:"…";animation:dots 1.2s steps(4) infinite}
+  @keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+
+  #compose{display:flex;gap:8px;padding:12px 20px 16px;border-top:1px solid var(--line);
+           background:var(--panel)}
+  #compose input{flex:1}
+  #compose button{padding:6px 18px;background:var(--me);color:#fff;border-color:transparent}
+
+  #panel{width:340px;border-left:1px solid var(--line);background:var(--panel);
+         overflow-y:auto;padding:14px;font-size:13px}
+  #panel h2{font-size:13px;margin:0 0 10px;color:var(--muted);font-weight:600;
+            text-transform:uppercase;letter-spacing:.04em}
+  .kv{display:flex;justify-content:space-between;gap:8px;padding:3px 0;
+      border-bottom:1px dotted var(--line)}
+  .kv span:last-child{font-family:ui-monospace,monospace}
+  .hit{padding:6px 8px;margin:6px 0;border-radius:6px;background:var(--code)}
+  .hit .t{display:flex;justify-content:space-between;gap:8px;font-family:ui-monospace,monospace;
+          color:var(--muted);font-size:12px}
+  .tag{font-size:11px;padding:0 6px;border-radius:4px}
+  .tag.yes{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}
+  .tag.no{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}
+  .empty{color:var(--muted);padding:20px 0;text-align:center}
+  @media (max-width:900px){ #panel{display:none} }
+</style>
+</head>
+<body>
+<header>
+  <h1>smartMall 客服</h1>
+  <span class="dot" id="conn"></span><span id="connText" style="font-size:13px;color:var(--muted)">连接中</span>
+  <span class="sp"></span>
+  <label style="font-size:13px;color:var(--muted)">商品
+    <select id="product">
+      <option value="">未指定</option>
+      <option value="9001" selected>9001 米白针织衫</option>
+      <option value="9002">9002 白鸭绒羽绒服</option>
+      <option value="9003">9003 碎花连衣裙</option>
+      <option value="9004">9004 牛皮单肩包</option>
+    </select>
+  </label>
+  <label style="font-size:13px;color:var(--muted)">用户
+    <input id="user" value="10086" style="width:80px">
+  </label>
+  <button id="reset">新会话</button>
+</header>
+
+<main>
+  <section id="chat">
+    <div id="log">
+      <div class="msg sys">
+        试试：这件是什么面料 · 还有货吗 · 160cm穿什么码 · 我的订单2026080100001到哪了<br>
+        越权演示：把订单号换成 2026080400004（属于用户 10087）
+      </div>
+    </div>
+    <div id="status"></div>
+    <form id="compose">
+      <input id="input" placeholder="说点什么…" autocomplete="off" autofocus>
+      <button type="submit">发送</button>
+    </form>
+  </section>
+
+  <aside id="panel">
+    <h2>本轮诊断</h2>
+    <div id="debug"><div class="empty">发一条消息看看</div></div>
+  </aside>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const log = $('#log'), statusEl = $('#status'), debugEl = $('#debug');
+let ws, sessionId = null, draft = null, connected = false;
+
+const STAGES = {
+  intent:'理解意图', retrieve:'查找资料', tools:'查询实时数据', generate:'组织语言',
+};
+
+function connect(){
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/chat`);
+  ws.onopen = () => setConn(true);
+  ws.onclose = () => { setConn(false); setTimeout(connect, 2000); };
+  ws.onmessage = e => handle(JSON.parse(e.data));
+}
+function setConn(ok){
+  connected = ok;
+  $('#conn').className = 'dot ' + (ok ? 'on' : 'off');
+  $('#connText').textContent = ok ? '已连接' : '重连中';
+}
+
+function bubble(cls, text){
+  const el = document.createElement('div');
+  el.className = 'msg ' + cls;
+  el.textContent = text || '';
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+function handle(ev){
+  if (ev.type === 'status'){
+    statusEl.innerHTML = `<span class="pill live">${STAGES[ev.stage] || ev.stage}</span>`
+      + (ev.detail ? `<span class="pill">${ev.detail}</span>` : '');
+    return;
+  }
+  if (ev.type === 'delta'){
+    // 草稿：合规检查还没跑，最终文本以 done 为准
+    if (!draft) draft = bubble('draft', '');
+    draft.textContent += ev.text;
+    log.scrollTop = log.scrollHeight;
+    return;
+  }
+  if (ev.type === 'error'){
+    statusEl.innerHTML = '';
+    if (draft){ draft.remove(); draft = null; }
+    bubble('', ev.answer);
+    return;
+  }
+  if (ev.type === 'feedback_ack'){
+    const b = document.querySelector(`[data-fb="${ev.trace_id}"] button.pending`);
+    if (b){ b.classList.remove('pending'); b.classList.add('done'); }
+    return;
+  }
+  if (ev.type !== 'done') return;
+
+  statusEl.innerHTML = '';
+  sessionId = ev.session_id;
+
+  // 定稿：用 done 里的文本整段替换草稿。
+  // 合规检查可能改写过（"保证明天到"→"通常明天到"）或整段拦下转人工，
+  // 流式推出去的那些字只是草稿
+  const el = draft || bubble('', '');
+  draft = null;
+  el.className = 'msg';
+  el.textContent = ev.answer;
+
+  if (ev.citations?.length){
+    const box = document.createElement('div');
+    box.className = 'cite';
+    box.innerHTML = '<b>引用</b>';
+    ev.citations.forEach(c => {
+      const d = document.createElement('details');
+      d.innerHTML = `<summary>[#${c.item_id}] ${esc(c.title)}</summary>`
+                  + `<p>${esc(c.content)}</p>`;
+      box.appendChild(d);
+    });
+    el.appendChild(box);
+  }
+
+  if (ev.handover){
+    const h = document.createElement('div');
+    h.className = 'handover';
+    h.innerHTML = `⚠ 已转人工：${esc(ev.handover_reason)}`
+      + (ev.handover_ticket_id
+          ? `<br>工单 #${ev.handover_ticket_id} —— 这是一个知识盲点，`
+          + `补答后回灌知识库，下次就能自动回答`
+          : '');
+    el.appendChild(h);
+  }
+
+  if (ev.trace_id){
+    const fb = document.createElement('div');
+    fb.className = 'fb';
+    fb.dataset.fb = ev.trace_id;
+    fb.innerHTML = `<button data-t="up">👍</button><button data-t="down">👎</button>`
+                 + `<span class="tid">${ev.trace_id.slice(0,12)}</span>`;
+    fb.querySelectorAll('button').forEach(b => b.onclick = () => {
+      b.classList.add('pending');
+      ws.send(JSON.stringify({type:'feedback', trace_id:ev.trace_id, thumb:b.dataset.t}));
+    });
+    el.appendChild(fb);
+  }
+
+  renderDebug(ev);
+  log.scrollTop = log.scrollHeight;
+}
+
+function renderDebug(ev){
+  const d = ev.debug || {};
+  const kv = (k,v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
+  let html = kv('意图', ev.intent || '-')
+           + kv('命中', d.hit_count ?? 0)
+           + kv('最高相似度', (d.max_score ?? 0).toFixed(3))
+           + kv('总耗时', (d.latency_ms?.total ?? 0) + ' ms');
+  if (d.rewritten_query) html += kv('改写查询', esc(d.rewritten_query));
+  if (ev.handover) html += kv('转人工', esc(ev.handover_reason));
+  if (ev.postcheck_flags?.length)
+    html += kv('合规标记', ev.postcheck_flags.map(esc).join('、'));
+
+  if (d.tools_called?.length){
+    html += '<h2 style="margin-top:14px">工具调用</h2>';
+    d.tools_called.forEach(t => {
+      html += `<div class="hit"><div class="t"><span>🔧 ${esc(t.name)}</span>`
+            + `<span>${t.latency_ms}ms ${t.hit ? '命中' : '无数据'}</span></div></div>`;
+    });
+  }
+
+  if (d.hits?.length){
+    html += '<h2 style="margin-top:14px">检索命中</h2>';
+    d.hits.forEach(h => {
+      // 词汇支撑是判断"真沾边"还是"只是向量基线相似度"的关键信号
+      const tag = h.lexical ? '<span class="tag yes">词汇✓</span>'
+                            : '<span class="tag no">无词汇</span>';
+      html += `<div class="hit"><div class="t"><span>#${h.item_id}</span>`
+            + `<span>${h.dense.toFixed(3)} ${tag}</span></div>`
+            + `<div>${esc(h.title)}</div></div>`;
+    });
+  }
+  debugEl.innerHTML = html;
+}
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+$('#compose').onsubmit = e => {
+  e.preventDefault();
+  const text = $('#input').value.trim();
+  if (!text || !connected) return;
+  bubble('me', text);
+  $('#input').value = '';
+  statusEl.innerHTML = '<span class="pill live">思考</span>';
+  const pid = $('#product').value;
+  ws.send(JSON.stringify({
+    message: text,
+    session_id: sessionId,
+    user_id: parseInt($('#user').value) || null,
+    product_id: pid ? parseInt(pid) : null,
+  }));
+};
+
+$('#reset').onclick = () => {
+  sessionId = null;
+  log.querySelectorAll('.msg:not(.sys)').forEach(m => m.remove());
+  debugEl.innerHTML = '<div class="empty">发一条消息看看</div>';
+};
+
+connect();
+</script>
+</body>
+</html>

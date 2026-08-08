@@ -267,6 +267,25 @@ def cmd_traces(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """起 Web 调试台。
+
+    终端能聊，但演示时一个真的聊天界面差别很大——尤其是右侧那块
+    诊断面板：意图、命中、相似度、有没有词汇支撑、为什么转人工，
+    这些平时全是隐形的。
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        print("✗ 需要 uvicorn：pip install -e 'apps/python/ai-agent[server]'")
+        return 1
+
+    print(f"\n  调试台 → http://127.0.0.1:{args.port}/\n")
+    uvicorn.run("app.main:app", host=args.host, port=args.port,
+                reload=args.reload, log_level="warning")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="smartmall-agent", description="smartMall 客服 Agent 调试台"
@@ -309,6 +328,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--reason", default="",
                    help="答非所问 / 信息错误 / 态度生硬 / 太啰嗦")
     s.set_defaults(func=cmd_feedback)
+
+    s = sub.add_parser("serve", help="起 Web 调试台（流式对话 + 诊断面板）")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, default=9002)
+    s.add_argument("--reload", action="store_true")
+    s.set_defaults(func=cmd_serve)
 
     s = sub.add_parser("traces", help="看最近的对话埋点")
     s.add_argument("--limit", type=int, default=15)
