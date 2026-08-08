@@ -16,7 +16,20 @@ from app.agent.nodes import Deps
 from app.agent.retriever import StubRetriever
 from app.agent.state import Citation, Intent
 from app.eval import runner as R
-from app.eval.metrics import check_gates, classify_report, render_report
+from app.agent.textwidth import display_width
+from app.eval.metrics import (
+    check_gates, classify_report, render_gates, render_report,
+)
+
+
+def _col(line: str, needle: str) -> int:
+    """``needle`` 在这一行的**显示列**。
+
+    不能用 ``line.index()``——那是字符下标。"转人工"补齐后是 3 字 18 空格，
+    "硬答"是 2 字 20 空格，字符下标差 1，而屏幕上两者是对齐的。
+    这条测试的第一版就是这么误报的。
+    """
+    return display_width(line[: line.index(needle)])
 
 
 # ---------------------------------------------------------------- 指标
@@ -78,6 +91,25 @@ class TestClassificationMetrics:
     def test_render_is_readable(self):
         out = render_report(classify_report([("a", "a"), ("b", "a")]))
         assert "准确率" in out and "macro-F1" in out and "混淆" in out
+
+    def test_columns_line_up_with_chinese_labels(self):
+        """``f"{'转人工':<24}"`` 按**字符数**补齐，终端按**列宽**排版，
+        汉字占两列——于是每一行都按自己标签的长度错开。
+
+        评测报告的表格几乎全是中文类名（拦截/转人工/正常），不过这一层
+        就没有一行是对齐的。
+        """
+        rep = classify_report([("转人工", "转人工"), ("硬答", "硬答")])
+        rows = [ln for ln in render_report(rep).splitlines()
+                if "转人工" in ln or "硬答" in ln]
+        assert len(rows) == 2
+        assert len({_col(ln, "1.000") for ln in rows}) == 1, f"数字列没对齐：{rows}"
+
+    def test_gate_lines_line_up_too(self):
+        rep = classify_report([("a", "a")] * 10)
+        out = render_gates(check_gates(rep, accuracy_min=0.85, macro_f1_min=0.80))
+        rows = [ln for ln in out.splitlines() if "/ 需" in ln]
+        assert len({_col(ln, "/ 需") for ln in rows}) == 1, rows
 
 
 class TestGates:

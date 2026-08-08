@@ -21,6 +21,7 @@ from enum import StrEnum
 from typing import Iterable, Sequence
 
 from .models import KnowledgeItem, KnowledgeType
+from .textwidth import display_width, pad, truncate
 
 
 class CellLevel(StrEnum):
@@ -119,17 +120,23 @@ class CoverageMatrix:
             CellLevel.HOT: "  █",
         }
         types = self.knowledge_types
-        header = "类目            " + "".join(f"{str(t)[:6]:>8}" for t in types)
-        lines = ["知识覆盖度矩阵", "=" * len(header), header, "-" * len(header)]
+        # 全部按**显示列**排版：类目名与知识类型都是中文，汉字占两列，
+        # 按字符补齐会让每一行按自己名字的长度错开，热力图就没法竖着看了
+        # 截到 6 列而列宽 8：留出两列水槽，否则相邻的类型名会连在一起
+        header = pad("类目", 16) + "".join(
+            pad(truncate(str(t), 6), 8, right=True) for t in types
+        )
+        rule = "=" * display_width(header)
+        lines = ["知识覆盖度矩阵", rule, header, "-" * display_width(header)]
 
         for cid, name in self.categories.items():
-            row = f"{name[:14]:<16}"
+            row = pad(truncate(name, 16), 16)
             for t in types:
                 c = self.cell(cid, t)
-                row += f"{symbols[c.level] if c else '  ·':>8}"
+                row += pad(symbols[c.level] if c else "  ·", 8, right=True)
             lines.append(row)
 
-        lines.append("-" * len(header))
+        lines.append("-" * display_width(header))
         lines.append("· 空  ▁ 稀疏  ▆ 正常  █ 密集")
         lines.append(f"覆盖率 {self.coverage_ratio:.1%}，空白格 {len(self.empty_cells)} 个")
         return "\n".join(lines)

@@ -31,6 +31,7 @@ from .ingest import synthetic
 from .models import KnowledgeType
 from .orchestrator import PipelineConfig, run_pipeline
 from .repository import DwsRepository, OdsRepository
+from .textwidth import pad, truncate
 
 EXPECTED_TABLES = 31
 
@@ -461,7 +462,7 @@ def cmd_dedup(args: argparse.Namespace) -> int:
     print("\n  样例：")
     for key, members in list(dupes.items())[:5]:
         ids = "、".join(f"#{m['id']}" for m in members[:6])
-        print(f"    ×{len(members):<3} {key[1][:34]:<36} {ids}")
+        print(f"    ×{len(members):<3} {pad(truncate(key[1], 36), 36)} {ids}")
 
     if not args.yes:
         print("\n  这是不可逆操作。确认无误后加 --yes 重新执行。")
@@ -614,7 +615,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
     with repo.engine.connect() as conn:
         for label, sql in queries:
             n = conn.execute(text(sql)).scalar()
-            print(f"  {label:<20} {n:>8}")
+            print(f"  {pad(label, 20)} {n:>8}")
 
         rows = conn.execute(text(
             "SELECT source, COUNT(*) FROM knowledge_item WHERE deleted=0 "
@@ -623,7 +624,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
         if rows:
             print("\n  按来源分布：")
             for source, n in rows:
-                print(f"    {source:<18} {n:>8}")
+                print(f"    {pad(source, 18)} {n:>8}")
     return 0
 
 
@@ -889,7 +890,7 @@ def cmd_reset(args: argparse.Namespace) -> int:
 
     print("  将清空：")
     for t, n in nonempty.items():
-        print(f"    {t:<24} {n:>8} 行")
+        print(f"    {pad(t, 24)} {n:>8} 行")
 
     if args.include_ods:
         print("\n  ⚠ --include-ods 会删掉原始数据，删了就只能重新采集")

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from .models import BizType, KnowledgeItem, KnowledgeType, ReviewStatus
+from .textwidth import pad, truncate
 
 
 @dataclass
@@ -158,10 +159,14 @@ def rank_blind_spots(spots: Sequence[BlindSpot]) -> list[BlindSpot]:
 def render_blind_spots(spots: Sequence[BlindSpot]) -> str:
     if not spots:
         return "  暂无转人工记录——要么知识库覆盖得好，要么还没人用过。"
-    lines = [f"  {'优先级':<6} {'次数':>4}  {'状态':<10} 问题", "  " + "─" * 62]
+    lines = [
+        f"  {pad('优先级', 6)} {pad('次数', 4, right=True)}"
+        f"  {pad('状态', 10)} 问题",
+        "  " + "─" * 62,
+    ]
     for s in rank_blind_spots(spots):
         lines.append(
-            f"  {s.priority:<6} {s.times:>4}  {s.status:<10} "
-            f"#{s.ticket_id} {s.question[:40]}"
+            f"  {pad(s.priority, 6)} {s.times:>4}  {pad(s.status, 10)} "
+            f"#{s.ticket_id} {truncate(s.question, 40)}"
         )
     return "\n".join(lines)

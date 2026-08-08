@@ -17,6 +17,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from .textwidth import pad, truncate
+
 Role = Literal["user", "agent", "system"]
 
 
@@ -329,14 +331,14 @@ class FunnelReport(BaseModel):
                 pct = s.output_count / base_count * 100 if base_count else 0
                 metric = f"{pct:.1f}% 存活"
             lines.append(
-                f"{s.gate:<20} {s.input_count:>6} {s.input_unit}"
+                f"{pad(s.gate, 20)} {s.input_count:>6} {s.input_unit}"
                 f" → {s.output_count:>6} {s.output_unit}"
                 f"  ({metric}, {s.drop_summary})"
             )
             for reason, n in sorted(s.dropped.items(), key=lambda kv: -kv[1]):
-                lines.append(f"    ✗ {reason:<28} {n:>7}")
+                lines.append(f"    ✗ {pad(truncate(reason, 28), 28)} {n:>7}")
             for kind, n in sorted(s.modified.items(), key=lambda kv: -kv[1]):
-                lines.append(f"    ~ {kind:<28} {n:>7}")
+                lines.append(f"    ~ {pad(truncate(kind, 28), 28)} {n:>7}")
         lines.append("=" * 62)
         lines.append(f"产出 knowledge_item {self.knowledge_items} 条 / "
                      f"sft_sample {self.sft_samples} 条")

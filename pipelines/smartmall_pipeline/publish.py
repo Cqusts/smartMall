@@ -31,6 +31,7 @@ from typing import Any, Iterable, Sequence
 
 from .gates import pii
 from .models import KnowledgeItem, ReviewStatus
+from .textwidth import pad
 
 
 @dataclass
@@ -64,7 +65,8 @@ class GateCheck:
 
     def render(self) -> str:
         mark = "✓" if self.passed else ("✗" if self.blocking else "⚠")
-        return f"  {mark} {self.name:<20} 实际={self.actual!s:<12} 要求={self.expected}"
+        return (f"  {mark} {pad(self.name, 20)}"
+                f" 实际={pad(str(self.actual), 12)} 要求={self.expected}")
 
 
 @dataclass

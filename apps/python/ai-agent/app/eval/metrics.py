@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
+from ..agent.textwidth import pad as _pad
+
 
 @dataclass
 class ClassMetrics:
@@ -120,14 +122,16 @@ def render_report(rep: ClassificationReport, *, title: str = "分类评测") -> 
         "  " + "─" * 66,
         f"  样本 {rep.total} · 准确率 {rep.accuracy:.3f} · macro-F1 {rep.macro_f1:.3f}",
         "",
-        f"  {'类别':<24} {'支撑':>4} {'精确':>6} {'召回':>6} {'F1':>6}",
+        f"  {_pad('类别', 24)} {_pad('支撑', 4, right=True)}"
+        f" {_pad('精确', 6, right=True)} {_pad('召回', 6, right=True)}"
+        f" {_pad('F1', 6, right=True)}",
     ]
     for name in sorted(rep.per_class, key=lambda k: -rep.per_class[k].support):
         m = rep.per_class[name]
         if not m.support and not m.fp:
             continue
         lines.append(
-            f"  {name:<24} {m.support:>4} {m.precision:>6.3f}"
+            f"  {_pad(name, 24)} {m.support:>4} {m.precision:>6.3f}"
             f" {m.recall:>6.3f} {m.f1:>6.3f}"
         )
 
@@ -182,6 +186,7 @@ def render_gates(gates: Sequence[GateResult]) -> str:
         mark = "✓" if g.passed else "✗"
         tail = f"（{g.note}）" if g.note else ""
         lines.append(
-            f"    {mark} {g.name:<12} {g.value:.3f} / 需 ≥ {g.threshold:.2f}{tail}"
+            f"    {mark} {_pad(g.name, 12)} {g.value:.3f}"
+            f" / 需 ≥ {g.threshold:.2f}{tail}"
         )
     return "\n".join(lines)

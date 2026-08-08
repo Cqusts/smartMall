@@ -345,15 +345,34 @@ class TestDepsAssemblyIsShared:
     def test_server_and_cli_call_the_same_builder(self):
         """两边都必须走 assembly.build_deps，不能各自 new。
 
-        断言看的是**代码**而不是源码文本——扫源码会把注释里提到的
-        名字也算进去（这条测试第一版就是这么误报的）。
-        co_names 只包含真正引用到的全局名字。
-        """
-        from app.agent import cli
-        from app.routers import chat
+        断言看的是**代码结构**而不是源码文本——扫文本会把注释里提到的
+        名字也算进去（这条测试第一版就是这么误报的，而 get_deps 的
+        docstring 里恰好写着 AgentConfig）。这里走 AST，只取真正被引用
+        到的名字。
 
-        server = chat.get_deps.__code__.co_names
-        client = cli._build_deps.__code__.co_names
+        用 AST 而不是 ``__code__.co_names``，是为了不 import
+        ``app.routers.chat``——它依赖 fastapi，而 server 是可选 extra。
+        装配漂移是这个项目出过的最贵的 bug，这条守卫不该因为没装可选
+        依赖就悄悄跳过。
+        """
+        import ast
+        from pathlib import Path
+
+        def names_in(path: Path, func: str) -> set[str]:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name == func:
+                    return {n.id for n in ast.walk(node)
+                            if isinstance(n, ast.Name)} | {
+                        a.name.split(".")[0] for n in ast.walk(node)
+                        if isinstance(n, (ast.Import, ast.ImportFrom))
+                        for a in n.names
+                    }
+            raise AssertionError(f"{path.name} 里找不到 {func}")
+
+        root = Path(__file__).resolve().parents[1] / "app"
+        server = names_in(root / "routers" / "chat.py", "get_deps")
+        client = names_in(root / "agent" / "cli.py", "_build_deps")
 
         assert "build_deps" in server and "build_deps" in client
         assert "AgentConfig" not in server, (

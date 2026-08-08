@@ -22,6 +22,7 @@ from .llm import FakeLlmClient, LlmError, OpenAiCompatClient
 from .nodes import AgentConfig, Deps
 from .retriever import RetrievalError
 from .state import AgentState, SessionContext
+from .textwidth import pad, truncate
 
 
 # ---------------------------------------------------------------- .env
@@ -210,14 +211,17 @@ def cmd_traces(args: argparse.Namespace) -> int:
         print("  还没有埋点。先跑 `smartmall-agent chat` 聊几句。")
         return 0
 
-    print(f"{'时间':<17} {'意图':<20} {'命中':>4} {'最高分':>7} {'反馈':<4} 问题")
+    # 全部按显示列对齐：表头是中文、👍 是宽字符，按字符补齐会让表头和
+    # 数据行各错开两三列，而竖着扫这张表正是它存在的意义
+    print(f"{pad('时间', 17)} {pad('意图', 20)} {pad('命中', 4, right=True)}"
+          f" {pad('最高分', 7, right=True)} {pad('反馈', 4)} 问题")
     print("─" * 96)
     for r in rows:
         thumb = {1: "👍", -1: "👎"}.get(r["thumb"], "")
         mark = "转人工 " if r["handover"] else ""
-        print(f"{r['created_at']:%m-%d %H:%M:%S}   {r['intent']:<20}"
+        print(f"{r['created_at']:%m-%d %H:%M:%S}   {pad(r['intent'], 20)}"
               f" {r['retrieval_hit_count']:>4} {float(r['retrieval_max_score']):>7.3f}"
-              f" {thumb:<4} {mark}{r['input_text'][:28]}")
+              f" {pad(thumb, 4)} {mark}{truncate(r['input_text'], 28)}")
     return 0
 
 
