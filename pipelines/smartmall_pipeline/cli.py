@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -413,6 +414,141 @@ def cmd_peek(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------- dedup
+
+
+def load_product_facts(repo: DwsRepository, ids: list[int] | None = None) -> list:
+    """从库里取商品的权威事实，配上主图路径。
+
+    VLM 只负责"看见"，"知道"的部分从这里来——材质克重是运营填进
+    product_attr 的，不是模型看出来的（见 vision.py 开头那段）。
+    """
+    from sqlalchemy import bindparam, text
+
+    from .vision import ProductFacts
+
+    web_img = (Path(__file__).resolve().parents[2]
+               / "apps" / "python" / "ai-agent" / "web" / "img")
+
+    sql = ("SELECT p.id, p.name, p.main_image, p.category_id, c.name AS category "
+           "FROM product p LEFT JOIN category c ON c.id = p.category_id "
+           "WHERE p.deleted = 0 AND p.status = 'on_sale'")
+    params: dict = {}
+    stmt = text(sql + " ORDER BY p.id")
+    if ids:
+        # expanding=True 才能把列表展开成 IN (:a,:b,…)；不加会当成单个标量绑定
+        stmt = text(sql + " AND p.id IN :ids ORDER BY p.id").bindparams(
+            bindparam("ids", expanding=True)
+        )
+        params["ids"] = ids
+
+    out = []
+    with repo.engine.connect() as conn:
+        rows = conn.execute(stmt, params).mappings().fetchall()
+
+        for r in rows:
+            skus = conn.execute(text(
+                "SELECT spec FROM sku WHERE product_id = :pid AND deleted = 0"
+            ), {"pid": r["id"]}).fetchall()
+            colors: list[str] = []
+            for (spec,) in skus:
+                try:
+                    v = json.loads(spec) if isinstance(spec, str) else (spec or {})
+                except json.JSONDecodeError:
+                    continue
+                c = str(v.get("颜色") or "").strip()
+                if c and c not in colors:
+                    colors.append(c)
+
+            attrs = {
+                a["attr_key"]: a["attr_value"] for a in conn.execute(text(
+                    "SELECT attr_key, attr_value FROM product_attr "
+                    "WHERE product_id = :pid"
+                ), {"pid": r["id"]}).mappings().fetchall()
+            }
+            out.append(ProductFacts(
+                product_id=int(r["id"]), name=r["name"],
+                category=r["category"] or "", category_id=r["category_id"],
+                sku_colors=colors, attrs=attrs,
+                image_path=str(web_img / r["main_image"]) if r["main_image"] else "",
+            ))
+    return out
+
+
+def cmd_vision(args: argparse.Namespace) -> int:
+    """商品图打标：VLM 看图 → knowledge_item。
+
+    这是「多模态素材 → 数据中台 → RAG」那条入口的第一次落地，也是
+    eval 里那个洞的解药——问"这件是什么面料""这款有藏青色吗"全部转人工，
+    覆盖率 0.0，因为 189 条知识全是通用客服对话，没有一条讲具体商品。
+    """
+    from .vision import FakeVisionClient, DashScopeVisionClient, tag_assets
+
+    repo = DwsRepository.from_env()
+    ids = [int(x) for x in args.product.split(",")] if args.product else None
+    facts = load_product_facts(repo, ids)
+    if args.limit:
+        facts = facts[: args.limit]
+
+    missing = [f for f in facts if not f.image_path]
+    facts = [f for f in facts if f.image_path]
+    if missing:
+        print(f"  ⚠ {len(missing)} 个商品没有主图，跳过："
+              f"{'、'.join(str(m.product_id) for m in missing[:8])}")
+        print("    先跑 deploy/sql/migrations/005_storefront_catalog.sql")
+    if not facts:
+        print("  没有可打标的商品图。")
+        return 1
+
+    client = FakeVisionClient() if args.fake_vlm else DashScopeVisionClient()
+    print(f"==> {'替身' if args.fake_vlm else 'qwen-vl-max'} 打标 {len(facts)} 张图\n")
+
+    def tick(i, total):
+        print(f"\r  {i}/{total}", end="", flush=True)
+
+    results, stats = tag_assets(client, facts, progress=tick)
+    print("\r" + " " * 24 + "\r", end="")
+
+    ok = [r for r in results if r.ok]
+    flagged = [r for r in ok if r.flags]
+    for r in results:
+        if r.error:
+            print(f"  ✗ {r.facts.product_id} {r.facts.name}：{r.error}")
+    for r in flagged:
+        print(f"  ~ {r.facts.product_id} {truncate(r.facts.name, 20)}："
+              f"{'；'.join(r.flags)}")
+
+    print(f"\n  产出 {len(ok)} 条 · 自动通过 {len(ok) - len(flagged)} 条 · "
+          f"送人工 {len(flagged)} 条")
+
+    if args.dry_run:
+        print("\n  --dry-run，未写库。样例：\n")
+        if ok:
+            print("  " + ok[0].item.content.replace("\n", "\n  "))
+        return 0
+
+    # 同一张图重打标要覆盖而不是叠加。这条命令必然会被跑第二次
+    # （先 --limit 试水再全量），不清旧的就会攒出一堆同题知识，
+    # 而检索里几条几乎一样的条目会把 top_k 占满，挤掉真正该出现的那条。
+    from sqlalchemy import bindparam, text as _t
+
+    refs = [r.item.source_ref for r in ok]
+    with repo.engine.begin() as conn:
+        stale = conn.execute(
+            _t("UPDATE knowledge_item SET deleted = 1 "
+               "WHERE source = 'vlm_asset' AND deleted = 0 AND source_ref IN :refs")
+            .bindparams(bindparam("refs", expanding=True)),
+            {"refs": refs},
+        ).rowcount
+    if stale:
+        print(f"  覆盖同图旧条目 {stale} 条")
+
+    n = repo.save_knowledge_items([r.item for r in ok])
+    print(f"  已写入 knowledge_item {n} 条")
+    if flagged:
+        print(f"  其中 {len(flagged)} 条为 pending，跑 "
+              f"`smartmall-pipeline approve` 人工确认后才会进索引")
+    print("\n  下一步：smartmall-pipeline index  （把新知识向量化）")
+    return 0
 
 
 def cmd_dedup(args: argparse.Namespace) -> int:
@@ -1007,6 +1143,14 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("dedup", help="清掉库里已有的同题重复知识")
     s.add_argument("--yes", action="store_true", help="确认执行")
     s.set_defaults(func=cmd_dedup)
+
+    s = sub.add_parser("vision", help="商品图打标：VLM 看图产出商品知识")
+    s.add_argument("--product", help="只跑这几个商品，逗号分隔")
+    s.add_argument("--limit", type=int, help="只跑前 N 张，试水省钱")
+    s.add_argument("--fake-vlm", action="store_true",
+                   help="用替身跑通链路，不调真实模型、不产生费用")
+    s.add_argument("--dry-run", action="store_true", help="只看产出不写库")
+    s.set_defaults(func=cmd_vision)
 
     s = sub.add_parser("handover", help="转人工工单：看盲点、补答案、回灌")
     hsub = s.add_subparsers(dest="action", required=True)
