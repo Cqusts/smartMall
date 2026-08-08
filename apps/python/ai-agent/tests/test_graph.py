@@ -299,3 +299,67 @@ class TestGraphMatchesDirectRun:
 
         assert bool(got["handover"]) == direct.handover
         assert got["intent"] == direct.intent
+
+
+class TestLexicalSupport:
+    """中间分数段的判据是**词汇支撑**，不是分数本身。
+
+    真实事故：三个知识库里明明没有的问题——"支持花呗分期吗"、
+    "门店地址在哪"、"能开专票吗"——检索分别拿到 0.413 / 0.446 / 0.492，
+    全都落进澄清区间，于是 Agent 反问了三个假装在缩小范围的问题：
+    "您问的是哪款商品支持花呗分期呢？"
+
+    知识库里根本没有花呗分期的任何信息。用户回答之后，第二轮仍然
+    没有知识，只会更恼火。这比直接说"我帮您转人工"糟糕得多。
+
+    根因是中文短文本 embedding 的基线相似度就有 0.3~0.4——
+    两句毫不相干的话也能拿到这个分。BM25 是独立的一路证据：
+    查询词真的出现在文档里才给分。
+    """
+
+    def _mid(self, bm25: float) -> Citation:
+        """落在澄清区间的命中，词汇支撑可控。"""
+        return Citation(item_id=1, title="七天无理由退换", content="支持",
+                        score=0.4, dense_score=0.45, bm25_score=bm25)
+
+    def test_no_lexical_support_goes_to_human(self):
+        s = _run("你们支持花呗分期吗", _deps(hits=[self._mid(bm25=0.0)]))
+        assert s.handover, "没有词汇支撑却去澄清，等于装作知识库里有"
+        assert s.handover_reason is HandoverReason.NO_KNOWLEDGE
+        assert not s.clarify_question
+
+    def test_lexical_support_still_clarifies(self):
+        """真沾边的情况不该被误伤——澄清在这里是对的。"""
+        s = _run("这件怎么洗", _deps(hits=[self._mid(bm25=3.2)]))
+        assert not s.handover
+        assert s.clarify_question
+
+    def test_one_supported_hit_is_enough(self):
+        """混合检索里纯 dense 召回的条目 BM25 天然为 0。
+
+        要求全部命中都有词汇支撑，会把正常情况也判死。
+        """
+        hits = [self._mid(bm25=0.0), self._mid(bm25=0.0), self._mid(bm25=1.5)]
+        s = _run("这件怎么洗", _deps(hits=hits))
+        assert not s.handover
+
+    def test_high_score_does_not_need_lexical_support(self):
+        """高分本身就是足够的证据，别为了这条规则误伤正常回答。"""
+        hit = Citation(item_id=1, title="面料", content="羊毛",
+                       score=0.8, dense_score=0.85, bm25_score=0.0)
+        s = _run("面料", _deps(hits=[hit]))
+        assert not s.handover and s.answer
+
+    def test_helper_is_pure_and_directly_testable(self):
+        from app.agent.graph import has_lexical_support
+
+        st = AgentState()
+        st.hits = [self._mid(bm25=0.0)]
+        assert not has_lexical_support(st)
+        st.hits.append(self._mid(bm25=0.1))
+        assert has_lexical_support(st)
+
+    def test_empty_hits_have_no_support(self):
+        from app.agent.graph import has_lexical_support
+
+        assert not has_lexical_support(AgentState())

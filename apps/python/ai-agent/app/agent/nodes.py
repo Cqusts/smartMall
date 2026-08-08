@@ -35,8 +35,14 @@ class AgentConfig:
     handover_below: float = 0.30
     """低于此分数说明知识库里根本没有相关内容，直接转人工。
     硬答的结果是一本正经地胡说。"""
-    clarify_below: float = 0.50
-    """介于两者之间：有点相关但不确定，问一句比猜一句强。"""
+    clarify_below: float = 0.55
+    """介于两者之间：可能沾边但拿不准，且**必须有词汇支撑**才澄清
+    （见 graph.has_lexical_support）。
+
+    这两个阈值是初值，不是定论。实测的四个样本：答对的那次 0.760，
+    答不上来的三次 0.413 / 0.446 / 0.492——分界线明显在 0.5 以上，
+    所以从 0.50 提到 0.55。等 agent_trace 攒够几十条、配上点赞点踩，
+    就能用数据校准而不是拍脑袋（``smartmall-agent traces`` 正是为此）。"""
 
     max_history_turns: int = 6
     summarize_after_turns: int = 10

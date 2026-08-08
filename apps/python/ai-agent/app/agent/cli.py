@@ -129,7 +129,9 @@ def _render(state: AgentState, *, verbose: bool) -> None:
         if state.trace.rewritten_query:
             print(f"     改写查询：{state.trace.rewritten_query}")
         for h in state.hits:
-            print(f"     [#{h.item_id}] {h.dense_score:.3f} {h.title[:40]}")
+            # bm25=0 表示查询词一个都没命中，那点相似度只是向量基线
+            lex = "词汇✓" if h.bm25_score > 0 else "无词汇"
+            print(f"     [#{h.item_id}] {h.dense_score:.3f} {lex:<6} {h.title[:36]}")
         if state.postcheck_flags:
             print(f"     合规标记：{'、'.join(state.postcheck_flags)}")
         if state.handover:
@@ -264,8 +266,8 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--top-k", type=int, default=5)
     common.add_argument("--handover-below", type=float, default=0.30,
                         help="低于此相似度直接转人工")
-    common.add_argument("--clarify-below", type=float, default=0.50,
-                        help="低于此相似度先追问澄清")
+    common.add_argument("--clarify-below", type=float, default=0.55,
+                        help="低于此相似度先追问澄清（且需有词汇支撑，否则转人工）")
     common.add_argument("--rag-url", help="改用 ai-rag 服务检索，默认直连 MySQL")
     common.add_argument("--fake-llm", action="store_true",
                         help="用假模型，不调真实 API、不产生费用")

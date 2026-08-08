@@ -40,6 +40,32 @@ def route_after_intent(state: AgentState) -> str:
     return "retrieve"
 
 
+def has_lexical_support(state: AgentState) -> bool:
+    """命中里是否有**词汇**支撑，而不只是向量的基线相似度。
+
+    中文短文本 embedding 有一个恼人的性质：两句毫不相干的话也能拿到
+    0.3~0.4 的余弦相似度。所以"分数中等"本身根本不能说明检索到了
+    相关内容——实测里"你们支持花呗分期吗"命中的全是「七天无理由退换」，
+    分数 0.413；"能开专票吗"命中「能不能发顺丰」，分数 0.492。
+
+    BM25 是一路**独立**的证据：它只在查询词真的出现在文档里时才给分。
+    dense 分中等而 BM25 全为 0，说明这点相似度纯粹来自向量空间的基线，
+    没有任何词汇支撑。
+
+    这个区分决定了中间地带该走哪条路：
+
+    * 有词汇支撑 → 确实检索到了沾边的东西，只是拿不准是哪一条，
+      **澄清有意义**（"您问的是米白那款还是藏青那款？"）。
+    * 没有词汇支撑 → 知识库里根本没有，**澄清是最糟的选择**：
+      装作有，反问一个假装在缩小范围的问题，用户答完第二轮还是没有
+      知识，只会更恼火。这时候老实转人工。
+
+    只要有一条命中带词汇支撑就算数——混合检索里纯 dense 召回的条目
+    BM25 天然为 0，要求全部命中都有支撑会把正常情况也判死。
+    """
+    return any(h.bm25_score > 0 for h in state.hits)
+
+
 def route_after_retrieve(state: AgentState, cfg: AgentConfig) -> str:
     if state.handover:
         return "handover"
@@ -53,6 +79,11 @@ def route_after_retrieve(state: AgentState, cfg: AgentConfig) -> str:
             return "handover"
         return "rewrite"
     if score < cfg.clarify_below:
+        # 中间地带：分数不高不低。此时**分数说明不了问题**，
+        # 要看有没有词汇支撑才能判断是"沾边但拿不准"还是"根本没有"。
+        if not has_lexical_support(state):
+            state.to_handover(HandoverReason.NO_KNOWLEDGE)
+            return "handover"
         return "clarify"
     return "generate"
 
