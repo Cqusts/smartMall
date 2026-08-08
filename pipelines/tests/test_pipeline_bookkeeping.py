@@ -321,3 +321,73 @@ class TestConfigError:
         dialogues = _with_ods_ids(synthetic.generate_batch(40, seed=207))
         with pytest.raises(gate3_model.LlmConfigError):
             gate3_model.run(dialogues, _RejectAfter(after=5))
+
+
+# ---------------------------------------------------------------- 出口守恒
+
+
+class TestNothingIsLostAtGate4:
+    """关卡④只分流，不该吞掉条目。
+
+    真实事故：漏斗报表打印"待人工处理 84 条（Label Studio 队列）"，
+    但 CLI 只落库了自动通过的那 672 条。那 84 条一行都没写，而 ODS
+    那侧已标记为已处理——它们再也不会被重新清洗出来，等于凭空消失。
+
+    被推给人工的恰恰是低置信度、属性冲突、高频问题这几类，
+    是整批里最不该丢的。
+    """
+
+    def _out(self, seed: int):
+        dialogues = _with_ods_ids(synthetic.generate_batch(150, seed=seed))
+        return run_pipeline(
+            dialogues,
+            gate3_model.FakeLlmClient(),
+            batch_id=f"g4-{seed}",
+            product_category=synthetic.product_category_map(),
+        )
+
+    def test_every_item_lands_in_one_of_the_two_buckets(self):
+        out = self._out(301)
+        approved = {id(i) for i in out.knowledge_items}
+        pending = {id(i) for i in out.pending_items}
+        total = out.report.stages[-1].output_count
+
+        assert len(approved) + len(pending) == total, (
+            f"关卡④进出不守恒：出口 {total} 条，"
+            f"落库只有 {len(approved)}+{len(pending)} 条"
+        )
+        assert approved & pending == set(), "同一条不能既自动通过又待审核"
+
+    def test_pending_items_are_marked_pending(self):
+        """待审核的必须是 pending——写成 approved 会让它们直接进索引，
+        而未经人工确认的知识正是我们要拦住的那种。"""
+        from smartmall_pipeline.models import ReviewStatus
+
+        out = self._out(303)
+        assert out.pending_items, "这批数据应当产生人工任务"
+        assert all(
+            i.review_status is ReviewStatus.PENDING for i in out.pending_items
+        )
+
+    def test_pending_items_keep_the_fields_we_threaded_through(self):
+        """任务是扁平的展示结构，但落库要用原件。
+
+        从扁平字段反推会丢掉类目、知识类型、有效期、质量分——
+        那几个字段是一路串下来的，不能在最后一步弄丢。
+        """
+        out = self._out(305)
+        assert out.pending_items
+        assert all(i.category_id is not None for i in out.pending_items), (
+            "待审核条目丢了类目，覆盖度矩阵会漏算它们"
+        )
+        assert all(i.knowledge_type is not None for i in out.pending_items)
+
+    def test_task_and_item_describe_the_same_thing(self):
+        out = self._out(307)
+        for task in out.annotation_tasks:
+            assert task.item.title == task.question
+            assert task.item.content == task.answer
+
+    def test_pending_count_matches_task_count(self):
+        out = self._out(309)
+        assert len(out.pending_items) == out.pending_human

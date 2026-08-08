@@ -333,13 +333,17 @@ def cmd_clean(args: argparse.Namespace) -> int:
     print()
 
     n_items = dws.save_knowledge_items(out.knowledge_items)
+    # 待人工审核的也要落库。它们不会进索引（索引只取 approved/revised），
+    # 但 ODS 那侧已标记为已处理——不写就等于凭空消失，再也捞不回来
+    n_pending = dws.save_knowledge_items(out.pending_items)
     n_samples = dws.save_sft_samples(out.sft_samples)
     dws.record_job(batch_id, out.report.to_stats_json())
     # 必须紧跟着标记，否则重跑会把同一批对话再处理一遍
     n_marked = ods.mark_processed(out.ods_outcomes, batch_id)
 
-    print(f"  ✓ 写入 knowledge_item {n_items} 条、sft_sample {n_samples} 条")
-    print(f"  ✓ 待人工处理 {out.pending_human} 条（Label Studio 队列）")
+    print(f"  ✓ 写入 knowledge_item {n_items + n_pending} 条"
+          f"（{n_items} 条已通过、{n_pending} 条待人工审核）、"
+          f"sft_sample {n_samples} 条")
     print(f"  ✓ 已标记 {n_marked} 条 ODS 记录为已处理")
     if out.unavailable_ods_ids:
         print(f"  ⚠ {len(out.unavailable_ods_ids)} 条因模型服务不可用未处理，"

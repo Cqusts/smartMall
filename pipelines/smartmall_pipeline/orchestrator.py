@@ -45,6 +45,17 @@ class PipelineOutput:
     def pending_human(self) -> int:
         return len(self.annotation_tasks)
 
+    @property
+    def pending_items(self) -> list[KnowledgeItem]:
+        """待人工审核的知识条目（``review_status=pending``）。
+
+        **必须和自动通过的一起落库。** 它们不进索引（索引只取
+        approved/revised），但也绝不能不写——ODS 那边已经标记为已处理，
+        不落库就等于凭空消失，而被推给人工的恰恰是低置信度、
+        属性冲突、高频问题这几类最不该丢的。
+        """
+        return [t.item for t in self.annotation_tasks]
+
 
 def run_pipeline(
     dialogues: Sequence[Dialogue],

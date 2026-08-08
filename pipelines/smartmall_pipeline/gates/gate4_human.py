@@ -49,6 +49,19 @@ class AnnotationTask:
     confidence: float
     product_ids: list[int]
     source_ref: str | None
+    item: KnowledgeItem
+    """原始知识条目。
+
+    任务本身是扁平的展示结构（Label Studio 只认那几个字段），
+    但**必须把原件带上**——否则调用方只能从扁平字段反推，
+    类目、知识类型、有效期、质量分全都丢了。这些字段是好不容易
+    才一路串下来的，不能在最后一步弄丢。
+
+    更要紧的是：这些条目要落库（``review_status=pending``），
+    不落库就等于凭空消失——而 ODS 那侧已经标记为已处理，
+    它们再也不会被重新清洗出来。被推给人工的恰恰是低置信度、
+    属性冲突、高频问题这几类，是最不该丢的。
+    """
 
     def to_label_studio(self) -> dict[str, Any]:
         """转成 Label Studio 的 import 格式。
@@ -193,6 +206,7 @@ def triage(
                 confidence=conf,
                 product_ids=item.product_ids,
                 source_ref=item.source_ref,
+                item=item,
             )
         )
         stats.modify(f"推送人工:{priority.name}")
