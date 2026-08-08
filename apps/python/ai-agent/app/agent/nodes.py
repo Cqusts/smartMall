@@ -48,6 +48,15 @@ class AgentConfig:
     所以从 0.50 提到 0.55。等 agent_trace 攒够几十条、配上点赞点踩，
     就能用数据校准而不是拍脑袋（``smartmall-agent traces`` 正是为此）。"""
 
+    lexical_support_min: float = 0.15
+    """词汇覆盖率下限，低于它视为"知识库里根本没有"（见
+    ``graph.has_lexical_support``）。
+
+    **这个 0.15 只在一个 6 条的玩具语料上验过**：库里没有的问题覆盖率
+    ≤ 0.105，库里有的 ≥ 0.163。真实语料上这条线在哪，得拿
+    ``smartmall-agent eval --suite negative`` 的错例去校——调它之前
+    先看错例，别拍脑袋。"""
+
     max_history_turns: int = 6
     summarize_after_turns: int = 10
     max_answer_length: int = 200
@@ -130,6 +139,13 @@ def guard_input(state: AgentState, deps: Deps) -> AgentState:
     """输入安全检查。纯规则，不调模型。"""
     result = guard.check_input(state.message)
 
+    if result.reason == "自伤风险":
+        # 话术是写死的，不能交给模型生成——这一句上模型的自由发挥是纯风险。
+        # 同时转人工：客服不做心理疏导，但必须把人接住而不是打发走。
+        state.answer = result.reply
+        state.to_handover(HandoverReason.SELF_HARM)
+        return state
+
     if result.wants_handover:
         state.to_handover(HandoverReason.USER_REQUESTED)
         return state
@@ -207,6 +223,9 @@ def retrieve(state: AgentState, deps: Deps) -> AgentState:
     state.trace.retrieval_hit_count = len(state.hits)
     state.trace.retrieval_max_score = state.max_score
     state.trace.retrieval_item_ids = [h.item_id for h in state.hits]
+    state.trace.retrieval_lexical_overlap = max(
+        (h.lexical_overlap for h in state.hits), default=0.0
+    )
     return state
 
 
@@ -259,15 +278,33 @@ def chitchat(state: AgentState, deps: Deps) -> AgentState:
 
     约三成消息是纯寒暄，走完整 RAG 链路是纯粹的浪费——
     一次向量化 + 一次检索 + 一次大模型调用，只为回一句"在的呢"。
+
+    **但寒暄同时是七类里的兜底类。** 分不进另外六类的消息最后都落这儿，
+    而这一支不检索、无引用、原本还不过出口合规检查——等于把**最自由的
+    分支**当成了兜底。实测代价：问"你们公司注册地在哪"，模型答
+    "我们公司注册在杭州呢"；问"有没有实习岗位"，答"我们目前确实有实习
+    岗位在招哦"。两条都是凭空编的本店事实，检索一次都没发生。
+
+    所以这里让模型先分流：真·社交话语才直接回，凡是需要事实才能回答的
+    一律退回主链路重走检索——兜底类必须是**最保守**的分支，不是最自由的。
     """
     try:
-        state.answer = deps.llm.complete(
+        data = deps.llm.complete_json(
             model=deps.config.chitchat_model,
             system=prompts.CHITCHAT_SYSTEM,
             user=state.message,
-        ).strip()
+        )
     except LlmError:
-        state.answer = "在的，请问有什么可以帮您？"
+        # 判不出来就当它需要事实：编一条本店信息的代价比多转一次人工大得多
+        state.needs_knowledge = True
+        return state
+
+    if str(data.get("kind")) != "social":
+        state.needs_knowledge = True
+        return state
+
+    reply = str(data.get("reply") or "").strip()
+    state.answer = reply or "在的，请问有什么可以帮您？"
     return state
 
 
@@ -422,6 +459,11 @@ def post_check(state: AgentState, deps: Deps) -> AgentState:
     state.trace.postcheck_flags.extend(result.flags)
     if result.blocked:
         state.to_handover(HandoverReason.POSTCHECK_FAILED)
+    elif result.deferred:
+        # 模型自己说答不了。原因记 NO_KNOWLEDGE 而不是 POSTCHECK_FAILED：
+        # 这不是合规问题，是知识库缺内容——盲点统计要靠这个分类才准，
+        # 记错了就永远补不上那块知识。
+        state.to_handover(HandoverReason.NO_KNOWLEDGE)
     return state
 
 
@@ -470,11 +512,14 @@ def handover(state: AgentState, deps: Deps) -> AgentState:
     )
     state.handover_summary = summary
 
-    state.answer = (
-        "这个问题我不太确定，帮您转接人工客服，稍等一下～"
-        if reason is not HandoverReason.USER_REQUESTED
-        else "好的，正在为您转接人工客服，请稍等～"
-    )
+    if reason is HandoverReason.SELF_HARM:
+        # 话术已经在 guard_input 里定好了，不覆盖。"这个问题我不太确定"
+        # 用在这里是荒唐的——用户说的不是一个"问题"。
+        pass
+    elif reason is HandoverReason.USER_REQUESTED:
+        state.answer = "好的，正在为您转接人工客服，请稍等～"
+    else:
+        state.answer = "这个问题我不太确定，帮您转接人工客服，稍等一下～"
     state.trace.handover = True
     state.trace.handover_reason = reason.value
     return state

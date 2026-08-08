@@ -21,9 +21,10 @@ from app.agent.streaming import stream_turn, turn_result
 from app.agent.tools import StubToolBox
 
 
-def _hit(item_id=1, score=0.80) -> Citation:
+def _hit(item_id=1, score=0.80, overlap=0.45) -> Citation:
     return Citation(item_id=item_id, title="面料是什么", content="100%羊毛",
-                    score=score, dense_score=score, bm25_score=1.0)
+                    score=score, dense_score=score, bm25_score=1.0,
+                    lexical_overlap=overlap)
 
 
 _DEFAULT = object()
@@ -77,7 +78,9 @@ class TestEventStream:
         d = _events()[-1]["debug"]
         assert d["hit_count"] == 1
         assert d["max_score"] > 0
-        assert d["hits"][0]["lexical"] is True, "词汇支撑要能在面板上看到"
+        # 面板上给的是覆盖率数值而不是布尔："词汇✓"曾经近乎恒真，
+        # 一个常见 bigram 就能点亮它，等于什么都没告诉看的人
+        assert d["hits"][0]["lexical"] == 0.45
 
 
 class TestDraftVersusFinal:

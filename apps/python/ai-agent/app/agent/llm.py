@@ -219,11 +219,15 @@ class FakeLlmClient:
         intent: str = "product_knowledge",
         clarify: str = "您问的是哪一件呢？方便说下颜色吗？",
         raise_on: str | None = None,
+        chitchat_kind: str = "social",
     ) -> None:
         self.answer = answer
         self.intent = intent
         self.clarify = clarify
         self.raise_on = raise_on
+        self.chitchat_kind = chitchat_kind
+        """寒暄分支的判定。``needs_fact`` 表示"这其实是个要事实的问题"，
+        用来测那条退回检索的路径。"""
         self.calls: list[tuple[str, str]] = []
 
     def _record(self, model: str, system: str, user: str) -> None:
@@ -247,6 +251,10 @@ class FakeLlmClient:
             return {"intent": self.intent, "confidence": 0.9}
         if "改写" in system:
             return {"query": user[-30:]}
+        if "寒暄" in system:
+            return {"kind": self.chitchat_kind,
+                    "reply": "在的呢～您想看点什么？"
+                             if self.chitchat_kind == "social" else ""}
         return {}
 
     def stream(self, *, model: str, system: str, user: str,

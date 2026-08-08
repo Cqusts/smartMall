@@ -55,6 +55,9 @@ class HandoverReason(str, Enum):
     POSTCHECK_FAILED = "输出合规检查未通过"
     TOOL_FAILURE = "依赖服务不可用"
     INTERNAL_ERROR = "内部异常"
+    SELF_HARM = "用户表达自伤倾向"
+    """单独一类，不并进"超出服务范围"。人工队列要能优先看到它，
+    盲点统计也不该把它当成"知识库缺内容"去补知识。"""
 
 
 @dataclass
@@ -71,6 +74,12 @@ class Citation:
     score: float = 0.0
     dense_score: float = 0.0
     bm25_score: float = 0.0
+    lexical_overlap: float = 0.0
+    """查询里有区分度的词匹配上了多少，0~1（IDF 加权）。
+
+    别用 ``bm25_score > 0`` 代替它：bigram 分词下，"你们支持花呗分期吗"
+    和"支持的快递：默认发顺丰"共享一个``支持``就有分，而知识库里
+    关于花呗一个字都没有。"""
 
     @property
     def marker(self) -> str:
@@ -134,6 +143,12 @@ class TraceRecord:
     retrieval_hit_count: int = 0
     retrieval_max_score: float = 0.0
     retrieval_item_ids: list[int] = field(default_factory=list)
+    retrieval_lexical_overlap: float = 0.0
+    """最高的词汇覆盖率。和 max_score 一起看才能判断"到底有没有"——
+    分数中等而覆盖率接近 0，说明这点相似度纯粹是向量空间的基线。"""
+    notes: list[str] = field(default_factory=list)
+    """降级、退回弱判据这类"跑通了但不是正常路径"的记录。
+    不记下来的话，线上悄悄退化成旧行为是看不出来的。"""
 
     tools_called: list[dict[str, Any]] = field(default_factory=list)
     answer: str = ""
@@ -167,6 +182,11 @@ class AgentState:
     rewritten: bool = False
     hits: list[Citation] = field(default_factory=list)
     tool_results: dict[str, Any] = field(default_factory=dict)
+    needs_knowledge: bool = False
+    """寒暄分支判定这条消息其实需要事实才能回答，要退回主链路走检索。
+
+    寒暄是七类里的兜底类，分不进另外六类的都落这儿；而它不检索、
+    无引用。没有这个回退，兜底类就成了"随便编"的通道。"""
 
     # ---- 输出 ----
     answer: str = ""

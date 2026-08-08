@@ -490,9 +490,12 @@ function renderDiag(ev){
   if (d.hits?.length){
     h += '<h3>检索命中</h3>';
     d.hits.forEach(x => {
-      // 词汇支撑区分"真沾边"与"只是向量基线相似度"
-      const tag = x.lexical ? '<span class="tag yes">词汇✓</span>'
-                            : '<span class="tag no">无词汇</span>';
+      // 词汇覆盖率区分"真沾边"与"只是向量基线相似度"。
+      // 这里曾经显示 bm25>0，而那个判据近乎恒真——共享一个常见 bigram
+      // 就算"词汇✓"，面板上看不出"其实一个关键词都没匹配上"
+      const cov = Number(x.lexical) || 0;
+      const tag = cov >= 0.15 ? `<span class="tag yes">词汇 ${cov.toFixed(2)}</span>`
+                              : `<span class="tag no">词汇 ${cov.toFixed(2)}</span>`;
       h += `<div class="hit"><div class="t"><span>#${x.item_id}</span>
             <span>${x.dense.toFixed(3)} ${tag}</span></div>
             <div>${esc(x.title)}</div></div>`;

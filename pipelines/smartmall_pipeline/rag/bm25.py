@@ -89,6 +89,40 @@ class Bm25Index:
         # 加一平滑，避免 df 接近 n 时出现负 idf
         return math.log(1 + (n - df + 0.5) / (df + 0.5))
 
+    def coverage(self, query: str) -> dict[int, float]:
+        """每篇文档命中了查询多少**信息量**，取值 0~1。
+
+        BM25 分数本身回答不了"到底匹配上了没有"。bigram 分词下，
+        「你们支持花呗分期吗」和「支持的快递：默认发顺丰」共享一个
+        ``支持``，分数就有 1.49——而知识库里关于花呗一个字都没有。
+        于是 ``bm25_score > 0`` 这个判据近乎恒真，本该拦住"装作有"的
+        那道闸门形同虚设（实测：四条知识库根本没有的问题全部走到了澄清）。
+
+        换一个问法：**查询里那些有区分度的词，匹配上了吗。**
+        用 IDF 加权——``支持``在语料里到处都是，IDF 低，匹配上不说明
+        什么；``花呗``只要出现过就 IDF 高，匹配上才是真的沾边。
+        分母是查询全部词的 IDF 之和，所以结果与查询长短无关。
+
+        语料里根本不存在的词（df=0）也计入分母：它们正是这个查询里
+        信息量最大的部分，「问了但库里没有」必须体现为覆盖率低。
+        """
+        q_terms = Counter(tokenize(query))
+        if not q_terms:
+            return {}
+        idf = {t: self._idf(t) for t in q_terms}
+        total = sum(idf[t] * n for t, n in q_terms.items())
+        if total <= 0:
+            return {}
+
+        out: dict[int, float] = {}
+        for i, counts in enumerate(self.doc_tokens):
+            matched = sum(
+                idf[t] * n for t, n in q_terms.items() if counts.get(t)
+            )
+            if matched > 0:
+                out[self.doc_ids[i]] = matched / total
+        return out
+
     def search(self, query: str, top_k: int = 50) -> list[tuple[int, float]]:
         """返回 ``[(doc_id, score)]``，按分数降序。"""
         if not self.size:

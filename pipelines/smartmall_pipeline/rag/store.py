@@ -51,7 +51,12 @@ class LocalHit:
     dense_score: float = 0.0
     """余弦相似度（向量已归一化）。这才是可用作拒答判据的量。"""
     bm25_score: float = 0.0
-    """BM25 分。> 0 表示有关键词命中。"""
+    """BM25 分。注意 **> 0 几乎不说明问题**：bigram 分词下一个
+    ``支持``就能让毫不相干的查询拿到分。判"有没有真的匹配上"看
+    ``lexical_overlap``。"""
+    lexical_overlap: float = 0.0
+    """查询里**有区分度的词**匹配上了多少，0~1，IDF 加权（见
+    :meth:`Bm25Index.coverage`）。这才是"知识库里到底有没有"的判据。"""
 
     biz_type: str = "qa"
     modality: str = "text"
@@ -298,6 +303,9 @@ class LocalVectorStore:
 
         dense_scores = dict(dense)
         sparse_scores = dict(sparse)
+        # 词汇覆盖率对全库算，与 BM25 的 top_k 截断无关：纯 dense 召回的
+        # 条目不在 sparse 列表里，但照样需要知道它有没有词汇支撑
+        overlap = self.bm25.coverage(query) if self.bm25 else {}
         order = sorted(fused.items(), key=lambda kv: -kv[1])
 
         # 同一 knowledge_item 的多个切片只留最高分，避免长文档占满结果
@@ -310,6 +318,7 @@ class LocalVectorStore:
                 item_id=r.item_id, chunk_seq=r.chunk_seq, text=r.text, score=score,
                 dense_score=dense_scores.get(idx, 0.0),
                 bm25_score=sparse_scores.get(idx, 0.0),
+                lexical_overlap=overlap.get(idx, 0.0),
                 biz_type=r.biz_type, modality=r.modality,
                 knowledge_type=r.knowledge_type, category_id=r.category_id,
                 product_ids=r.product_ids, asset_ids=r.asset_ids, source="fused",

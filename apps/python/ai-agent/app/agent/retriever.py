@@ -93,6 +93,7 @@ class LocalRetriever:
                 score=h.score,
                 dense_score=h.dense_score,
                 bm25_score=h.bm25_score,
+                lexical_overlap=h.lexical_overlap,
             )
             for h in hits
             if h.dense_score >= self.min_similarity
@@ -141,6 +142,9 @@ class HttpRetriever:
                 score=h.get("score", 0.0),
                 dense_score=h.get("rerank_score", h.get("dense_score", 0.0)),
                 bm25_score=h.get("bm25_score", 0.0),
+                # ai-rag 老版本不返这个字段。缺了就退回 bm25>0 的弱判据，
+                # 见 graph.has_lexical_support——那条路会明确记一笔
+                lexical_overlap=h.get("lexical_overlap", -1.0),
             )
             for h in (resp.json().get("data") or {}).get("hits", [])
         ]

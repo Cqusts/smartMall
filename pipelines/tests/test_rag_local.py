@@ -93,6 +93,59 @@ class TestBm25:
         assert len(index.search("的", top_k=2)) <= 2
 
 
+class TestLexicalCoverage:
+    """"有 BM25 分"和"真的匹配上了"是两回事。
+
+    bigram 分词下，随便一个common bigram 就能让毫不相干的查询拿到分。
+    实测代价：Agent 用 ``bm25_score > 0`` 当"知识库里有没有"的判据，
+    四条库里根本没有的问题（花呗/以旧换新/会员等级/定制刺绣）全部
+    因此走到澄清而不是转人工——那道闸门本来就是为拦住它们设的。
+    """
+
+    @pytest.fixture
+    def index(self):
+        return bm25.Bm25Index.build([
+            (0, "七天无理由退换：签收后七天内可申请退换"),
+            (1, "发货时效：现货商品 48 小时内发出"),
+            (2, "支持的快递：默认发顺丰，偏远地区改发中通"),
+            (3, "退货运费：非质量问题由买家承担"),
+        ])
+
+    def test_a_common_bigram_scores_but_does_not_cover(self, index):
+        """**这条是这个指标存在的理由。**
+
+        "你们支持花呗分期吗"和"支持的快递…"共享一个``支持``，
+        BM25 就有分——而知识库里关于花呗一个字都没有。
+        """
+        q = "你们支持花呗分期吗"
+        assert index.search(q), "BM25 确实给了分"
+        assert max(index.coverage(q).values()) < 0.15, "但覆盖率必须很低"
+
+    def test_a_real_match_covers_a_lot(self, index):
+        assert max(index.coverage("七天无理由能退吗").values()) > 0.3
+
+    def test_words_absent_from_the_corpus_still_count_against_coverage(self):
+        """库里根本没有的词要计入分母——它们正是查询里信息量最大的部分。
+        只按"匹配上的词"归一化的话，问什么都是满分。"""
+        idx = bm25.Bm25Index.build([(0, "退货运费由买家承担")])
+        only_common = idx.coverage("退货运费")
+        with_unknown = idx.coverage("退货运费能用花呗分期付吗")
+        assert max(only_common.values()) > max(with_unknown.values())
+
+    def test_coverage_is_independent_of_query_length(self):
+        """归一化之后，长查询不该天然吃亏。"""
+        idx = bm25.Bm25Index.build([(0, "针织衫会起球吗？做了抗起球处理")])
+        short = max(idx.coverage("起球").values())
+        assert 0.9 <= short <= 1.0
+
+    def test_unmatched_docs_are_absent(self, index):
+        assert 1 not in index.coverage("七天无理由退换")
+
+    def test_empty_query_and_index(self, index):
+        assert index.coverage("") == {}
+        assert bm25.Bm25Index.build([]).coverage("任何问题") == {}
+
+
 # ---------------------------------------------------------------- 向量打包
 
 
@@ -163,6 +216,25 @@ class TestHybridSearch:
 
     def test_empty_store(self):
         assert _store([]).search("任何", [1.0, 0.0, 0.0]) == []
+
+    def test_lexical_overlap_reaches_the_hits(self, store):
+        """Agent 靠这个字段判"知识库里到底有没有"。它在这一层算好，
+        中间断一环，上面那道闸门就退化成永远放行。"""
+        hits = store.search("退货运费谁承担", l2_normalize([0.0, 0.0, 1.0]))
+        top = next(h for h in hits if h.item_id == 4)
+        assert top.lexical_overlap > 0.5
+
+    def test_overlap_is_computed_for_dense_only_hits(self, store):
+        """纯 dense 召回的条目不在 BM25 的 top_k 里，但照样要有覆盖率——
+        按 sparse 列表去取的话，这些条目会被记成 0，然后被判成
+        "知识库里没有"。"""
+        hits = store.search("羊毛", l2_normalize([1.0, 0.0, 0.0]))
+        assert any(h.lexical_overlap > 0 for h in hits)
+
+    def test_an_unrelated_query_gets_near_zero_overlap(self, store):
+        """向量基线相似度会让不相干的查询也有分数，覆盖率必须能分开。"""
+        hits = store.search("能不能定制刺绣名字", l2_normalize([0.6, 0.5, 0.3]))
+        assert all(h.lexical_overlap < 0.15 for h in hits)
 
     def test_top_k(self, store):
         assert len(store.search("针织衫", l2_normalize([1.0, 0.0, 0.0]), top_k=2)) == 2

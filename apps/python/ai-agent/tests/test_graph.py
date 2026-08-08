@@ -16,10 +16,16 @@ from app.agent.retriever import RetrievalError, StubRetriever
 from app.agent.state import AgentState, Citation, HandoverReason, Intent
 
 
-def _hit(item_id: int = 1, score: float = 0.80, content: str = "100%羊毛") -> Citation:
+def _hit(item_id: int = 1, score: float = 0.80, content: str = "100%羊毛",
+         overlap: float = 0.45) -> Citation:
+    """一条正常命中：既有分数也有真正的词汇支撑。
+
+    ``overlap`` 默认给足——中间分数段的路由要靠它，给 0 的话每条
+    普通命中都会被判成"知识库里根本没有"。
+    """
     return Citation(
         item_id=item_id, title="面料是什么", content=content,
-        score=score, dense_score=score, bm25_score=1.0,
+        score=score, dense_score=score, bm25_score=1.0, lexical_overlap=overlap,
     )
 
 
@@ -92,6 +98,31 @@ class TestRouting:
         s = _run("在吗", deps)
         assert deps.retriever.queries == []  # type: ignore[attr-defined]
         assert s.answer and not s.handover
+
+    def test_chitchat_that_needs_facts_falls_back_to_retrieval(self):
+        """**寒暄是七类里的兜底类**——分不进另外六类的都落这儿。
+
+        实测代价：问"你们公司注册地在哪"，模型答"我们公司注册在杭州呢"；
+        问"有没有实习岗位"，答"我们目前确实有实习岗位在招哦"。
+        两条都是凭空编的本店事实，检索一次都没发生（max_score 0.0）。
+
+        兜底类必须是最保守的分支，不是最自由的。判出"这需要事实"就
+        退回主链路走检索，检不到自然会走到转人工。
+        """
+        deps = _deps(hits=[], llm=FakeLlmClient(intent="chitchat",
+                                                chitchat_kind="needs_fact"))
+        s = _run("你们公司注册地在哪", deps)
+        assert deps.retriever.queries, "判出需要事实却没检索"  # type: ignore[attr-defined]
+        assert s.handover, "检索不到还硬答，就是在编本店信息"
+        assert s.handover_reason is HandoverReason.NO_KNOWLEDGE
+
+    def test_chitchat_falls_back_when_the_model_call_fails(self):
+        """判不出来就当它需要事实。编一条本店信息的代价，
+        远大于多转一次人工。"""
+        deps = _deps(hits=[], llm=FakeLlmClient(intent="chitchat",
+                                                raise_on="公司"))
+        s = _run("你们公司注册地在哪", deps)
+        assert s.handover
 
     def test_sensitive_intent_goes_to_human(self):
         deps = _deps(llm=FakeLlmClient(intent="sensitive"))
@@ -281,17 +312,21 @@ class TestGraphMatchesDirectRun:
     两条路径分裂的话，"测试里通过、线上走另一条分支"就成了必然。
     """
 
-    @pytest.mark.parametrize("message,hits,intent", [
-        ("这件是什么面料", [_hit(score=0.85)], "product_knowledge"),
-        ("在吗", [_hit()], "chitchat"),
-        ("能便宜点吗", [_hit()], "sensitive"),
-        ("完全没有的问题", [_hit(score=0.05)], "product_knowledge"),
+    @pytest.mark.parametrize("message,hits,intent,chitchat_kind", [
+        ("这件是什么面料", [_hit(score=0.85)], "product_knowledge", "social"),
+        ("在吗", [_hit()], "chitchat", "social"),
+        ("能便宜点吗", [_hit()], "sensitive", "social"),
+        ("完全没有的问题", [_hit(score=0.05)], "product_knowledge", "social"),
+        # 寒暄退回检索是一条**跨节点**的新边，两条路径最容易在这里分裂
+        ("你们公司注册地在哪", [], "chitchat", "needs_fact"),
+        ("你们发什么快递", [_hit(score=0.85)], "chitchat", "needs_fact"),
     ])
-    def test_same_outcome(self, message, hits, intent):
+    def test_same_outcome(self, message, hits, intent, chitchat_kind):
         pytest.importorskip("langgraph")
 
         def fresh():
-            return _deps(hits=hits, llm=FakeLlmClient(intent=intent))
+            return _deps(hits=hits, llm=FakeLlmClient(
+                intent=intent, chitchat_kind=chitchat_kind))
 
         direct = graph.run_turn(message, AgentState(), fresh())
         compiled = graph.build_graph(fresh())
@@ -301,6 +336,67 @@ class TestGraphMatchesDirectRun:
 
         assert bool(got["handover"]) == direct.handover
         assert got["intent"] == direct.intent
+
+
+class TestSelfHarmEndToEnd:
+    def test_the_crisis_reply_survives_the_handover_node(self):
+        """转人工节点会把 answer 覆写成"这个问题我不太确定"——
+        用在这里是荒唐的：用户说的不是一个"问题"。"""
+        s = _run("我想自杀", _deps())
+        assert s.handover and s.handover_reason is HandoverReason.SELF_HARM
+        assert "12356" in s.answer
+        assert "不太确定" not in s.answer
+
+    def test_the_reply_is_fixed_text_not_generated(self):
+        """给用户看的那一句上让模型自由发挥是纯风险。
+
+        交接摘要仍然要走模型——接手的人需要知道发生了什么；
+        这里卡的是**面向用户的话术**，不是所有模型调用。
+        """
+        from app.agent.guard import SELF_HARM_REPLY
+
+        deps = _deps()
+        s = _run("我想自杀", deps)
+        assert s.answer == SELF_HARM_REPLY
+
+        systems = [c[1] for c in deps.llm.calls]  # type: ignore[attr-defined]
+        assert all("交接摘要" in x for x in systems), (
+            f"除了写交接摘要，不该有别的模型调用：{systems}"
+        )
+
+    def test_no_intent_classification_either(self):
+        """连意图都不用分——分完还是同一个处置，白花一次调用和一次延迟。"""
+        deps = _deps()
+        _run("我想自杀", deps)
+        assert not any("意图" in c[1] for c in deps.llm.calls)  # type: ignore[attr-defined]
+
+
+class TestModelDeferralBecomesRealHandover:
+    """模型说"建议您咨询人工客服"，就必须真的转人工。
+
+    实测：「可以货到付款吗」检索分 0.585（够高，走生成），模型答
+    "这个我不太确定，建议您咨询一下人工客服哈"——而 handover 是 False。
+    那句话只是一段文本：工单不会建，人工不会收到，用户以为已经转过去了。
+    """
+
+    def test_a_deferring_answer_triggers_handover(self):
+        deps = _deps(hits=[_hit(score=0.85)], llm=FakeLlmClient(
+            answer="这个我不太确定，建议您咨询一下人工客服哈。"))
+        s = _run("可以货到付款吗", deps)
+        assert s.handover, "模型都说答不了了，系统还当普通回复发出去"
+
+    def test_the_reason_is_missing_knowledge_not_a_compliance_failure(self):
+        """记成合规失败的话，知识盲点统计会漏掉它——
+        而"用户问了、库里没有"正是补知识唯一的线索来源。"""
+        deps = _deps(hits=[_hit(score=0.85)], llm=FakeLlmClient(
+            answer="抱歉，这个我不清楚。"))
+        s = _run("可以货到付款吗", deps)
+        assert s.handover_reason is HandoverReason.NO_KNOWLEDGE
+
+    def test_a_normal_answer_still_goes_out(self):
+        deps = _deps(hits=[_hit(score=0.85)])
+        s = _run("这件是什么面料", deps)
+        assert not s.handover and s.answer
 
 
 class TestLexicalSupport:
@@ -315,33 +411,52 @@ class TestLexicalSupport:
     没有知识，只会更恼火。这比直接说"我帮您转人工"糟糕得多。
 
     根因是中文短文本 embedding 的基线相似度就有 0.3~0.4——
-    两句毫不相干的话也能拿到这个分。BM25 是独立的一路证据：
-    查询词真的出现在文档里才给分。
+    两句毫不相干的话也能拿到这个分。BM25 是独立的一路证据。
+
+    **但判据不能是 ``bm25_score > 0``**，第一版就是这么写的，结果这道
+    闸门形同虚设：bigram 分词下"你们支持花呗分期吗"和"支持的快递：
+    默认发顺丰"共享一个``支持``，BM25 就有 1.66 分。评测里四条知识库
+    根本没有的问题全部因此走到澄清——正是它该拦住的那批。
+    改用 IDF 加权的词汇覆盖率 ``lexical_overlap``。
     """
 
-    def _mid(self, bm25: float) -> Citation:
-        """落在澄清区间的命中，词汇支撑可控。"""
+    def _mid(self, overlap: float, bm25: float = 1.6) -> Citation:
+        """落在澄清区间的命中，词汇覆盖率可控。
+
+        ``bm25`` 默认给个非零值，正是为了钉住"BM25 有分不等于匹配上了"——
+        这些命中在旧判据下全部会被当成有词汇支撑。
+        """
         return Citation(item_id=1, title="七天无理由退换", content="支持",
-                        score=0.4, dense_score=0.45, bm25_score=bm25)
+                        score=0.4, dense_score=0.45, bm25_score=bm25,
+                        lexical_overlap=overlap)
 
     def test_no_lexical_support_goes_to_human(self):
-        s = _run("你们支持花呗分期吗", _deps(hits=[self._mid(bm25=0.0)]))
+        s = _run("你们支持花呗分期吗", _deps(hits=[self._mid(overlap=0.077)]))
         assert s.handover, "没有词汇支撑却去澄清，等于装作知识库里有"
         assert s.handover_reason is HandoverReason.NO_KNOWLEDGE
         assert not s.clarify_question
 
+    def test_a_nonzero_bm25_score_is_not_lexical_support(self):
+        """**这条是改判据的理由。** 覆盖率 0.077 而 BM25 有 1.66 分——
+        实测「你们支持花呗分期吗」的真实数字，共享的是``支持``这个
+        到处都有的 bigram。旧判据在这里会放行去澄清。"""
+        s = _run("你们支持花呗分期吗",
+                 _deps(hits=[self._mid(overlap=0.077, bm25=1.66)]))
+        assert s.handover and s.handover_reason is HandoverReason.NO_KNOWLEDGE
+
     def test_lexical_support_still_clarifies(self):
         """真沾边的情况不该被误伤——澄清在这里是对的。"""
-        s = _run("这件怎么洗", _deps(hits=[self._mid(bm25=3.2)]))
+        s = _run("这件怎么洗", _deps(hits=[self._mid(overlap=0.44)]))
         assert not s.handover
         assert s.clarify_question
 
     def test_one_supported_hit_is_enough(self):
-        """混合检索里纯 dense 召回的条目 BM25 天然为 0。
+        """混合检索里纯 dense 召回的条目词汇覆盖率天然为 0。
 
         要求全部命中都有词汇支撑，会把正常情况也判死。
         """
-        hits = [self._mid(bm25=0.0), self._mid(bm25=0.0), self._mid(bm25=1.5)]
+        hits = [self._mid(overlap=0.0), self._mid(overlap=0.0),
+                self._mid(overlap=0.44)]
         s = _run("这件怎么洗", _deps(hits=hits))
         assert not s.handover
 
@@ -355,13 +470,25 @@ class TestLexicalSupport:
     def test_helper_is_pure_and_directly_testable(self):
         from app.agent.graph import has_lexical_support
 
+        cfg = AgentConfig()
         st = AgentState()
-        st.hits = [self._mid(bm25=0.0)]
-        assert not has_lexical_support(st)
-        st.hits.append(self._mid(bm25=0.1))
-        assert has_lexical_support(st)
+        st.hits = [self._mid(overlap=0.05)]
+        assert not has_lexical_support(st, cfg)
+        st.hits.append(self._mid(overlap=cfg.lexical_support_min))
+        assert has_lexical_support(st, cfg)
 
     def test_empty_hits_have_no_support(self):
         from app.agent.graph import has_lexical_support
 
-        assert not has_lexical_support(AgentState())
+        assert not has_lexical_support(AgentState(), AgentConfig())
+
+    def test_a_backend_without_the_field_falls_back_and_says_so(self):
+        """老版 ai-rag 不返 lexical_overlap。退回弱判据可以，
+        但必须留下痕迹——线上悄悄退化成旧行为是看不出来的。"""
+        from app.agent.graph import has_lexical_support
+
+        st = AgentState()
+        st.hits = [Citation(item_id=1, title="t", content="c",
+                            bm25_score=1.6, lexical_overlap=-1.0)]
+        assert has_lexical_support(st, AgentConfig())
+        assert any("lexical_overlap" in n for n in st.trace.notes)

@@ -27,7 +27,26 @@ _INJECTION = re.compile(
 
 #: 明显与电商客服无关且有风险的话题。命中即回绝，不进图。
 _OFF_LIMITS = re.compile(
-    r"(?:政治|颠覆|反动|涉黄|赌博|毒品|枪支|炸药|自杀|自残)",
+    r"(?:政治|颠覆|反动|涉黄|赌博|毒品|枪支|炸药)",
+)
+
+#: 自伤自杀信号。**必须与 _OFF_LIMITS 分开。**
+#:
+#: 原先"自杀|自残"混在上面那条里，于是有人说"我想自杀"，客服回
+#: "这个话题超出我的服务范围啦。有商品或订单方面的问题吗？"——
+#: 在最要紧的时刻用一句轻快的话把人打发走。合规上没错，是人的问题。
+#:
+#: 电商客服不做心理疏导，能做的是两件：不敷衍，以及交给真人。
+_SELF_HARM = re.compile(
+    r"自杀|自残|轻生|不想活|活不下去|结束生命|了结自己|活着好累",
+)
+
+#: 危机干预话术。给热线而不是给建议——客服没有能力也没有资格做后者。
+#: 号码按地区核对后再改：这里用的是全国心理援助热线。
+SELF_HARM_REPLY = (
+    "看到你这么说，我有点担心你。这方面我帮不上什么忙，但希望你别一个人扛着——"
+    "全国心理援助热线 12356 是 24 小时的，随时可以打。"
+    "我这边也帮你叫一位同事过来。"
 )
 
 _HANDOVER_REQUEST = re.compile(
@@ -70,6 +89,16 @@ def check_input(text: str) -> GuardResult:
             ok=False,
             reason="超长输入",
             reply="您的问题有点长，方便拆成几句说吗？这样我能答得更准确。",
+        )
+
+    # 自伤信号排在最前面：它可能同时命中转人工、负面情绪、注入等规则，
+    # 而这一条的处置不能被任何别的规则抢走
+    if _SELF_HARM.search(raw):
+        return GuardResult(
+            ok=False,
+            reason="自伤风险",
+            reply=SELF_HARM_REPLY,
+            wants_handover=True,
         )
 
     result = GuardResult()
@@ -128,6 +157,21 @@ URL_WHITELIST = ("smartmall.local", "taobao.com", "tmall.com")
 _DIGIT = re.compile(r"\d")
 _CITATION = re.compile(r"\[#\d+\]")
 
+#: 模型自认答不了的说法。**说了就得当真。**
+#:
+#: 实测：问"可以货到付款吗"，答"这个我不太确定，建议您咨询一下人工客服哈"——
+#: 而 ``state.handover`` 是 False，工单没建，前端按普通回复渲染。用户被告知
+#: 去找人工，却没有任何人工会收到这通对话，这比直接说"不知道"更糟：
+#: 它让用户以为已经转过去了。
+#:
+#: 这些词只在**答案**里查，不在用户输入里查——用户说"转人工"是另一条路径。
+DEFERRAL_PHRASES = (
+    "不太确定", "不确定", "无法确认", "没法确认", "不清楚",
+    "建议您咨询", "建议你咨询", "建议您联系", "建议你联系",
+    "咨询人工", "联系人工", "转接人工", "转人工",
+    "帮不了", "无法回答", "回答不了", "我不知道",
+)
+
 
 @dataclass
 class PostCheckResult:
@@ -136,6 +180,9 @@ class PostCheckResult:
     blocked: bool = False
     """必须拦截并转人工（医疗功效、绝对化用语改不掉）。"""
     rewritten: bool = False
+    deferred: bool = False
+    """答案里模型自己承认答不了。要真的转人工，而不是把这句话发出去
+    就算完——否则用户被指去找人工，而人工那边什么都没收到。"""
 
 
 def check_output(text: str, *, max_length: int = 200) -> PostCheckResult:
@@ -147,12 +194,22 @@ def check_output(text: str, *, max_length: int = 200) -> PostCheckResult:
     * **改写** —— 承诺性表述、编造的链接。能修就修，不打断对话。
     * **只记录** —— 无引用的事实陈述。拦截会大量误伤（很多正常回复
       本来就不需要引用），改为打标记，用于统计幻觉率趋势。
+
+    还有一档不属于"合规"但必须在这里抓：**模型自己说答不了**。
+    它说了就得当真——否则那句"建议您咨询人工客服"只是一段文本，
+    工单不会建，人工不会收到，用户以为已经转过去了。
     """
     result = PostCheckResult(text=text)
     if not text:
         result.blocked = True
         result.flags.append("空回复")
         return result
+
+    for p in DEFERRAL_PHRASES:
+        if p in text:
+            result.flags.append(f"模型自认答不了:{p}")
+            result.deferred = True
+            break
 
     for w in MEDICAL_WORDS:
         if w in text:

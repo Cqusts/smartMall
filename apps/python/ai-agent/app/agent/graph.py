@@ -52,17 +52,13 @@ def route_after_tools(state: AgentState) -> str:
     return "retrieve"  # 尺码：尺码表 + 知识库经验一起用
 
 
-def has_lexical_support(state: AgentState) -> bool:
+def has_lexical_support(state: AgentState, cfg: AgentConfig) -> bool:
     """命中里是否有**词汇**支撑，而不只是向量的基线相似度。
 
     中文短文本 embedding 有一个恼人的性质：两句毫不相干的话也能拿到
     0.3~0.4 的余弦相似度。所以"分数中等"本身根本不能说明检索到了
     相关内容——实测里"你们支持花呗分期吗"命中的全是「七天无理由退换」，
-    分数 0.413；"能开专票吗"命中「能不能发顺丰」，分数 0.492。
-
-    BM25 是一路**独立**的证据：它只在查询词真的出现在文档里时才给分。
-    dense 分中等而 BM25 全为 0，说明这点相似度纯粹来自向量空间的基线，
-    没有任何词汇支撑。
+    分数 0.413。BM25 是一路**独立**的证据，用它来补。
 
     这个区分决定了中间地带该走哪条路：
 
@@ -72,10 +68,25 @@ def has_lexical_support(state: AgentState) -> bool:
       装作有，反问一个假装在缩小范围的问题，用户答完第二轮还是没有
       知识，只会更恼火。这时候老实转人工。
 
-    只要有一条命中带词汇支撑就算数——混合检索里纯 dense 召回的条目
-    BM25 天然为 0，要求全部命中都有支撑会把正常情况也判死。
+    **判据不能用 ``bm25_score > 0``。** 第一版就是这么写的，而它近乎
+    恒真：bigram 分词下"你们支持花呗分期吗"和"支持的快递：默认发顺丰"
+    共享一个``支持``，BM25 就有 1.66 分。实测四条知识库根本没有的问题
+    （花呗/以旧换新/会员等级/定制刺绣）全部因此走到澄清而不是转人工——
+    这道闸门本来就是为拦住它们而设的，结果自己失效了。
+
+    改用 IDF 加权的词汇覆盖率：**查询里有区分度的词，匹配上了吗。**
+    ``支持``到处都是、IDF 低，匹配上不说明什么；``花呗``稀有、IDF 高，
+    匹配上才算真沾边。见 :meth:`Bm25Index.coverage`。
+
+    只要有一条命中够格就算数——混合检索里纯 dense 召回的条目词汇覆盖
+    天然为 0，要求全部命中都有支撑会把正常情况也判死。
     """
-    return any(h.bm25_score > 0 for h in state.hits)
+    # 后端没报这个字段（老版 ai-rag）时退回弱判据。宁可偏松也不偏紧：
+    # 这条路径上误转人工是纯损失，而漏掉的那部分由分数门槛兜着
+    if any(h.lexical_overlap < 0 for h in state.hits):
+        state.trace.notes.append("检索后端未返回 lexical_overlap，退回 bm25>0")
+        return any(h.bm25_score > 0 for h in state.hits)
+    return any(h.lexical_overlap >= cfg.lexical_support_min for h in state.hits)
 
 
 def route_after_retrieve(state: AgentState, cfg: AgentConfig) -> str:
@@ -93,11 +104,21 @@ def route_after_retrieve(state: AgentState, cfg: AgentConfig) -> str:
     if score < cfg.clarify_below:
         # 中间地带：分数不高不低。此时**分数说明不了问题**，
         # 要看有没有词汇支撑才能判断是"沾边但拿不准"还是"根本没有"。
-        if not has_lexical_support(state):
+        if not has_lexical_support(state, cfg):
             state.to_handover(HandoverReason.NO_KNOWLEDGE)
             return "handover"
         return "clarify"
     return "generate"
+
+
+def route_after_chitchat(state: AgentState) -> str:
+    """寒暄判出"这其实是个需要事实的问题"时退回检索。
+
+    退回而不是直接转人工：意图分类可能只是判错了类，知识库里未必没有
+    （"你们发什么快递"就常被判成寒暄）。给它一次正常检索的机会，
+    真检不到自然会走到 route_after_retrieve 的转人工分支。
+    """
+    return "retrieve" if state.needs_knowledge else "emit"
 
 
 def route_after_generate(state: AgentState) -> str:
@@ -133,7 +154,10 @@ def run_turn(message: str, state: AgentState, deps: Deps) -> AgentState:
     if step == "handover":
         return nodes.emit(nodes.handover(state, deps), deps)
     if step == "chitchat":
-        return nodes.emit(nodes.chitchat(state, deps), deps)
+        state = nodes.chitchat(state, deps)
+        if route_after_chitchat(state) == "emit":
+            return nodes.emit(state, deps)
+        # 需要事实 → 落回主链路，走下面的检索
 
     if step == "tools":
         state = nodes.call_tools(state, deps)
@@ -254,7 +278,8 @@ def build_graph(deps: Deps):
                             {"handover": "handover", "postcheck": "postcheck"})
     g.add_conditional_edges("postcheck", route_after_postcheck,
                             {"handover": "handover", "emit": "emit"})
-    g.add_edge("chitchat", "emit")
+    g.add_conditional_edges("chitchat", route_after_chitchat,
+                            {"retrieve": "retrieve", "emit": "emit"})
     g.add_edge("clarify", "emit")
     g.add_edge("handover", "emit")
     g.add_edge("emit", END)

@@ -64,7 +64,9 @@ def turn_result(state: AgentState) -> dict[str, Any]:
             "hits": [
                 {"item_id": h.item_id, "title": h.title,
                  "dense": round(h.dense_score, 3),
-                 "lexical": h.bm25_score > 0}
+                 # 覆盖率而不是 bm25>0——后者近乎恒真，面板上会把
+                 # "根本没匹配上"显示成有词汇支撑
+                 "lexical": round(h.lexical_overlap, 3)}
                 for h in state.hits
             ],
             "tools_called": state.trace.tools_called,

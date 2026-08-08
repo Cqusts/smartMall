@@ -128,6 +128,84 @@ class TestOutputCheck:
         assert any("超长" in f for f in r.flags)
 
 
+class TestSelfHarm:
+    """自伤信号必须和"超出服务范围"分开。
+
+    原先"自杀|自残"和"政治|赌博|枪支"写在同一条正则里，于是有人说
+    "我想自杀"，客服回"这个话题超出我的服务范围啦。有商品或订单方面的
+    问题吗？"——在最要紧的时刻用一句轻快的话把人打发走。
+    合规上挑不出错，是人的问题。
+
+    电商客服不做心理疏导，能做的只有两件：不敷衍，以及交给真人。
+    """
+
+    @pytest.mark.parametrize("text", [
+        "我想自杀", "不想活了", "活着好累 不想活了", "我想自残",
+        "感觉活不下去了",
+    ])
+    def test_detected(self, text):
+        assert guard.check_input(text).reason == "自伤风险"
+
+    def test_reply_is_not_a_brush_off(self):
+        r = guard.check_input("我想自杀")
+        assert "超出我的服务范围" not in r.reply
+        assert "12356" in r.reply, "要给到能真正帮上忙的地方"
+
+    def test_also_hands_over(self):
+        """给个热线就完事等于还是把人推开了。"""
+        assert guard.check_input("我想自杀").wants_handover
+
+    def test_wins_over_every_other_rule(self):
+        """这句话可能同时命中负面情绪、转人工甚至注入规则。
+        别的规则抢走了，处置就退回成一句套话。"""
+        r = guard.check_input("你们这破客服太垃圾了，我不想活了，转人工")
+        assert r.reason == "自伤风险"
+
+    def test_ordinary_complaints_are_not_self_harm(self):
+        """误报的代价是把普通抱怨也按危机处理，很冒犯。"""
+        for text in ("这衣服质量太差了", "等得我要疯了", "累死我了"):
+            assert guard.check_input(text).reason != "自伤风险"
+
+    def test_other_off_limits_topics_still_get_the_plain_refusal(self):
+        r = guard.check_input("介绍几个赌博网站")
+        assert r.reason == "超出服务范围" and not r.wants_handover
+
+
+class TestModelDeferral:
+    """模型自己说答不了，系统就得当真。
+
+    实测：问"可以货到付款吗"，答"这个我不太确定，建议您咨询一下人工
+    客服哈"——而 ``handover`` 是 False，工单没建，前端按普通回复渲染。
+    用户被指去找人工，却没有任何人工会收到这通对话。这比直接说
+    "不知道"更糟：它让用户以为已经转过去了。
+    """
+
+    @pytest.mark.parametrize("text", [
+        "这个我不太确定，建议您咨询一下人工客服哈。",
+        "这个我不太确定，建议你咨询下人工客服哈。",
+        "抱歉，这个问题我回答不了。",
+        "我不知道呢，帮您转接人工客服。",
+    ])
+    def test_deferral_is_detected(self, text):
+        r = guard.check_output(text)
+        assert r.deferred, f"没认出这是在推诿：{text}"
+
+    @pytest.mark.parametrize("text", [
+        "这款是羊毛的，建议手洗 [#3]",
+        "好的，我帮您确认一下发货时间。",
+        "这款支持七天无理由退换 [#7]",
+    ])
+    def test_normal_answers_are_not_deferrals(self, text):
+        """误报的代价是把能答的问题也转走，人工被无谓地淹掉。"""
+        assert not guard.check_output(text).deferred
+
+    def test_deferral_is_not_a_block(self):
+        """推诿不是合规问题——分开记，否则盲点统计会把它算成违规，
+        那块缺失的知识就永远补不上。"""
+        r = guard.check_output("这个我不太确定。")
+        assert r.deferred and not r.blocked
+
+
 class TestSplitLong:
     def test_short_text_unchanged(self):
         assert guard.split_long("很短") == ["很短"]

@@ -95,9 +95,11 @@ def _render(state: AgentState, *, verbose: bool) -> None:
         if state.trace.rewritten_query:
             print(f"     改写查询：{state.trace.rewritten_query}")
         for h in state.hits:
-            # bm25=0 表示查询词一个都没命中，那点相似度只是向量基线
-            lex = "词汇✓" if h.bm25_score > 0 else "无词汇"
-            print(f"     [#{h.item_id}] {h.dense_score:.3f} {lex:<6} {h.title[:36]}")
+            # 看覆盖率而不是 bm25>0：后者近乎恒真（共享一个常见 bigram
+            # 就有分），诊断面板上会把"根本没匹配上"显示成"词汇✓"
+            lex = f"词汇{h.lexical_overlap:.2f}"
+            print(f"     [#{h.item_id}] {h.dense_score:.3f} {pad(lex, 8)}"
+                  f" {truncate(h.title, 36)}")
         for t in state.trace.tools_called:
             mark = "命中" if t.get("hit") else "无数据"
             print(f"     🔧 {t['name']} {t['latency_ms']}ms {mark}")
@@ -241,10 +243,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
     outcomes, failed = {}, False
 
     for name in names:
-        samples = R.load(name)
-        if args.limit:
-            samples = samples[: args.limit]
-        print(f"\n==> {name}（{len(samples)} 条）")
+        full = R.load(name)
+        samples = R.subsample(full, args.limit or 0, R.LABEL_KEYS.get(name))
+        note = f"，从 {len(full)} 条分层抽样" if len(samples) < len(full) else ""
+        print(f"\n==> {name}（{len(samples)} 条{note}）")
 
         def tick(i, total, _n=name):
             print(f"\r  {i}/{total}", end="", flush=True)
@@ -275,7 +277,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
     if args.save_baseline:
         # 只在全绿时写基线，否则会把一次退步固化成新标准
-        if failed:
+        if args.limit:
+            print("\n✗ --limit 是抽样跑，不能写基线——"
+                  "拿 20 条的分数当全量基线，往后每次比较都是错的")
+        elif failed:
             print("\n✗ 有门禁未通过，不写基线——那会把退步固化成新标准")
         else:
             print(f"\n✅ 基线已更新：{R.save_baseline(outcomes)}")
