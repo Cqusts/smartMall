@@ -281,10 +281,37 @@ class TestWebPage:
         「联系客服」自然带上 product_id；裸聊天页只能靠一个下拉框假装。
         """
         text = self._client().get("/").text
-        assert "联系客服" in text and "商品列表" in text
+        assert "联系客服" in text and "猜你喜欢" in text
         assert "product_id: current ? current.id : null" in text, (
             "客服窗口必须把当前商品带过去"
         )
+
+    def test_page_uses_no_emoji_icons(self):
+        """图标走内联 SVG，不用 emoji。
+
+        跨平台字形差异大，同一个 emoji 在 Windows 上常掉成方框——
+        而这个演示就是给 Windows 看的。
+        """
+        text = self._client().get("/").text
+        emoji = [c for c in text if ord(c) >= 0x1F300]
+        assert not emoji, f"页面里还有 emoji：{set(emoji)}"
+        assert "<symbol id=\"i-svc\"" in text, "图标 sprite 没了"
+
+    def test_product_images_are_served_locally(self):
+        """图存在仓库里而不是引外链——演示环境常常没有外网。"""
+        c = self._client()
+        assert c.get("/img/9001.jpg").status_code == 200
+
+    def test_image_route_rejects_path_traversal(self):
+        """这个口子拼的是真实文件路径，而 deploy/.env 里躺着 API key。
+
+        白名单而不是黑名单：黑掉 ".." 还剩下 URL 编码、反斜杠一堆绕法，
+        而合法文件名本来就只有 "9001.jpg" 这一种形状。
+        """
+        c = self._client()
+        for bad in ("../../../deploy/.env", "..%2f..%2fdeploy%2f.env",
+                    "....//deploy/.env", "9001.jpg/../../.env"):
+            assert c.get(f"/img/{bad}").status_code in (404, 400), bad
 
     def test_products_api_degrades_instead_of_500(self):
         """商品查不到不该让整页白屏——前端退化成只有客服入口。"""

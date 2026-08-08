@@ -9,11 +9,12 @@ async，是因为那要连带改掉 httpx、SQLAlchemy 两层的调用方式，
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse
 
 from ..agent.state import AgentState
 from ..agent.streaming import stream_turn
@@ -23,6 +24,10 @@ router = APIRouter(tags=["客服"])
 
 _WEB = Path(__file__).resolve().parents[2] / "web"
 
+#: 图片文件名白名单。**白名单而不是黑名单**——黑掉 ".." 还剩下 URL 编码、
+#: 反斜杠、符号链接一堆绕法，而这里合法的名字本来就只有 "9001.jpg" 这一种形状。
+_SAFE_IMG = re.compile(r"[A-Za-z0-9_-]{1,40}\.(?:jpg|jpeg|png|webp)")
+
 
 @router.get("/", response_class=HTMLResponse, summary="店铺首页（含客服入口）")
 async def index() -> str:
@@ -30,6 +35,26 @@ async def index() -> str:
     if not page.is_file():  # pragma: no cover
         return "<h1>缺少 web/index.html</h1>"
     return page.read_text(encoding="utf-8")
+
+
+@router.get("/img/{name}", summary="商品图")
+async def product_image(name: str) -> FileResponse:
+    """商品图。
+
+    图存在仓库里而不是引外链：整页零外部请求是硬要求，演示环境常常
+    没有外网，"打不开"比"不好看"严重得多（见 web/img/README.md）。
+
+    文件名来自数据库的 ``main_image``，但**仍然要当成不可信输入**校验——
+    这个口子拼的是真实路径，``../../deploy/.env`` 一旦被接受就是任意
+    文件读取，而 .env 里躺着 API key。
+    """
+    if not _SAFE_IMG.fullmatch(name):
+        raise HTTPException(status_code=404)
+    path = _WEB / "img" / name
+    if not path.is_file():
+        raise HTTPException(status_code=404)
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 @router.get("/api/products", summary="商品列表")
@@ -44,7 +69,9 @@ async def products() -> dict[str, Any]:
     try:
         box = MySqlToolBox.from_env()
         items = []
-        for pid in (9001, 9002, 9003, 9004):
+        # 列表从表里查，不写死 ID——写死的话，上新商品要改代码，
+        # 而且迟早会出现"数据库里有、页面上没有"
+        for pid in box.list_on_sale_product_ids():
             detail = box.get_product_detail(pid)
             if not detail:
                 continue

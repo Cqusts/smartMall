@@ -2,333 +2,588 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>smartMall — 电商 AI 客服</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smartMall · 智能客服演示</title>
 <!--
-  电商店铺前台 + 客服浮窗。
+  店铺演示页。做成真实电商而不是裸聊天页，是因为**"当前商品"是客服最重要的
+  上下文**——它决定检索的过滤范围、决定查哪个 SKU 的库存。从商品详情页点
+  「联系客服」自然带上 product_id；裸聊天页只能靠一个下拉框假装。
 
-  为什么要做成店铺而不是裸聊天页：客服 Agent 的关键上下文是「当前商品」，
-  它决定检索过滤范围、决定库存查哪个 SKU。从商品详情页点「联系客服」
-  自然带上 product_id，这条链路只有在真的有商品页时才说得清；
-  裸聊天页得靠一个下拉框假装，演示时反而绕。
-
-  零外部依赖：不引 CDN、不用图片文件。商品图用 CSS 渐变 + emoji 占位——
-  演示环境常常没有外网，"打不开"比"不好看"严重得多。
+  三条硬约束：
+  · 零外部请求。图片走本机 /img/，字体用系统栈。演示环境常常没有外网，
+    "打不开"比"不好看"严重得多（test_page_has_no_external_dependencies）。
+  · 不用 emoji 当图标。跨平台字形差异大，Windows 上一堆方框；改用内联 SVG。
+  · 商品数据全部来自 /api/products，也就是客服工具层读的同一张表。
+    分成两条路的话，页面显示"有货"而客服说"缺货"，用户会以为系统在骗人。
 -->
 <style>
-  :root{
-    --bg:#f4f5f7; --card:#fff; --line:#e8eaed; --text:#1d1f23; --muted:#8b919b;
-    --brand:#ff5000; --brand-2:#ff8a00; --ok:#00a870; --warn:#ff8f1f; --bad:#e5453a;
-    --code:#f2f3f5; --shadow:0 2px 12px rgba(0,0,0,.06);
-  }
-  @media (prefers-color-scheme: dark){
-    :root{
-      --bg:#0e1013; --card:#171a1f; --line:#262a31; --text:#e8eaed; --muted:#8b919b;
-      --code:#1d2127; --shadow:0 2px 12px rgba(0,0,0,.4);
-    }
-  }
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
-       background:var(--bg);color:var(--text);min-height:100vh}
-  button,input,select{font:inherit;color:inherit}
-  button{cursor:pointer;border:none;background:none}
+:root{
+  --orange:#ff5000; --orange-d:#e64600; --red:#e4393c; --tmall:#f40268;
+  --ink:#3c3c3c; --ink-2:#666; --ink-3:#999;
+  --line:#e8e8e8; --bg:#f5f5f5; --card:#fff;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+       "Hiragino Sans GB","Microsoft YaHei",sans-serif;
+}
+a{color:inherit;text-decoration:none}
+button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
+.ico{width:1em;height:1em;fill:currentColor;vertical-align:-.14em}
+.wrap{max-width:1200px;margin:0 auto;padding:0 12px}
 
-  /* ---------------- 顶栏 ---------------- */
-  .topbar{background:linear-gradient(90deg,var(--brand),var(--brand-2));
-          padding:10px 20px;display:flex;align-items:center;gap:16px;color:#fff}
-  .logo{font-size:19px;font-weight:700;letter-spacing:-.02em;white-space:nowrap}
-  .logo small{font-weight:400;opacity:.85;font-size:12px;margin-left:6px}
-  .search{flex:1;max-width:520px;display:flex;background:#fff;border-radius:20px;
-          overflow:hidden}
-  .search input{flex:1;border:none;padding:8px 16px;outline:none;color:#1d1f23}
-  .search button{padding:0 20px;background:#2b2b2b;color:#fff;font-size:13px}
-  .topbar .me{margin-left:auto;font-size:13px;opacity:.95;display:flex;
-              align-items:center;gap:6px}
-  .topbar .me input{width:64px;background:rgba(255,255,255,.2);border:none;
-        border-radius:4px;padding:2px 6px;color:#fff;text-align:center}
+/* ---------------------------------------------------------- 顶部工具条 */
+.topbar{background:#f7f7f7;border-bottom:1px solid var(--line);font-size:12px;
+        color:var(--ink-2)}
+.topbar .wrap{display:flex;gap:18px;align-items:center;height:32px}
+.topbar .sp{flex:1}
+.topbar a:hover{color:var(--orange)}
+.topbar .hi{color:var(--orange)}
 
-  .nav{background:var(--card);border-bottom:1px solid var(--line);padding:0 20px;
-       display:flex;gap:22px;font-size:13px;overflow-x:auto}
-  .nav a{padding:10px 0;color:var(--muted);text-decoration:none;white-space:nowrap;
-         border-bottom:2px solid transparent}
-  .nav a.on{color:var(--brand);border-bottom-color:var(--brand)}
+/* ---------------------------------------------------------- 促销条 */
+.promo{background:linear-gradient(90deg,#ff2d55,#ff5000);color:#fff}
+.promo .wrap{display:flex;align-items:center;justify-content:center;gap:16px;
+             height:44px;font-size:15px;font-weight:600;letter-spacing:.5px}
+.promo .go{background:#fff;color:var(--red);font-size:13px;font-weight:500;
+           padding:4px 14px;border-radius:12px}
+.promo .cd{display:flex;align-items:center;gap:4px;font-size:13px;font-weight:400}
+.promo .cd b{background:rgba(0,0,0,.28);border-radius:3px;padding:2px 6px;
+             font-family:monospace;font-weight:600}
 
-  .wrap{max-width:1080px;margin:0 auto;padding:18px 20px 90px}
+/* ---------------------------------------------------------- 头部 */
+header{background:#fff}
+header .wrap{display:flex;align-items:center;gap:28px;padding:18px 12px}
+.logo{font-size:30px;font-weight:800;color:var(--orange);letter-spacing:-1px;
+      line-height:1;white-space:nowrap}
+.logo small{display:block;font-size:11px;font-weight:400;color:var(--ink-3);
+            letter-spacing:2px;margin-top:3px}
+.search{flex:1;max-width:640px}
+.sbox{display:flex;border:2px solid var(--orange);border-radius:2px;background:#fff}
+.sbox .cat{display:flex;align-items:center;gap:4px;padding:0 10px;font-size:13px;
+           color:var(--ink-2);border-right:1px solid var(--line);white-space:nowrap}
+.sbox input{flex:1;border:0;outline:none;padding:9px 12px;font-size:14px;
+            background:transparent;color:var(--ink);min-width:0}
+.sbox button{background:var(--orange);color:#fff;padding:0 30px;font-size:16px;
+             font-weight:500}
+.sbox button:hover{background:var(--orange-d)}
+.hot{margin-top:7px;font-size:12px;color:var(--ink-3);display:flex;
+     flex-wrap:wrap;gap:12px}
+.hot a:hover{color:var(--orange)}
+.hot .em{color:var(--red)}
+.cartbtn{display:flex;align-items:center;gap:6px;border:1px solid var(--line);
+         padding:8px 16px;color:var(--orange);font-size:13px;border-radius:2px}
 
-  /* ---------------- 商品列表 ---------------- */
-  .banner{background:linear-gradient(120deg,#ffe8d6,#ffd9c0);border-radius:12px;
-          padding:22px 26px;margin-bottom:18px;color:#7a2e00}
-  @media (prefers-color-scheme: dark){ .banner{background:linear-gradient(120deg,#3a2417,#2a1a12);color:#ffc9a3} }
-  .banner h2{font-size:19px;margin-bottom:4px}
-  .banner p{font-size:13px;opacity:.85}
+/* ---------------------------------------------------------- 导航 */
+nav{background:#fff;border-bottom:2px solid var(--orange)}
+nav .wrap{display:flex;gap:26px;align-items:center;height:38px;font-size:14px}
+nav a{color:var(--ink);white-space:nowrap}
+nav a:hover{color:var(--orange)}
+nav .tag{background:var(--tmall);color:#fff;font-size:11px;padding:1px 5px;
+         border-radius:2px;margin-left:4px;vertical-align:1px}
 
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px}
-  .card{background:var(--card);border-radius:12px;overflow:hidden;cursor:pointer;
-        box-shadow:var(--shadow);transition:transform .15s}
-  .card:hover{transform:translateY(-3px)}
-  .thumb{aspect-ratio:1;display:grid;place-items:center;font-size:54px}
-  .p9001{background:linear-gradient(135deg,#f5efe6,#e6dccb)}
-  .p9002{background:linear-gradient(135deg,#e8f1fa,#cfe0f2)}
-  .p9003{background:linear-gradient(135deg,#fbeaf0,#f3d3e0)}
-  .p9004{background:linear-gradient(135deg,#efe6dd,#d9c5b0)}
-  .card .body{padding:10px 12px 14px}
-  .card .name{font-size:13px;line-height:1.45;height:2.9em;overflow:hidden}
-  .price{color:var(--brand);font-weight:700;font-size:18px;margin-top:6px}
-  .price small{font-size:12px;font-weight:400}
-  .price del{color:var(--muted);font-size:12px;font-weight:400;margin-left:6px}
-  .soldout{color:var(--bad);font-size:12px;margin-left:6px}
+/* ---------------------------------------------------------- 首屏 */
+.hero{display:grid;grid-template-columns:190px 1fr 240px;gap:10px;margin:12px 0}
+.side{background:#fff;padding:8px 0}
+.side a{display:flex;align-items:center;gap:8px;padding:7px 14px;font-size:13px;
+        color:#555}
+.side a:hover{background:#fff4ee;color:var(--orange)}
+.side .arrow{margin-left:auto;color:#ccc}
+/* banner 用实拍店铺照压暗，不用色块渐变——渐变一眼就是占位符 */
+.banner{position:relative;border-radius:4px;overflow:hidden;min-height:280px;
+        display:flex;flex-direction:column;justify-content:center;
+        padding:34px 40px;color:#fff;background:#2b2b2b}
+.banner .bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+            opacity:.5}
+.banner .in{position:relative}
+.banner h1{margin:0 0 10px;font-size:34px;letter-spacing:1px;
+           text-shadow:0 2px 12px rgba(0,0,0,.5)}
+.banner p{margin:0 0 6px;font-size:15px;text-shadow:0 1px 8px rgba(0,0,0,.6)}
+.banner .kbd{display:inline-block;background:rgba(255,255,255,.26);
+             padding:2px 8px;border-radius:3px;font-size:13px}
+.panel{background:#fff;padding:16px 14px;display:flex;flex-direction:column;gap:12px}
+.panel h4{margin:0;font-size:14px;color:var(--ink)}
+.panel .who{display:flex;align-items:center;gap:10px}
+.avatar{width:44px;height:44px;border-radius:50%;background:#ffece3;color:var(--orange);
+        display:flex;align-items:center;justify-content:center;font-size:22px}
+.panel .note{font-size:12px;color:var(--ink-3);line-height:1.7}
+.btn-primary{background:var(--orange);color:#fff;padding:9px;border-radius:2px;
+             text-align:center;font-size:14px;width:100%}
+.btn-primary:hover{background:var(--orange-d)}
+.btn-ghost{border:1px solid var(--orange);color:var(--orange);padding:8px;
+           border-radius:2px;text-align:center;font-size:13px;width:100%}
+.btn-ghost:hover{background:#fff4ee}
 
-  /* ---------------- 商品详情 ---------------- */
-  .detail{background:var(--card);border-radius:12px;box-shadow:var(--shadow);
-          padding:20px;display:grid;grid-template-columns:300px 1fr;gap:24px}
-  @media (max-width:760px){ .detail{grid-template-columns:1fr} }
-  .detail .hero{aspect-ratio:1;border-radius:10px;display:grid;place-items:center;
-                font-size:100px}
-  .detail h2{font-size:18px;margin-bottom:10px}
-  .pricebox{background:linear-gradient(90deg,#fff2ea,#fff8f4);border-radius:8px;
-            padding:12px 14px;margin-bottom:14px}
-  @media (prefers-color-scheme: dark){ .pricebox{background:#241a14} }
-  .pricebox .big{color:var(--brand);font-size:26px;font-weight:700}
-  .attrs{font-size:13px;color:var(--muted);margin-bottom:14px}
-  .attrs div{padding:3px 0}
-  .skus{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
-  .sku{border:1px solid var(--line);border-radius:6px;padding:5px 12px;font-size:13px}
-  .sku.out{opacity:.45;text-decoration:line-through}
-  .sku .n{color:var(--muted);font-size:12px;margin-left:6px}
-  table{border-collapse:collapse;font-size:13px;margin-bottom:14px}
-  th,td{border:1px solid var(--line);padding:5px 10px;text-align:center}
-  th{background:var(--code);color:var(--muted);font-weight:500}
-  .actions{display:flex;gap:10px;flex-wrap:wrap}
-  .btn{padding:10px 26px;border-radius:22px;font-size:14px;font-weight:600}
-  .btn.buy{background:var(--brand);color:#fff}
-  .btn.cart{background:var(--brand-2);color:#fff}
-  .btn.ask{background:var(--card);color:var(--brand);border:1px solid var(--brand)}
-  .back{color:var(--muted);font-size:13px;margin-bottom:12px;display:inline-block}
+/* ---------------------------------------------------------- 商品 */
+.secthead{display:flex;align-items:center;gap:14px;margin:22px 0 12px}
+.secthead h2{margin:0;font-size:20px;font-weight:600}
+.secthead .line{flex:1;height:1px;background:var(--line)}
+.secthead .tabs{display:flex;gap:6px}
+.secthead .tabs button{font-size:13px;padding:4px 12px;border-radius:14px;
+                       background:#fff;color:var(--ink-2)}
+.secthead .tabs button.on{background:var(--orange);color:#fff}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(206px,1fr));gap:10px}
+.card{background:#fff;border:1px solid transparent;transition:.15s;
+      display:flex;flex-direction:column}
+.card:hover{border-color:var(--orange);box-shadow:0 4px 14px rgba(0,0,0,.1)}
+.card .ph{position:relative;aspect-ratio:1;overflow:hidden;background:#fafafa}
+.card img{width:100%;height:100%;object-fit:cover;display:block}
+.card:hover img{transform:scale(1.04)}
+.card img{transition:transform .3s}
+.card .oos{position:absolute;inset:0;background:rgba(0,0,0,.4);
+           display:flex;align-items:center;justify-content:center}
+.card .oos b{background:rgba(0,0,0,.62);color:#fff;font-weight:500;
+             border:1px solid rgba(255,255,255,.6);border-radius:50%;
+             width:78px;height:78px;display:flex;align-items:center;
+             justify-content:center;font-size:15px;letter-spacing:1px}
+.card .body{padding:10px;display:flex;flex-direction:column;gap:7px;flex:1}
+.price{color:var(--red);font-size:21px;font-weight:600;line-height:1}
+.price i{font-size:13px;font-style:normal;margin-right:1px}
+.price del{color:var(--ink-3);font-size:12px;font-weight:400;margin-left:6px}
+.title{font-size:13px;color:var(--ink);line-height:1.45;display:-webkit-box;
+       -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+       min-height:37px}
+.title .mark{color:#fff;background:var(--tmall);font-size:11px;padding:0 4px;
+             border-radius:2px;margin-right:4px;vertical-align:1px}
+.badges{display:flex;flex-wrap:wrap;gap:4px}
+.badges span{font-size:11px;color:var(--orange);border:1px solid #ffd2bd;
+             padding:0 4px;border-radius:2px}
+.cardfoot{display:flex;align-items:center;justify-content:space-between;
+          padding-top:6px;border-top:1px dashed var(--line);margin-top:auto}
+.cardfoot .shop{font-size:12px;color:var(--ink-3)}
+.cardfoot .ask{color:var(--orange);font-size:12px;display:flex;align-items:center;
+               gap:3px}
+.cardfoot .ask:hover{text-decoration:underline}
 
-  /* ---------------- 客服浮窗 ---------------- */
-  .fab{position:fixed;right:22px;bottom:22px;width:56px;height:56px;border-radius:50%;
-       background:linear-gradient(135deg,var(--brand),var(--brand-2));color:#fff;
-       font-size:24px;box-shadow:0 6px 20px rgba(255,80,0,.4);z-index:40}
-  .fab.hide{display:none}
+/* ---------------------------------------------------------- 详情 */
+.mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;z-index:40}
+.mask.open{display:block}
+.detail{position:fixed;inset:50% auto auto 50%;transform:translate(-50%,-50%);
+        width:min(940px,94vw);max-height:88vh;overflow:auto;background:#fff;
+        border-radius:4px;z-index:41;display:none}
+.detail.open{display:block}
+.detail .x{position:absolute;top:10px;right:14px;font-size:22px;color:#bbb}
+.dtop{display:grid;grid-template-columns:340px 1fr;gap:24px;padding:24px}
+.dtop img{width:100%;border-radius:3px;display:block}
+.dtop h3{margin:0 0 12px;font-size:19px;line-height:1.5;font-weight:500}
+.pricebar{background:linear-gradient(#fff6f3,#fff);padding:14px 16px;
+          border:1px solid #ffe3d6;border-radius:3px;margin-bottom:16px}
+.pricebar .now{color:var(--red);font-size:30px;font-weight:600}
+.pricebar .now i{font-size:15px;font-style:normal}
+.pricebar del{color:var(--ink-3);margin-left:10px}
+.drow{display:flex;gap:12px;margin-bottom:12px;font-size:13px}
+.drow .k{color:var(--ink-3);width:52px;flex:none;padding-top:5px}
+.skus{display:flex;flex-wrap:wrap;gap:8px}
+.sku{border:1px solid var(--line);padding:5px 12px;border-radius:2px;font-size:13px;
+     background:#fff}
+.sku.off{color:#c4c4c4;background:#fafafa;text-decoration:line-through}
+.sku .n{color:var(--ink-3);font-size:11px;margin-left:5px}
+.sku.low{border-color:#ffb38a}
+.sku.low .n{color:var(--orange)}
+table.size{border-collapse:collapse;width:100%;font-size:12px;margin-top:6px}
+table.size th,table.size td{border:1px solid var(--line);padding:5px 7px;
+                            text-align:center}
+table.size th{background:#fafafa;color:var(--ink-2);font-weight:500}
+.attrs{font-size:13px;color:var(--ink-2);line-height:1.9}
+.dcta{display:flex;gap:10px;margin-top:18px}
+.dcta button{padding:11px 30px;border-radius:2px;font-size:15px}
+.buy{background:var(--orange);color:#fff}
+.svc{background:#fff;border:1px solid var(--orange);color:var(--orange);
+     display:flex;align-items:center;gap:6px}
 
-  .chat{position:fixed;right:22px;bottom:22px;width:380px;height:min(620px,86vh);
-        background:var(--card);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.22);
-        display:none;flex-direction:column;overflow:hidden;z-index:50}
-  .chat.open{display:flex}
-  @media (max-width:520px){ .chat{right:0;bottom:0;width:100vw;height:100vh;border-radius:0} }
-  .chat.wide{width:720px}
-  @media (max-width:820px){ .chat.wide{width:calc(100vw - 44px)} }
+/* ---------------------------------------------------------- 客服 */
+.fab{position:fixed;right:20px;bottom:76px;z-index:30;background:var(--orange);
+     color:#fff;border-radius:4px;width:56px;padding:10px 0;text-align:center;
+     box-shadow:0 4px 16px rgba(255,80,0,.4);font-size:12px;line-height:1.4}
+.fab svg{width:22px;height:22px;fill:#fff;display:block;margin:0 auto 3px}
+.fab.hide{display:none}
+.chat{position:fixed;right:0;top:0;bottom:0;width:400px;background:#fff;
+      box-shadow:-4px 0 24px rgba(0,0,0,.16);z-index:50;display:none;
+      flex-direction:column}
+.chat.open{display:flex}
+.chat.wide{width:760px}
+.chead{background:var(--orange);color:#fff;padding:11px 14px;display:flex;
+       align-items:center;gap:9px;font-size:15px}
+.chead .dot{width:7px;height:7px;border-radius:50%;background:#7bed9f}
+.chead .dot.off{background:#ffd43b}
+.chead .sp{flex:1}
+.chead button{color:#fff;padding:3px 9px;border-radius:3px;font-size:12px;
+              background:rgba(255,255,255,.18)}
+.cbody{flex:1;display:flex;min-height:0}
+.cmain{flex:1;display:flex;flex-direction:column;min-width:0}
+.ctx{display:none;align-items:center;gap:9px;padding:9px 12px;background:#fff8f5;
+     border-bottom:1px solid #ffe3d6;font-size:12px}
+.ctx img{width:38px;height:38px;object-fit:cover;border-radius:3px}
+.clog{flex:1;overflow-y:auto;padding:14px;background:#f6f7f9}
+.msg{max-width:86%;padding:9px 12px;border-radius:9px;margin-bottom:10px;
+     font-size:14px;line-height:1.65;white-space:pre-wrap;word-break:break-word;
+     background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.msg.me{margin-left:auto;background:var(--orange);color:#fff}
+.msg.sys{max-width:100%;background:#eef2f7;color:var(--ink-2);font-size:12.5px;
+         box-shadow:none}
+.msg.draft{opacity:.62}
+.cite{margin-top:8px;border-top:1px dashed var(--line);padding-top:6px}
+.cite details{font-size:12px;color:var(--ink-2);margin-top:4px}
+.cite summary{cursor:pointer;color:var(--orange)}
+.cite p{margin:5px 0 0;color:var(--ink-2);background:#fafafa;padding:6px;
+        border-radius:3px}
+.handover{margin-top:8px;background:#fff7e6;border:1px solid #ffe0a3;
+          border-radius:4px;padding:7px 9px;font-size:12px;color:#8a5b00}
+.fb{margin-top:7px;display:flex;align-items:center;gap:6px}
+.fb button{border:1px solid var(--line);border-radius:12px;padding:2px 10px;
+           font-size:12px;color:var(--ink-2)}
+.fb button:hover{border-color:var(--orange);color:var(--orange)}
+.fb button.done{background:#fff4ee;border-color:var(--orange);color:var(--orange)}
+.fb .tid{font-size:11px;color:#c4c4c4;margin-left:auto;font-family:monospace}
+.cstatus{padding:0 14px;min-height:22px;display:flex;gap:5px;flex-wrap:wrap}
+.pill{font-size:11px;background:#eef2f7;color:var(--ink-2);padding:1px 7px;
+      border-radius:9px}
+.pill.live{background:#fff0e8;color:var(--orange)}
+.quick{display:flex;gap:6px;flex-wrap:wrap;padding:8px 14px 0}
+.quick button{font-size:12px;border:1px solid var(--line);border-radius:13px;
+              padding:3px 11px;color:var(--ink-2);background:#fff}
+.quick button:hover{border-color:var(--orange);color:var(--orange)}
+.cform{display:flex;gap:8px;padding:10px 14px 14px}
+.cform input{flex:1;border:1px solid var(--line);border-radius:4px;padding:9px 11px;
+             outline:none;font-size:14px;min-width:0}
+.cform input:focus{border-color:var(--orange)}
+.cform button{background:var(--orange);color:#fff;padding:0 20px;border-radius:4px}
+.diag{width:360px;flex:none;border-left:1px solid var(--line);overflow-y:auto;
+      padding:12px;background:#fbfbfc;font-size:12px;display:none}
+.chat.wide .diag{display:block}
+.diag h3{margin:12px 0 6px;font-size:12px;color:var(--ink-3);font-weight:600}
+.diag h3:first-child{margin-top:0}
+.kv{display:flex;justify-content:space-between;gap:10px;padding:3px 0;
+    border-bottom:1px dotted var(--line)}
+.kv span:first-child{color:var(--ink-3)}
+.hit{background:#fff;border:1px solid var(--line);border-radius:3px;padding:6px 8px;
+     margin-bottom:5px;color:var(--ink-2)}
+.hit .t{display:flex;justify-content:space-between;gap:8px;margin-bottom:2px;
+        font-family:monospace;font-size:11px}
+.tag{font-size:10px;padding:0 4px;border-radius:2px}
+.tag.yes{background:#e6f8ec;color:#1a7f37}
+.tag.no{background:#fdecec;color:#c0392b}
 
-  .chead{background:linear-gradient(90deg,var(--brand),var(--brand-2));color:#fff;
-         padding:10px 14px;display:flex;align-items:center;gap:8px}
-  .chead .t{font-weight:600;font-size:14px}
-  .chead .s{font-size:11px;opacity:.9}
-  .chead .sp{flex:1}
-  .chead button{color:#fff;font-size:13px;padding:2px 8px;border-radius:6px;
-                background:rgba(255,255,255,.18)}
+footer{margin:36px 0 24px;text-align:center;color:var(--ink-3);font-size:12px;
+       line-height:2}
+footer code{background:#ececec;padding:1px 5px;border-radius:2px}
 
-  .ctx{padding:8px 12px;background:var(--code);font-size:12px;color:var(--muted);
-       display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--line)}
-  .ctx .sw{width:30px;height:30px;border-radius:6px;display:grid;place-items:center;
-           font-size:17px;flex:none}
-
-  .cbody{flex:1;display:flex;min-height:0}
-  .clog{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;
-        gap:10px;min-width:0}
-
-  .msg{max-width:84%;padding:8px 12px;border-radius:12px;white-space:pre-wrap;
-       word-break:break-word;font-size:14px;background:var(--code)}
-  .msg.me{align-self:flex-end;background:var(--brand);color:#fff}
-  .msg.sys{align-self:center;background:transparent;color:var(--muted);font-size:12px;
-           max-width:100%;text-align:center}
-  .msg.draft{opacity:.7;border:1px dashed var(--line)}
-
-  .cite{margin-top:7px;padding-top:7px;border-top:1px dashed var(--line);font-size:12px}
-  .cite summary{cursor:pointer;color:var(--brand)}
-  .cite p{margin-top:3px;color:var(--muted)}
-  .handover{margin-top:7px;padding:7px 9px;border-radius:7px;font-size:12px;
-            background:rgba(255,143,31,.14);border:1px solid rgba(255,143,31,.4)}
-  .fb{margin-top:7px;display:flex;gap:5px;align-items:center}
-  .fb button{padding:1px 7px;font-size:12px;border-radius:5px;border:1px solid var(--line)}
-  .fb button.done{border-color:var(--ok);color:var(--ok)}
-  .fb .tid{font-size:11px;color:var(--muted);font-family:ui-monospace,monospace}
-
-  .cstatus{padding:0 14px 5px;min-height:20px;font-size:12px;color:var(--muted)}
-  .pill{display:inline-block;padding:1px 9px;border-radius:999px;background:var(--code);
-        margin-right:5px}
-  .pill.live::after{content:"";animation:dots 1.2s steps(4) infinite}
-  @keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
-
-  .quick{padding:0 14px 8px;display:flex;gap:6px;flex-wrap:wrap}
-  .quick button{font-size:12px;padding:3px 10px;border:1px solid var(--line);
-                border-radius:12px;color:var(--muted)}
-  .quick button:hover{border-color:var(--brand);color:var(--brand)}
-
-  .cinput{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line)}
-  .cinput input{flex:1;border:1px solid var(--line);border-radius:18px;padding:7px 14px;
-                background:var(--bg);outline:none}
-  .cinput button{background:var(--brand);color:#fff;border-radius:18px;padding:0 18px;
-                 font-size:13px}
-
-  /* 诊断面板：这个项目的亮点，但对普通用户是噪音，所以默认收起 */
-  .diag{width:300px;border-left:1px solid var(--line);overflow-y:auto;padding:12px;
-        font-size:12px;display:none;background:var(--bg)}
-  .chat.wide .diag{display:block}
-  .diag h3{font-size:11px;color:var(--muted);margin:12px 0 6px;text-transform:uppercase;
-           letter-spacing:.05em}
-  .diag h3:first-child{margin-top:0}
-  .kv{display:flex;justify-content:space-between;gap:8px;padding:2px 0;
-      border-bottom:1px dotted var(--line)}
-  .kv span:last-child{font-family:ui-monospace,monospace}
-  .hit{padding:5px 7px;margin:5px 0;border-radius:5px;background:var(--card)}
-  .hit .t{display:flex;justify-content:space-between;gap:6px;color:var(--muted);
-          font-family:ui-monospace,monospace;font-size:11px}
-  .tag{font-size:10px;padding:0 5px;border-radius:3px}
-  .tag.yes{background:rgba(0,168,112,.18);color:var(--ok)}
-  .tag.no{background:rgba(229,69,58,.16);color:var(--bad)}
-  .empty{color:var(--muted);text-align:center;padding:16px 0}
+@media(max-width:1080px){
+  .hero{grid-template-columns:1fr}
+  .side,.panel{display:none}
+  .chat,.chat.wide{width:100%}
+  .diag{display:none!important}
+  .dtop{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
 
-<div class="topbar">
-  <div class="logo">smartMall<small>AI 客服演示</small></div>
-  <form class="search" onsubmit="event.preventDefault();askAbout(this.q.value)">
-    <input name="q" placeholder="搜索商品，或直接问客服…">
-    <button type="submit">搜索</button>
-  </form>
-  <div class="me">用户 <input id="user" value="10086" title="改成 10087 可演示订单越权拦截"></div>
+<!-- 图标：内联 SVG sprite。不用 emoji——跨平台字形差异大，
+     购物袋、扳手这类符号在 Windows 上常掉成方框，而这就是给 Windows 演示的 -->
+<svg style="display:none">
+  <symbol id="i-cart" viewBox="0 0 24 24"><path d="M7 18a2 2 0 100 4 2 2 0 000-4zm10 0a2 2 0 100 4 2 2 0 000-4zM6.2 6h14.3l-2 8H8.1L6.2 6zm-.9-3H2v2h2l3 12h12v-2H8.4l-.3-1h11L22 4H5.9l-.6-1z"/></symbol>
+  <symbol id="i-svc" viewBox="0 0 24 24"><path d="M12 2a9 9 0 00-9 9v5a3 3 0 003 3h1a1 1 0 001-1v-6a1 1 0 00-1-1H5v-1a7 7 0 0114 0v1h-2a1 1 0 00-1 1v6a1 1 0 001 1h1a3 3 0 003-3v-5a9 9 0 00-9-9z"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"stroke="currentColor"stroke-width="2"fill="none"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6V2zm7 1.5V7h3.5L13 3.5z"/></symbol>
+  <symbol id="i-tool" viewBox="0 0 24 24"><path d="M21 6l-4 4-3-3 4-4a6 6 0 00-8 7L3 17l4 4 7-7a6 6 0 007-8z"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 2l10 19H2L12 2zm-1 7v6h2V9h-2zm0 8v2h2v-2h-2z"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M2 21h4V9H2v12zM23 10a2 2 0 00-2-2h-6.3l1-4.6v-.3a1.5 1.5 0 00-.4-1L14 1 7.6 7.4A2 2 0 007 8.8V19a2 2 0 002 2h9a2 2 0 001.8-1.2l3-7.1V10z"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M22 3h-4v12h4V3zM1 14a2 2 0 002 2h6.3l-1 4.6v.3a1.5 1.5 0 00.4 1L10 23l6.4-6.4a2 2 0 00.6-1.4V5a2 2 0 00-2-2H6a2 2 0 00-1.8 1.2l-3 7.1V14z"/></symbol>
+</svg>
+
+<div class="topbar"><div class="wrap">
+  <span>中国大陆</span>
+  <a class="hi">亲，请登录</a><a>免费注册</a><a>网页无障碍</a>
+  <span class="sp"></span>
+  <a>我的订单</a><a>收藏夹</a><a>会员中心</a><a>帮助中心</a>
+</div></div>
+
+<div class="promo"><div class="wrap">
+  <span>smartMall 秋季上新 · 全场满 299 减 50</span>
+  <span class="go">立即抢购</span>
+  <span class="cd">距结束
+    <b id="cdH">00</b>时<b id="cdM">00</b>分<b id="cdS">00</b>秒</span>
+</div></div>
+
+<header><div class="wrap">
+  <div class="logo">smartMall<small>SMARTMALL.COM</small></div>
+  <div class="search">
+    <form class="sbox" onsubmit="searchAsk(event)">
+      <span class="cat">宝贝<svg class="ico"><use href="#i-chev"/></svg></span>
+      <input id="q" placeholder="搜索商品，或直接把问题打在这里">
+      <button type="submit">搜索</button>
+    </form>
+    <div class="hot">
+      <a class="em">针织衫</a><a>羽绒服</a><a>连衣裙</a><a>单肩包</a>
+      <a>马丁靴</a><a>飞行员夹克</a><a>束脚裤</a>
+    </div>
+  </div>
+  <a class="cartbtn"><svg class="ico"><use href="#i-cart"/></svg>购物车</a>
+</div></header>
+
+<nav><div class="wrap">
+  <a>首页</a><a>女装<span class="tag">新</span></a><a>男装</a><a>鞋靴</a>
+  <a>箱包</a><a>配饰</a><a>会员中心</a><a>品质生活</a><a>企业采购</a>
+</div></nav>
+
+<div class="wrap">
+  <div class="hero">
+    <div class="side">
+      <a>女装 · 内衣<svg class="ico arrow"><use href="#i-chev"/></svg></a>
+      <a>男装 · 运动<svg class="ico arrow"><use href="#i-chev"/></svg></a>
+      <a>鞋靴 · 箱包<svg class="ico arrow"><use href="#i-chev"/></svg></a>
+      <a>美妆 · 个护<svg class="ico arrow"><use href="#i-chev"/></svg></a>
+      <a>手机 · 数码<svg class="ico arrow"><use href="#i-chev"/></svg></a>
+      <a>家电 · 家装<svg class="ico arrow"><use href="#i-chev"/></svg></a>
+      <a>母婴 · 玩具<svg class="ico arrow"><use href="#i-chev"/></svg></a>
+      <a>食品 · 生鲜<svg class="ico arrow"><use href="#i-chev"/></svg></a>
+      <a>汽车 · 工业<svg class="ico arrow"><use href="#i-chev"/></svg></a>
+    </div>
+
+    <div class="banner">
+      <img class="bg" src="/img/banner.jpg" alt="">
+      <div class="in">
+        <h1>多模态电商 AI 客服</h1>
+        <p>混合检索 · 引用溯源 · 越权校验 · 答不了就转人工</p>
+        <p style="margin-top:14px;font-size:13px">
+          点任意商品的<span class="kbd">联系客服</span>，会话自动带上该商品的
+          product_id —— 它决定检索过滤范围和查哪个 SKU 的库存
+        </p>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="who">
+        <div class="avatar"><svg class="ico" style="width:22px;height:22px">
+          <use href="#i-svc"/></svg></div>
+        <div><b>智能客服在线</b>
+          <div class="note" style="margin-top:2px">7×24 小时</div></div>
+      </div>
+      <button class="btn-primary" onclick="openChat()">进入智能客服</button>
+      <button class="btn-ghost" onclick="toggleDiag();openChat()">
+        打开诊断面板</button>
+      <div class="note">
+        诊断面板会显示每一轮的意图、检索命中、词汇覆盖率、有没有转人工
+        以及为什么 —— 这些平时全是隐形的。
+      </div>
+      <div class="note" style="border-top:1px solid var(--line);padding-top:10px">
+        演示用户 ID
+        <input id="user" value="10086" style="width:74px;border:1px solid
+          var(--line);padding:3px 6px;border-radius:2px;margin-left:4px">
+        <br>查订单时用；换成别人的 ID 会被越权校验挡下。
+      </div>
+    </div>
+  </div>
+
+  <div class="secthead">
+    <h2>猜你喜欢</h2>
+    <div class="tabs" id="tabs"></div>
+    <div class="line"></div>
+  </div>
+  <div class="grid" id="grid"></div>
+
+  <footer>
+    商品数据来自 <code>/api/products</code>，与客服工具层读同一张表 ——
+    页面显示的价格库存，就是客服回答时用的那一份。<br>
+    商品图为 Unsplash 开放授权图，存于仓库本地，整页零外部请求。
+  </footer>
 </div>
 
-<nav class="nav">
-  <a href="#" class="on">首页</a><a href="#">女装</a><a href="#">男装</a>
-  <a href="#">箱包</a><a href="#">我的订单</a><a href="#">购物车</a>
-</nav>
+<div class="mask" id="mask" onclick="closeDetail()"></div>
+<div class="detail" id="detail"></div>
 
-<div class="wrap" id="page"></div>
+<button class="fab" id="fab" onclick="openChat()">
+  <svg><use href="#i-svc"/></svg>客服
+</button>
 
-<button class="fab" id="fab" onclick="openChat()" title="联系客服">💬</button>
-
-<section class="chat" id="chat">
+<div class="chat" id="chat">
   <div class="chead">
-    <span>🎧</span>
-    <div><div class="t">smartMall 智能客服</div>
-         <div class="s"><span id="connText">连接中</span> · 答不上来会转人工</div></div>
+    <span class="dot" id="dot"></span>
+    <b>smartMall 智能客服</b>
+    <span style="font-size:12px;opacity:.85" id="connText">已连接</span>
     <span class="sp"></span>
-    <button onclick="toggleDiag()" id="diagBtn" title="看看它是怎么答的">诊断</button>
-    <button onclick="closeChat()">✕</button>
+    <button id="diagBtn" onclick="toggleDiag()">诊断</button>
+    <button onclick="closeChat()">收起</button>
   </div>
-  <div class="ctx" id="ctx" style="display:none"></div>
   <div class="cbody">
-    <div class="clog" id="clog"></div>
-    <aside class="diag" id="diag"><div class="empty">发一条消息看看</div></aside>
+    <div class="cmain">
+      <div class="ctx" id="ctx"></div>
+      <div class="clog" id="clog"></div>
+      <div class="cstatus" id="cstatus"></div>
+      <div class="quick" id="quick"></div>
+      <form class="cform" onsubmit="send(event)">
+        <input id="cinput" placeholder="说点什么…" autocomplete="off">
+        <button type="submit">发送</button>
+      </form>
+    </div>
+    <div class="diag" id="diag"></div>
   </div>
-  <div class="cstatus" id="cstatus"></div>
-  <div class="quick" id="quick"></div>
-  <form class="cinput" onsubmit="send(event)">
-    <input id="cinput" placeholder="说点什么…" autocomplete="off">
-    <button type="submit">发送</button>
-  </form>
-</section>
+</div>
 
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const ICON = {9001:'🧶', 9002:'🧥', 9003:'👗', 9004:'👜'};
-const STAGES = {intent:'理解意图', retrieve:'查找资料', tools:'查询实时数据', generate:'组织语言'};
 
-let products = [], current = null, ws, sessionId = null, draft = null, connected = false;
-let greeted = false;
+const STAGES = {intent:'识别意图', retrieve:'检索知识库', rewrite:'改写查询',
+                tools:'查商品数据', generate:'生成回答', postcheck:'合规检查',
+                handover:'转接人工', clarify:'请求澄清'};
 
-// ---------------------------------------------------------------- 商品
+let products = [], current = null, cat = '全部';
+let ws, connected = false, sessionId = null, draft = null, greeted = false;
+
+/* ---------------------------------------------------------------- 商品 */
 
 async function loadProducts(){
   try{
-    const r = await (await fetch('/api/products')).json();
-    products = r.items || [];
+    const r = await fetch('/api/products');
+    const d = await r.json();
+    products = d.items || [];
   }catch(e){ products = []; }
-  renderList();
-}
 
-function renderList(){
-  current = null;
   if (!products.length){
-    $('#page').innerHTML = `<div class="banner"><h2>商品数据未就绪</h2>
-      <p>导入 deploy/sql/migrations/004_order_and_tool_seed.sql 后刷新。
-         客服仍可正常使用。</p></div>`;
+    // 商品挂了不该让整页白屏，客服入口仍然可用
+    $('#grid').innerHTML = `<div style="grid-column:1/-1;background:#fff;
+      padding:40px;text-align:center;color:var(--ink-3)">
+      商品数据读取失败。检查 MySQL 连接，或先跑
+      <code>deploy/sql/migrations/005_storefront_catalog.sql</code>。<br>
+      客服功能不受影响，右下角可直接进入。</div>`;
     return;
   }
-  $('#page').innerHTML = `
-    <div class="banner">
-      <h2>秋冬新品 · 限时特惠</h2>
-      <p>点开任意商品，再点「联系客服」——客服会自动带上当前商品的上下文</p>
-    </div>
-    <div class="grid">${products.map(card).join('')}</div>`;
+  renderTabs();
+  renderGrid();
 }
 
-const card = p => `
-  <div class="card" onclick="openDetail(${p.id})">
-    <div class="thumb p${p.id}">${ICON[p.id] || '🛍'}</div>
-    <div class="body">
-      <div class="name">${esc(p.name)}</div>
-      <div class="price"><small>¥</small>${p.price.toFixed(0)}
-        ${p.origin_price ? `<del>¥${p.origin_price.toFixed(0)}</del>` : ''}
-        ${p.in_stock ? '' : '<span class="soldout">缺货</span>'}</div>
-    </div>
-  </div>`;
+function renderTabs(){
+  const cats = ['全部', ...new Set(products.map(p => p.category).filter(Boolean))];
+  $('#tabs').innerHTML = cats.map(c =>
+    `<button class="${c===cat?'on':''}" onclick="pickCat('${esc(c)}')">${esc(c)}</button>`
+  ).join('');
+}
+function pickCat(c){ cat = c; renderTabs(); renderGrid(); }
+
+function imgFor(p){
+  // main_image 来自数据库；005 没跑时为空，退化成一块占位底色而不是碎图
+  return p.main_image ? `/img/${encodeURIComponent(p.main_image)}` : '';
+}
+
+function renderGrid(){
+  const list = cat === '全部' ? products : products.filter(p => p.category === cat);
+  $('#grid').innerHTML = list.map(p => {
+    const src = imgFor(p);
+    const off = p.origin_price && p.origin_price > p.price;
+    return `<div class="card" onclick="openDetail(${p.id})">
+      <div class="ph">
+        ${src ? `<img src="${src}" alt="${esc(p.name)}" loading="lazy">`
+              : `<div style="height:100%;background:#f0f0f0"></div>`}
+        ${p.in_stock ? '' : '<div class="oos"><b>已售罄</b></div>'}
+      </div>
+      <div class="body">
+        <div class="price"><i>¥</i>${p.price.toFixed(0)}${
+          off ? `<del>¥${p.origin_price.toFixed(0)}</del>` : ''}</div>
+        <div class="title"><span class="mark">自营</span>${esc(p.name)}</div>
+        <div class="badges">
+          <span>七天无理由</span><span>顺丰包邮</span>
+          ${off ? '<span>限时特惠</span>' : ''}
+        </div>
+        <div class="cardfoot">
+          <span class="shop">smartMall 旗舰店</span>
+          <span class="ask" onclick="event.stopPropagation();askProduct(${p.id})">
+            <svg class="ico"><use href="#i-svc"/></svg>联系客服</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+/* ---------------------------------------------------------------- 详情 */
 
 function openDetail(id){
   const p = products.find(x => x.id === id);
   if (!p) return;
   current = p;
-  const attrs = Object.entries(p.attrs || {})
-    .map(([k,v]) => `<div>${esc(k)}：${esc(v)}</div>`).join('');
+  const src = imgFor(p);
+  const off = p.origin_price && p.origin_price > p.price;
+
   const skus = (p.skus || []).map(s => {
-    const spec = Object.values(typeof s.spec === 'string' ? JSON.parse(s.spec) : s.spec).join(' ');
-    return `<span class="sku ${s.in_stock ? '' : 'out'}">${esc(spec)}
-            <span class="n">${s.in_stock ? '库存 '+s.stock : '缺货'}</span></span>`;
+    const spec = Object.values(s.spec || {}).join(' ');
+    const cls = !s.in_stock ? 'off' : (s.stock <= 5 ? 'low' : '');
+    const n = !s.in_stock ? '无货' : (s.stock <= 5 ? `仅剩${s.stock}` : `${s.stock}件`);
+    return `<span class="sku ${cls}">${esc(spec)}<span class="n">${n}</span></span>`;
   }).join('');
 
-  let chart = '';
-  const c = p.size_chart?.chart;
-  if (c){
-    chart = `<h4 style="font-size:13px;margin:14px 0 6px">尺码表</h4><table>
-      <tr>${c['表头'].map(h => `<th>${esc(h)}</th>`).join('')}</tr>
-      ${c['行'].map(r => `<tr>${r.map(v => `<td>${esc(v)}</td>`).join('')}</tr>`).join('')}
-    </table>${p.size_chart.note ? `<div class="attrs">${esc(p.size_chart.note)}</div>` : ''}`;
+  let size = '';
+  const ch = p.size_chart && (p.size_chart.chart || p.size_chart);
+  if (ch && ch['表头']){
+    size = `<div class="drow"><span class="k">尺码表</span><div style="flex:1">
+      <table class="size"><tr>${ch['表头'].map(h=>`<th>${esc(h)}</th>`).join('')}</tr>
+      ${(ch['行']||[]).map(r=>`<tr>${r.map(c=>`<td>${esc(c)}</td>`).join('')}</tr>`)
+        .join('')}</table></div></div>`;
   }
 
-  $('#page').innerHTML = `
-    <a class="back" href="#" onclick="renderList();return false">‹ 返回商品列表</a>
-    <div class="detail">
-      <div class="hero p${p.id}">${ICON[p.id] || '🛍'}</div>
+  const attrs = Object.entries(p.attrs || {})
+    .map(([k,v]) => `${esc(k)}：${esc(v)}`).join('<br>');
+
+  $('#detail').innerHTML = `
+    <button class="x" onclick="closeDetail()">×</button>
+    <div class="dtop">
+      <div>${src ? `<img src="${src}" alt="${esc(p.name)}">`
+                 : '<div style="aspect-ratio:1;background:#f0f0f0"></div>'}</div>
       <div>
-        <h2>${esc(p.name)}</h2>
-        <div class="pricebox"><span class="big">¥${p.price.toFixed(0)}</span>
-          ${p.origin_price ? `<del style="color:var(--muted);margin-left:8px">¥${p.origin_price.toFixed(0)}</del>` : ''}
+        <h3>${esc(p.name)}</h3>
+        <div class="pricebar">
+          <span class="now"><i>¥</i>${p.price.toFixed(2)}</span>
+          ${off ? `<del>¥${p.origin_price.toFixed(2)}</del>` : ''}
+          <div style="font-size:12px;color:var(--ink-3);margin-top:6px">
+            价格与库存实时来自工具层，客服回答用的是同一份数据</div>
         </div>
-        <div class="attrs">${attrs}</div>
-        <div class="skus">${skus}</div>
-        ${chart}
-        <div class="actions">
-          <button class="btn cart">加入购物车</button>
-          <button class="btn buy">立即购买</button>
-          <button class="btn ask" onclick="openChat()">🎧 联系客服</button>
+        <div class="drow"><span class="k">规格</span>
+          <div class="skus">${skus || '<span style="color:#bbb">暂无</span>'}</div></div>
+        ${attrs ? `<div class="drow"><span class="k">参数</span>
+          <div class="attrs">${attrs}</div></div>` : ''}
+        ${size}
+        <div class="dcta">
+          <button class="buy">立即购买</button>
+          <button class="svc" onclick="askProduct(${p.id})">
+            <svg class="ico"><use href="#i-svc"/></svg>联系客服</button>
         </div>
       </div>
     </div>`;
-  window.scrollTo(0,0);
+  $('#detail').classList.add('open');
+  $('#mask').classList.add('open');
 }
 
-// ---------------------------------------------------------------- 客服
+function closeDetail(){
+  $('#detail').classList.remove('open');
+  $('#mask').classList.remove('open');
+}
+
+function askProduct(id){
+  current = products.find(x => x.id === id) || null;
+  closeDetail();
+  openChat();
+}
+
+function searchAsk(e){
+  e.preventDefault();
+  const t = $('#q').value.trim();
+  if (!t) return;
+  // 搜索框直接当提问入口：这是个客服演示，不是真的搜索引擎
+  current = null;
+  askAbout(t);
+}
+
+/* ---------------------------------------------------------------- 客服 */
 
 function connect(){
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws/chat`);
-  ws.onopen = () => { connected = true; $('#connText').textContent = '在线'; };
-  ws.onclose = () => { connected = false; $('#connText').textContent = '重连中';
-                       setTimeout(connect, 2000); };
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://')
+                     + location.host + '/ws/chat');
+  ws.onopen = () => { connected = true;
+    $('#dot').classList.remove('off'); $('#connText').textContent = '已连接'; };
+  ws.onclose = () => { connected = false;
+    $('#dot').classList.add('off'); $('#connText').textContent = '重连中';
+    setTimeout(connect, 2000); };
   ws.onmessage = e => handle(JSON.parse(e.data));
 }
 
@@ -348,17 +603,18 @@ function closeChat(){
 }
 function toggleDiag(){
   const on = $('#chat').classList.toggle('wide');
-  $('#diagBtn').style.background = on ? 'rgba(255,255,255,.4)' : '';
+  $('#diagBtn').style.background = on ? 'rgba(255,255,255,.42)' : '';
 }
 
 function renderCtx(){
   const ctx = $('#ctx'), quick = $('#quick');
   if (current){
     // 当前商品是客服最重要的上下文：它决定检索过滤范围和查哪个 SKU 的库存
+    const src = imgFor(current);
     ctx.style.display = 'flex';
-    ctx.innerHTML = `<div class="sw p${current.id}">${ICON[current.id] || '🛍'}</div>
-      <div>正在咨询：${esc(current.short_name || current.name)}
-      <span style="color:var(--brand)">¥${current.price.toFixed(0)}</span></div>`;
+    ctx.innerHTML = (src ? `<img src="${src}" alt="">` : '')
+      + `<div>正在咨询：${esc(current.short_name || current.name)}
+         <span style="color:var(--orange)">¥${current.price.toFixed(0)}</span></div>`;
     quick.innerHTML = ['这件是什么面料','还有货吗','160cm穿什么码','怎么洗']
       .map(q => `<button onclick="askAbout('${q}')">${q}</button>`).join('');
   } else {
@@ -439,7 +695,7 @@ function handle(ev){
     box.className = 'cite';
     ev.citations.forEach(c => {
       const d = document.createElement('details');
-      d.innerHTML = `<summary>📎 [#${c.item_id}] ${esc(c.title)}</summary>`
+      d.innerHTML = `<summary>[#${c.item_id}] ${esc(c.title)}</summary>`
                   + `<p>${esc(c.content)}</p>`;
       box.appendChild(d);
     });
@@ -448,7 +704,8 @@ function handle(ev){
   if (ev.handover){
     const h = document.createElement('div');
     h.className = 'handover';
-    h.innerHTML = `⚠ 已转接人工：${esc(ev.handover_reason)}`
+    h.innerHTML = `<svg class="ico"><use href="#i-warn"/></svg> `
+      + `已转接人工：${esc(ev.handover_reason)}`
       + (ev.handover_ticket_id ? `<br>工单 #${ev.handover_ticket_id}，`
         + `补答后会回灌知识库，下次就能自动回答` : '');
     el.appendChild(h);
@@ -457,7 +714,8 @@ function handle(ev){
     const fb = document.createElement('div');
     fb.className = 'fb';
     fb.dataset.fb = ev.trace_id;
-    fb.innerHTML = `<button data-t="up">👍</button><button data-t="down">👎</button>`
+    fb.innerHTML = `<button data-t="up"><svg class="ico"><use href="#i-up"/></svg></button>`
+                 + `<button data-t="down"><svg class="ico"><use href="#i-down"/></svg></button>`
                  + `<span class="tid">${ev.trace_id.slice(0,8)}</span>`;
     fb.querySelectorAll('button').forEach(b => b.onclick = () => {
       b.classList.add('pending');
@@ -484,7 +742,7 @@ function renderDiag(ev){
   if (d.tools_called?.length){
     h += '<h3>工具调用</h3>';
     d.tools_called.forEach(t => h += `<div class="hit"><div class="t">
-      <span>🔧 ${esc(t.name)}</span>
+      <span><svg class="ico"><use href="#i-tool"/></svg> ${esc(t.name)}</span>
       <span>${t.latency_ms}ms ${t.hit ? '命中' : '无数据'}</span></div></div>`);
   }
   if (d.hits?.length){
@@ -503,6 +761,18 @@ function renderDiag(ev){
   }
   $('#diag').innerHTML = h;
 }
+
+/* 促销倒计时。纯装饰，走到当天 24 点——写死一个"还剩 22 小时"的静态数字，
+   在演示里被看出来很尴尬 */
+function tick(){
+  const end = new Date(); end.setHours(24,0,0,0);
+  const s = Math.max(0, Math.floor((end - Date.now())/1000));
+  const p = n => String(n).padStart(2,'0');
+  $('#cdH').textContent = p(Math.floor(s/3600));
+  $('#cdM').textContent = p(Math.floor(s/60)%60);
+  $('#cdS').textContent = p(s%60);
+}
+tick(); setInterval(tick, 1000);
 
 loadProducts();
 connect();

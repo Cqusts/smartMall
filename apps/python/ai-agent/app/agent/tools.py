@@ -51,6 +51,8 @@ def extract_order_no(text: str) -> str | None:
 class ToolBox(Protocol):
     """工具集协议。生产实现读 MySQL，测试用 StubToolBox。"""
 
+    def list_on_sale_product_ids(self, limit: int = 60) -> list[int]: ...
+
     def get_product_detail(self, product_id: int) -> dict[str, Any] | None: ...
 
     def get_sku_stock_price(
@@ -99,13 +101,39 @@ class MySqlToolBox:
 
     # ------------------------------------------------------------ 商品
 
+    def list_on_sale_product_ids(self, limit: int = 60) -> list[int]:
+        """在售商品 ID。给店铺列表用。
+
+        写死 ID 列表的话，上新要改代码，而且迟早出现"库里有、页面没有"。
+        """
+        return [
+            int(r["id"]) for r in self._rows(
+                "SELECT id FROM product WHERE deleted = 0 AND status = 'on_sale' "
+                "ORDER BY id LIMIT :lim",
+                {"lim": limit},
+            )
+        ]
+
+    _BASE_COLS = "p.id, p.name, p.short_name, p.brand, p.status, c.name AS category"
+
     def get_product_detail(self, product_id: int) -> dict[str, Any] | None:
-        rows = self._rows(
-            "SELECT p.id, p.name, p.short_name, p.brand, p.status, c.name AS category "
-            "FROM product p LEFT JOIN category c ON c.id = p.category_id "
-            "WHERE p.id = :pid AND p.deleted = 0",
-            {"pid": product_id},
-        )
+        def _q(cols: str) -> list[dict[str, Any]]:
+            return self._rows(
+                f"SELECT {cols} FROM product p "
+                "LEFT JOIN category c ON c.id = p.category_id "
+                "WHERE p.id = :pid AND p.deleted = 0",
+                {"pid": product_id},
+            )
+
+        try:
+            rows = _q(f"{self._BASE_COLS}, p.main_image")
+        except Exception:  # noqa: BLE001
+            # 正常走不到：main_image 在 01_product.sql 里就有。留着是因为
+            # 这一处的失败模式是**整页白屏**——建库方式稍有出入，用户
+            # git pull 完看到的就是空店铺，再去翻是哪张表出了问题。
+            rows = _q(self._BASE_COLS)
+            for r in rows:
+                r["main_image"] = ""
         if not rows:
             return None
         detail = rows[0]
@@ -234,6 +262,10 @@ class StubToolBox:
         self.calls.append(name)
         if self.fail:
             raise ToolError("注入的工具故障")
+
+    def list_on_sale_product_ids(self, limit=60):
+        self._check("list_on_sale_product_ids")
+        return sorted(self.products)[:limit]
 
     def get_product_detail(self, product_id):
         self._check("get_product_detail")
