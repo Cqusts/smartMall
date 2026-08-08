@@ -18,6 +18,10 @@ from typing import Any
 from . import guard, prompts
 from .llm import LlmClient, LlmError
 from .retriever import RetrievalError, Retriever
+from .tools import (
+    ToolBox, ToolError, extract_order_no, render_order, render_size_chart,
+    render_skus,
+)
 from .state import AgentState, Citation, HandoverReason, Intent
 
 
@@ -61,6 +65,9 @@ class Deps:
     store: Any = None
     """埋点与工单落库。为 None 时不落库——这是刻意的默认值：
     Agent 在没有数据库的环境里（测试、离线调试）必须照样能跑。"""
+    tools: ToolBox | None = None
+    """业务数据工具集。为 None 时实时类问题转人工——
+    宁可转人工，也不能拿知识库里三个月前的"目前有货"糊弄过去。"""
 
 
 # ---------------------------------------------------------------- 辅助
@@ -75,6 +82,20 @@ def _history_text(state: AgentState, n: int) -> str:
         who = "用户" if t.role == "user" else "客服"
         lines.append(f"{who}：{t.content}")
     return "\n".join(lines) or "（无）"
+
+
+def _tools_text(state: AgentState) -> str:
+    """工具数据单独成块，并标明优先级高于知识库。
+
+    混在一起写的话，模型会把三个月前对话里的"目前有货"和刚查到的
+    "库存 0"平等对待然后挑一个说——而实时数据存在的全部意义
+    就是覆盖过期的知识。
+    """
+    if not state.tool_results:
+        return ""
+    return prompts.TOOLS_BLOCK.format(
+        tools="\n".join(state.tool_results.values())
+    )
 
 
 def _knowledge_text(hits: list[Citation]) -> str:
@@ -241,6 +262,94 @@ def chitchat(state: AgentState, deps: Deps) -> AgentState:
     return state
 
 
+def call_tools(state: AgentState, deps: Deps) -> AgentState:
+    """按意图调用业务工具。
+
+    这一步存在的理由：库存、价格、物流每分钟都在变，知识库里那句
+    "目前有货"是三个月前某段对话里说的。拿它回答"还有货吗"，
+    用户下单才发现缺货——比说"我帮您转人工"糟糕得多。
+
+    工具失败与查不到是两回事：查不到是确定结论（这个商品确实没尺码表），
+    失败是不知道，只能转人工。这条判据贯穿全项目。
+    """
+    if deps.tools is None:
+        # 没接工具就老实承认答不了，绝不退回 RAG 拿过期数据顶上
+        state.to_handover(HandoverReason.TOOL_FAILURE)
+        state.trace.error = "未配置业务工具集"
+        return state
+
+    t0 = time.time()
+    product_id = state.session.current_product_id
+
+    try:
+        if state.intent is Intent.ORDER_LOGISTICS:
+            _tool_order(state, deps)
+        elif state.intent is Intent.REALTIME_STOCK_PRICE:
+            _tool_stock_price(state, deps, product_id)
+        elif state.intent is Intent.SIZING:
+            _tool_size_chart(state, deps, product_id)
+    except ToolError as exc:
+        state.to_handover(HandoverReason.TOOL_FAILURE)
+        state.trace.error = str(exc)
+        return state
+
+    state.trace.latency_ms["tools"] = int((time.time() - t0) * 1000)
+    return state
+
+
+def _record(state: AgentState, name: str, t0: float, hit: bool) -> None:
+    state.trace.tools_called.append({
+        "name": name, "latency_ms": int((time.time() - t0) * 1000), "hit": hit,
+    })
+
+
+def _tool_order(state: AgentState, deps: Deps) -> None:
+    """查订单。没给订单号就问一句，别转人工——那是可以自己解决的。"""
+    order_no = extract_order_no(state.message)
+    if not order_no:
+        state.answer = "麻烦提供一下订单号，我帮您查一下物流～"
+        state.clarify_question = state.answer
+        return
+
+    t0 = time.time()
+    order = deps.tools.get_order_status(order_no, state.session.user_id)
+    _record(state, "get_order_status", t0, order is not None)
+
+    if order is None:
+        # 查不到与越权返回同一句话——区别对待会泄露订单是否存在，
+        # 攻击者可以靠枚举订单号来确认哪些是真的
+        state.answer = (
+            f"没有查到订单 {order_no} 呢，麻烦确认一下订单号，"
+            "或者确认是否用当前账号下的单～"
+        )
+        return
+    state.tool_results["order"] = render_order(order)
+
+
+def _tool_stock_price(state: AgentState, deps: Deps, product_id: int | None) -> None:
+    if product_id is None:
+        state.answer = "请问您问的是哪款商品呢？方便说下商品名或者从商品页进来～"
+        state.clarify_question = state.answer
+        return
+
+    t0 = time.time()
+    skus = deps.tools.get_sku_stock_price(product_id)
+    _record(state, "get_sku_stock_price", t0, bool(skus))
+    if skus:
+        state.tool_results["sku"] = render_skus(skus)
+
+
+def _tool_size_chart(state: AgentState, deps: Deps, product_id: int | None) -> None:
+    """尺码表。查不到不算失败——继续走检索，知识库里也许有尺码经验。"""
+    if product_id is None:
+        return
+    t0 = time.time()
+    chart = deps.tools.get_size_chart(product_id)
+    _record(state, "get_size_chart", t0, chart is not None)
+    if chart:
+        state.tool_results["size_chart"] = render_size_chart(chart)
+
+
 def generate(state: AgentState, deps: Deps) -> AgentState:
     """基于检索到的知识生成答案。"""
     t0 = time.time()
@@ -250,6 +359,7 @@ def generate(state: AgentState, deps: Deps) -> AgentState:
             system=prompts.ANSWER_SYSTEM,
             user=prompts.ANSWER_USER.format(
                 knowledge=_knowledge_text(state.hits),
+                tools=_tools_text(state),
                 history=_history_text(state, deps.config.max_history_turns),
                 message=state.message,
             ),

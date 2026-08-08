@@ -103,13 +103,15 @@ class TestRouting:
     def test_realtime_intents_never_answered_from_knowledge_base(self, intent):
         """库存和价格每分钟都在变。
 
-        拿历史对话回答"还有货吗"，会说出早就卖完的结论——
-        这比说"我帮您转人工"糟糕得多。M2 还没接工具，就必须转人工。
+        拿历史对话回答"还有货吗"，会说出早就卖完的结论。这类问题
+        只能走工具；没接工具就转人工，**绝不退回 RAG 拿过期数据顶上**。
+        （接了工具之后的行为见 test_tools.py。）
         """
         deps = _deps(llm=FakeLlmClient(intent=intent))
+        assert deps.tools is None
         s = _run("还有货吗", deps)
         assert s.handover
-        assert deps.retriever.queries == []  # type: ignore[attr-defined]
+        assert deps.retriever.queries == [], "实时类问题一步都不该走检索"  # type: ignore[attr-defined]
 
     def test_low_score_triggers_rewrite_then_handover(self):
         """命中太差先试一次改写，改写后还是差就认输。"""

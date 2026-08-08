@@ -110,7 +110,18 @@ def _build_deps(args: argparse.Namespace) -> Deps:
             print(f"  ⚠ 埋点不可用（{type(exc).__name__}），本次不落库")
             print("    建表：deploy/sql/migrations/003_agent_trace_and_handover.sql")
 
-    return Deps(llm=llm, retriever=retriever, config=cfg, store=store)
+    tools = None
+    if not args.no_tools:
+        from .tools import MySqlToolBox
+
+        try:
+            tools = MySqlToolBox.from_env()
+            print("  工具：商品/SKU/尺码表/订单（只读，含越权校验）")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠ 工具集不可用（{type(exc).__name__}），实时类问题会转人工")
+            print("    建表与种子：deploy/sql/migrations/004_order_and_tool_seed.sql")
+
+    return Deps(llm=llm, retriever=retriever, config=cfg, store=store, tools=tools)
 
 
 def _new_state(args: argparse.Namespace) -> AgentState:
@@ -132,6 +143,9 @@ def _render(state: AgentState, *, verbose: bool) -> None:
             # bm25=0 表示查询词一个都没命中，那点相似度只是向量基线
             lex = "词汇✓" if h.bm25_score > 0 else "无词汇"
             print(f"     [#{h.item_id}] {h.dense_score:.3f} {lex:<6} {h.title[:36]}")
+        for t in state.trace.tools_called:
+            mark = "命中" if t.get("hit") else "无数据"
+            print(f"     🔧 {t['name']} {t['latency_ms']}ms {mark}")
         if state.postcheck_flags:
             print(f"     合规标记：{'、'.join(state.postcheck_flags)}")
         if state.handover:
@@ -275,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="打印意图、命中与分数")
     common.add_argument("--no-trace", action="store_true",
                         help="不写埋点。默认写——Trace 是训练数据的原料")
+    common.add_argument("--no-tools", action="store_true",
+                        help="不接业务工具。实时类问题会转人工")
 
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("chat", parents=[common], help="交互式多轮对话").set_defaults(

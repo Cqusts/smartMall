@@ -150,7 +150,7 @@ make health       # 存活检查
 |---|---|---|
 | **M0 基础设施** | ✅ 已完成 | monorepo 骨架、11 个服务、compose 三件套、30 张表、Kafka 契约、健康探针 |
 | **M1 数据中台 + RAG** | 🟡 核心已完成 | 四道清洗关卡、`knowledge_item`、混合检索、发版门禁、覆盖度矩阵、3 个 DAG（142 测试）<br/>待接真实环境：JDDC 导入、Milvus 集成验证、Label Studio 项目配置 |
-| **M2 文本 AI 客服** | 🟡 核心已完成 | LangGraph 状态机、七类意图分流、引用溯源、转人工、Trace 落库、点赞点踩、知识盲点回流（89 测试）<br/>待做：MCP 工具层、WebSocket 流式、Redis 会话、意图分类评测集 |
+| **M2 文本 AI 客服** | 🟡 核心已完成 | LangGraph 状态机、七类意图分流、引用溯源、转人工、Trace 落库、点赞点踩、知识盲点回流、只读业务工具（含越权校验）（134 测试）<br/>待做：WebSocket 流式与前端、Redis 会话、意图分类评测集 |
 | M3 素材中心 + 运营 Agent | ⬜ | ComfyUI / Wan2.2 / CosyVoice2 |
 | M4 多模态客服 | ⬜ | 图片理解入口、素材挂载 |
 | M5 直播切片 | ⬜ | SRS + FunASR + 语义分段 |
@@ -270,6 +270,22 @@ smartmall-agent chat --product-id 1024       # 带商品上下文，检索按商
 而不是硬编一个答案。
 
 HTTP 形态：`POST /chat`，返回 `answer` / `citations` / `trace_id` / `handover`。
+
+**实时数据走工具，不走 RAG。** 库存、价格、物流每分钟都在变，知识库里
+那句「目前有货」是三个月前某段对话里说的。这类问题一律查结构化数据：
+
+```bash
+mysql -u root -p smartmall < deploy/sql/migrations/004_order_and_tool_seed.sql
+
+smartmall-agent ask "还有货吗" --product-id 9001 -v      # 查 SKU 库存与价格
+smartmall-agent ask "160cm穿什么码" --product-id 9001 -v  # 查尺码表 + 检索经验
+smartmall-agent ask "我的订单2026080100001到哪了" -v      # 查订单与物流
+```
+
+工具全部**只读**——AI 误触发的退款、改价是不可逆的资金损失。查订单
+必须同时匹配订单号与当前会话用户；越权时返回与「订单不存在」完全相同的
+响应（否则会泄露订单是否存在，攻击者可以靠枚举单号确认哪些是真的），
+但尝试会记进 `permission_denials` 供告警。
 
 ### 数据飞轮的后半圈
 

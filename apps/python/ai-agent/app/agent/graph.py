@@ -32,12 +32,24 @@ def route_after_intent(state: AgentState) -> str:
         return "handover"
     if state.intent is Intent.CHITCHAT:
         return "chitchat"
-    if state.intent.needs_realtime:
-        # M2 还没接 MCP 工具。实时类问题宁可转人工，也不能拿
-        # 知识库里的历史对话回答——那会说出过期的价格和库存。
-        state.to_handover(HandoverReason.NO_KNOWLEDGE)
-        return "handover"
+    # 实时类问题必须查工具：知识库里那句"目前有货"是三个月前的。
+    # 尺码也走工具——尺码表是二维表，向量检索对这类查询天然很差；
+    # 但尺码之后仍要走检索，知识库里的"偏大偏小"经验是工具给不了的。
+    if state.intent.needs_realtime or state.intent is Intent.SIZING:
+        return "tools"
     return "retrieve"
+
+
+def route_after_tools(state: AgentState) -> str:
+    if state.handover:
+        return "handover"
+    # 工具节点已经写好了回复（缺订单号、缺商品），直接出去问用户
+    if state.clarify_question:
+        return "emit"
+    if state.intent.needs_realtime:
+        # 拿到数据就生成；没拿到说明查不着，工具节点已给出话术
+        return "generate" if state.tool_results else "emit"
+    return "retrieve"  # 尺码：尺码表 + 知识库经验一起用
 
 
 def has_lexical_support(state: AgentState) -> bool:
@@ -123,6 +135,22 @@ def run_turn(message: str, state: AgentState, deps: Deps) -> AgentState:
     if step == "chitchat":
         return nodes.emit(nodes.chitchat(state, deps), deps)
 
+    if step == "tools":
+        state = nodes.call_tools(state, deps)
+        step = route_after_tools(state)
+        if step == "handover":
+            return nodes.emit(nodes.handover(state, deps), deps)
+        if step == "emit":
+            return nodes.emit(state, deps)
+        if step == "generate":
+            state = nodes.generate(state, deps)
+            if route_after_generate(state) == "handover":
+                return nodes.emit(nodes.handover(state, deps), deps)
+            state = nodes.post_check(state, deps)
+            if route_after_postcheck(state) == "handover":
+                return nodes.emit(nodes.handover(state, deps), deps)
+            return nodes.emit(state, deps)
+
     # 检索 →（必要时改写重试一次）→ 打分分流
     state = nodes.retrieve(state, deps)
     step = route_after_retrieve(state, cfg)
@@ -195,6 +223,7 @@ def build_graph(deps: Deps):
         ("ingest", nodes.ingest),
         ("guard", nodes.guard_input),
         ("intent", nodes.classify_intent),
+        ("tools", nodes.call_tools),
         ("retrieve", nodes.retrieve),
         ("rewrite", nodes.rewrite_query),
         ("clarify", nodes.clarify),
@@ -213,7 +242,10 @@ def build_graph(deps: Deps):
                              "intent": "intent"})
     g.add_conditional_edges("intent", route_after_intent,
                             {"handover": "handover", "chitchat": "chitchat",
-                             "retrieve": "retrieve"})
+                             "tools": "tools", "retrieve": "retrieve"})
+    g.add_conditional_edges("tools", route_after_tools,
+                            {"handover": "handover", "emit": "emit",
+                             "generate": "generate", "retrieve": "retrieve"})
     g.add_conditional_edges("retrieve", lambda s: route_after_retrieve(s, cfg),
                             {"handover": "handover", "rewrite": "rewrite",
                              "clarify": "clarify", "generate": "generate"})
