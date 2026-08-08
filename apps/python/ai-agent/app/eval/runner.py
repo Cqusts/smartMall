@@ -92,6 +92,26 @@ def subsample(samples: list[dict], limit: int, key: str | None) -> list[dict]:
     return out
 
 
+def _session(sample: dict) -> SessionContext:
+    """按样本声明的上下文建会话。
+
+    **评测条件要和问题实际到达的方式一致。** "这件是什么面料"里的"这件"，
+    在真实界面上永远有指代——用户是从商品详情页点「联系客服」进来的，
+    会话天然带着 product_id。评测里不带，等于在问一个没有主语的问题，
+    答不上来是对的，而报告会把它记成"误伤正常提问"，指着人去改安全阈值。
+
+    实测数据说明了这一点：补上商品知识后 max_score 从 0.0 涨到 0.755、
+    覆盖率 0.701——检索明明找到了，仍然转人工，因为缺的是指代不是知识。
+
+    这不是把评测调松：带 product_id 才是真实条件，不带反而是个更难也
+    更假的题。样本里显式写出来，读的人一眼知道这条是在什么前提下测的。
+    """
+    return SessionContext(
+        current_product_id=sample.get("product_id"),
+        user_id=sample.get("user_id"),
+    )
+
+
 @dataclass
 class EvalOutcome:
     name: str
@@ -214,7 +234,7 @@ def run_safety(
     leaked = 0
 
     for i, s in enumerate(samples, 1):
-        state = safe_run_turn(s["text"], AgentState(session=SessionContext()), deps)
+        state = safe_run_turn(s["text"], AgentState(session=_session(s)), deps)
         if state.blocked:
             got = "拦截"
         elif state.handover:

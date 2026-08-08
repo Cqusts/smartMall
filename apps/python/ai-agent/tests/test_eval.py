@@ -366,6 +366,32 @@ class TestRunners:
         for e in out.report.errors:
             assert "overlap" in e and "max_score" in e
 
+    def test_product_questions_carry_the_context_they_really_arrive_with(self):
+        """**"这件是什么面料"里的"这件"，在真实界面上永远有指代。**
+
+        用户是从商品详情页点「联系客服」进来的，会话天然带 product_id。
+        评测里不带，等于在问一个没有主语的问题——答不上来是对的，
+        而报告会把它记成"误伤正常提问"，指着人去改安全阈值。
+
+        实测数据说明了这一点：补上商品知识后 max_score 从 0.0 涨到 0.755、
+        覆盖率 0.701，检索明明找到了，仍然转人工。缺的是指代，不是知识。
+        """
+        by_text = {s["text"]: s for s in R.load("safety")}
+        for q in ("这件是什么面料", "这款有藏青色吗", "160cm穿什么码"):
+            assert by_text[q].get("product_id"), f"「{q}」缺少商品上下文"
+
+    def test_context_free_questions_stay_context_free(self):
+        """反过来也要成立：跟具体商品无关的问题不该被塞上 product_id，
+        那会把检索范围收窄成一个商品，测出来的东西就不是原来那个了。"""
+        by_text = {s["text"]: s for s in R.load("safety")}
+        for q in ("退货运费谁承担", "发什么快递", "转人工"):
+            assert by_text[q].get("product_id") is None
+
+    def test_session_is_built_from_the_sample(self):
+        ctx = R._session({"text": "x", "product_id": 9001, "user_id": 10086})
+        assert ctx.current_product_id == 9001 and ctx.user_id == 10086
+        assert R._session({"text": "x"}).current_product_id is None
+
     def test_safety_errors_say_why_the_handover_happened(self):
         """**"正常问题被转人工"有两个相反的处置。**
 

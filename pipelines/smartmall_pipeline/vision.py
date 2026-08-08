@@ -211,9 +211,14 @@ ASSET_USER = """标注这张商品图。
 商品名：{name}
 类目：{category}
 
+**只描述这一件商品本身。** 图里可能还有模特身上的其他衣服、背景、道具、
+搭配单品——那些都不是要标注的对象。实测里模特黑色夹克内搭一件红色卫衣，
+模型把"红色"报成了商品颜色。
+
 只描述你在图里**真的看见**的东西：
 
-- colors：主要颜色，用中文常见叫法（米白/藏青/焦糖/墨绿…），最多 3 个
+- colors：**这件商品本身**的主要颜色，用中文常见叫法（米白/藏青/焦糖…），
+  最多 3 个。内搭、背景、模特的其他单品一律不算
 - pattern：图案，如 纯色 / 条纹 / 波点 / 印花 / 格纹
 - silhouette：版型轮廓，如 宽松直筒 / 修身 / A 字 / 束脚
 - neckline：领型（没有就填空字符串）
@@ -253,12 +258,17 @@ class ProductFacts:
     image_path: str = ""
 
 
-def unobservable_claims(desc: dict[str, Any]) -> list[str]:
+def unobservable_claims(desc: dict[str, Any], exempt: str = "") -> list[str]:
     """揪出 VLM 说了它看不出来的东西。
 
     提示词里已经禁止过一次，这里再用规则复查——**提示词是请求，不是约束**。
     实测里模型很愿意顺口补一句"采用优质羊毛面料"，而这句话一旦进了知识库，
     客服就会当事实说给用户听。
+
+    ``exempt`` 是商品名。**品类名里带成分词不算越界**——首轮实测三条误报
+    全出在这儿：「轻薄保暖白鸭绒羽绒服」被判"羽绒"越界、「牛皮小方砖单肩包」
+    被判"牛皮"越界。模型只是在称呼这件商品，而这个叫法是店铺自己挂出来的。
+    **复述店铺已经公开的事实，不是模型在编。**
 
     只查自由文本字段：结构化字段是枚举值，编不出材质来。
     """
@@ -268,12 +278,41 @@ def unobservable_claims(desc: dict[str, Any]) -> list[str]:
         " ".join(str(x) for x in (desc.get("details") or [])),
     ])
     for word in FORBIDDEN_TOPICS:
-        if word in text:
+        if word in text and word not in exempt:
             hits.append(word)
     # 数字 + 单位：克重、尺寸的另一种写法，正则比关键词更稳
     if re.search(r"\d+\s*(?:g|克|cm|厘米|mm)", text, re.I):
         hits.append("含具体数值")
     return hits
+
+
+#: 颜色归并表。"藏青"和"蓝"、"米白"和"白"不该算作不符——
+#: 首轮实测里 9009（SKU 写"蓝"，模型说"藏青"）就是这么误报的。
+_COLOR_BASE = {
+    "蓝": ("藏青", "深蓝", "宝蓝", "天蓝", "海军蓝", "牛仔蓝", "湖蓝"),
+    "白": ("米白", "象牙白", "奶白", "米色", "本白", "乳白"),
+    "红": ("酒红", "正红", "大红", "砖红", "枣红", "玫红"),
+    "绿": ("墨绿", "军绿", "草绿", "橄榄绿", "青绿"),
+    "灰": ("浅灰", "深灰", "银灰", "烟灰"),
+    "棕": ("咖啡", "焦糖", "驼色", "卡其", "棕色"),
+    "粉": ("藕粉", "浅粉", "豆沙粉"),
+    "黑": ("炭黑", "墨黑"),
+}
+
+#: 出现在"颜色"规格位上的**花色词**。真实电商的"颜色分类"经常放的不是颜色
+#: （淘宝上一半的连衣裙"颜色"是"碎花""波点"），拿它去比对具体颜色必然对不上。
+#: 首轮实测里 9003（波点）与 9012（撞色）的五条误报全出在这儿。
+_PATTERN_WORDS = ("波点", "撞色", "碎花", "条纹", "格纹", "印花", "拼色",
+                  "花色", "图案", "迷彩", "豹纹")
+
+
+def _base_color(c: str) -> str:
+    """归到基础色。认不出来就原样返回。"""
+    c = c.strip().rstrip("色")
+    for base, variants in _COLOR_BASE.items():
+        if c == base or any(v.rstrip("色") == c for v in variants):
+            return base
+    return c
 
 
 def color_conflicts(desc: dict[str, Any], facts: ProductFacts) -> list[str]:
@@ -283,15 +322,24 @@ def color_conflicts(desc: dict[str, Any], facts: ProductFacts) -> list[str]:
     页面上看着挺好，只有客服答"这款有藏青色"而图里是红的时候才暴露，
     那时已经在用户面前了。
 
-    宽松匹配：SKU 写"米白"、模型说"米白色"或"白"，算同一个。
+    比对前要过两道归一，否则报出来的全是噪音（首轮实测 7 条误报里 5 条
+    出在这两处）：
+
+    1. **花色词不参与比对。** SKU 的"颜色"位上写着"波点""撞色"时，
+       它压根不是一个颜色，拿任何颜色去比都不符。
+    2. **同色系归并。** SKU 写"蓝"、模型说"藏青"，是同一个。
     """
-    if not facts.sku_colors:
+    real = [c for c in facts.sku_colors
+            if not any(p in c for p in _PATTERN_WORDS)]
+    if not real:
+        # 整个商品的"颜色"位都是花色词，这一项无从判断——
+        # 报不出来比报一堆假警报好
         return []
-    seen = [str(c).strip() for c in (desc.get("colors") or []) if str(c).strip()]
+
+    bases = {_base_color(s) for s in real}
     out = []
-    for c in seen:
-        norm = c.rstrip("色")
-        if not any(norm in s or s.rstrip("色") in norm for s in facts.sku_colors):
+    for c in (str(x).strip() for x in (desc.get("colors") or [])):
+        if c and _base_color(c) not in bases:
             out.append(c)
     return out
 
@@ -336,13 +384,14 @@ def describe_asset(
         return result
 
     result.desc = desc
-    result.flags = [f"越界描述:{w}" for w in unobservable_claims(desc)]
+    result.flags = [f"越界描述:{w}"
+                    for w in unobservable_claims(desc, exempt=facts.name)]
     result.flags += [f"颜色与SKU不符:{c}" for c in color_conflicts(desc, facts)]
     result.item = to_knowledge_item(desc, facts, flags=result.flags)
     return result
 
 
-def _clean(desc: dict[str, Any]) -> dict[str, Any]:
+def _clean(desc: dict[str, Any], exempt: str = "") -> dict[str, Any]:
     """把越界内容从描述里剔掉，而不是整条丢弃。
 
     整条丢掉的话，一句多余的"优质面料"就废掉了一整条本来正确的颜色版型
@@ -353,12 +402,12 @@ def _clean(desc: dict[str, Any]) -> dict[str, Any]:
     if text:
         kept = [
             s for s in re.split(r"(?<=[。；;])", text)
-            if s.strip() and not unobservable_claims({"description": s})
+            if s.strip() and not unobservable_claims({"description": s}, exempt)
         ]
         out["description"] = "".join(kept)
     out["details"] = [
         d for d in (out.get("details") or [])
-        if not unobservable_claims({"details": [d]})
+        if not unobservable_claims({"details": [d]}, exempt)
     ]
     return out
 
@@ -378,7 +427,7 @@ def to_knowledge_item(
     模型的话直接当事实——而"能不能被别的数据印证"恰好是一条可判定的界线。
     """
     flags = flags or []
-    d = _clean(desc)
+    d = _clean(desc, exempt=facts.name)
 
     lines = [f"商品：{facts.name}"]
     if facts.category:
@@ -395,10 +444,16 @@ def to_knowledge_item(
     ]
     lines += [f"{k}：{v}" for k, v in seen if v]
 
-    # 权威属性来自 product_attr，不是模型看出来的。合进同一条知识里，
+    # 权威属性来自 product_attr / sku，不是模型看出来的。合进同一条知识里，
     # 客服才不需要为"颜色"和"材质"分别检索两次
-    if facts.attrs:
+    if facts.attrs or facts.sku_colors:
         lines.append("—— 以下为商品档案登记值 ——")
+        if facts.sku_colors:
+            # **可选颜色必须写进来。** 实测漏掉它的代价："这款有藏青色吗"
+            # 词汇覆盖率只有 0.057——藏青确实在 SKU 里，却一个字都没进知识库，
+            # 于是被判成"知识库里根本没有"而转人工。
+            # 主图只拍得到一个颜色，另外几个色只有档案里有。
+            lines.append(f"可选颜色：{'、'.join(facts.sku_colors)}")
         lines += [f"{k}：{v}" for k, v in facts.attrs.items()]
 
     if d.get("description"):

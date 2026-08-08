@@ -84,6 +84,34 @@ class TestUnobservableClaims:
         """
         assert not unobservable_claims({"description": text}), f"误伤：{text}"
 
+    @pytest.mark.parametrize("name,text", [
+        ("轻薄保暖白鸭绒羽绒服", "这件羽绒服版型修身，绗缝格纹明显。"),
+        ("牛皮小方砖单肩包",     "牛皮单肩包，方形轮廓，金属锁扣。"),
+        ("头层牛皮系带马丁短靴", "棕色牛皮短靴，六孔系带，厚底。"),
+    ])
+    def test_words_from_the_product_name_are_not_fabrication(self, name, text):
+        """**首轮实测 7 条误报里 3 条出在这儿。**
+
+        品类名本身带成分词——"羽绒服""牛皮包"。模型这么说只是在称呼这件
+        商品，而这个叫法是店铺自己挂出来的。**复述店铺已公开的事实，
+        不是模型在编。**
+
+        不豁免的话，凡是品类名带材质的商品永远进不了自动通过，
+        而那恰恰是服装类目里最常见的一批。
+        """
+        assert not unobservable_claims({"description": text}, exempt=name)
+
+    def test_the_exemption_is_narrow(self):
+        """豁免只针对商品名里出现过的词，不是整句放行。
+
+        "牛皮包"可以说，但"采用头层牛皮，克重 320g"里的克重照拦。
+        """
+        hits = unobservable_claims(
+            {"description": "牛皮单肩包，克重约 320g。"},
+            exempt="牛皮小方砖单肩包",
+        )
+        assert "牛皮" not in hits and "克重" in hits
+
     def test_details_are_checked_too(self):
         """越界内容藏在 details 里一样要抓——那也是会进知识库的自由文本。"""
         assert unobservable_claims({"details": ["罗纹袖口", "320g 加厚"]})
@@ -136,6 +164,36 @@ class TestColorConflicts:
         f = ProductFacts(product_id=1, name="包", image_path=img)
         assert color_conflicts({"colors": ["酒红"]}, f) == []
 
+    @pytest.mark.parametrize("sku,seen", [
+        ("蓝", "藏青"), ("白", "米白"), ("红", "酒红"),
+        ("绿", "墨绿"), ("黑", "炭黑"),
+    ])
+    def test_same_family_colors_are_not_a_conflict(self, img, sku, seen):
+        """**首轮实测的另一批误报。** SKU 写"蓝"、模型说"藏青"，是同一个。
+
+        不归并的话报出来的全是噪音，而噪音多了真正的"图配错商品"
+        就会被淹在里面——那正是这个检查唯一要抓的东西。
+        """
+        f = ProductFacts(product_id=1, name="x", sku_colors=[sku], image_path=img)
+        assert color_conflicts({"colors": [seen]}, f) == []
+
+    @pytest.mark.parametrize("pattern", ["波点", "撞色", "碎花", "条纹"])
+    def test_pattern_words_in_the_color_slot_disable_the_check(self, img, pattern):
+        """真实电商的"颜色分类"经常放的不是颜色——淘宝上一半的连衣裙
+        写的是"碎花""波点"。拿它跟具体颜色比，必然全部不符。
+
+        实测里 9003（波点）和 9012（撞色）贡献了五条假警报。
+        """
+        f = ProductFacts(product_id=1, name="裙", sku_colors=[pattern],
+                         image_path=img)
+        assert color_conflicts({"colors": ["酒红", "白"]}, f) == []
+
+    def test_a_genuinely_wrong_photo_is_still_caught(self, img):
+        """归一化不能把这个检查废掉——它存在的全部理由就是抓配错的图。"""
+        f = ProductFacts(product_id=1, name="针织衫", sku_colors=["米白", "藏青"],
+                         image_path=img)
+        assert color_conflicts({"colors": ["荧光绿"]}, f) == ["荧光绿"]
+
 
 # ---------------------------------------------------------------- 组装
 
@@ -149,6 +207,18 @@ class TestKnowledgeItem:
         item = to_knowledge_item({"colors": ["米白"], "confidence": 0.9}, facts)
         assert "100%羊毛" in item.content and "320g" in item.content
         assert "商品档案登记值" in item.content, "要标明这段不是看出来的"
+
+    def test_available_colors_are_written_into_the_knowledge(self, facts):
+        """**实测抓到的漏洞。** "这款有藏青色吗"词汇覆盖率只有 0.057——
+        藏青确实在 SKU 里，却一个字都没进知识库，于是被判成"知识库里
+        根本没有"而转人工。
+
+        主图只拍得到一个颜色，另外几个色只有档案里有。可选颜色和材质
+        一样是权威数据，必须写进条目。
+        """
+        item = to_knowledge_item({"colors": ["米白"]}, facts)
+        assert "藏青" in item.content, "SKU 里有的颜色必须能被检索到"
+        assert "可选颜色" in item.content
 
     def test_modality_and_source_mark_the_path(self, facts):
         item = to_knowledge_item({"colors": ["米白"]}, facts)
