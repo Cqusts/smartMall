@@ -221,6 +221,72 @@ def cmd_traces(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    """跑评测集。
+
+    这是整个项目里唯一**测量**而非断言的部分：单测证明代码按我写的
+    那样跑，评测证明这套系统在真实输入上管用。
+    """
+    import sys as _sys
+
+    from ..eval import runner as R
+
+    deps = _build_deps(args)
+    names = [args.suite] if args.suite != "all" else list(R.RUNNERS)
+    baseline = R.load_baseline()
+    outcomes, failed = {}, False
+
+    for name in names:
+        samples = R.load(name)
+        if args.limit:
+            samples = samples[: args.limit]
+        print(f"\n==> {name}（{len(samples)} 条）")
+
+        def tick(i, total, _n=name):
+            print(f"\r  {i}/{total}", end="", flush=True)
+
+        out = R.RUNNERS[name](deps, samples, progress=tick)
+        print("\r" + " " * 20 + "\r", end="")
+        print(out.render(_TITLES.get(name, name)))
+
+        note = R.compare_baseline(name, out.report, baseline)
+        if note:
+            print(f"\n{note}")
+            if note.startswith("✗"):
+                failed = True
+
+        errs = list(R.iter_errors(out, args.show_errors))
+        if errs:
+            print("\n  错例（改哪里看这里，不是看总分）：")
+            for e in errs:
+                extra = {k: v for k, v in e.items() if k != "text"}
+                print(f"    「{e['text']}」 {extra}")
+
+        outcomes[name] = {
+            "accuracy": round(out.report.accuracy, 4),
+            "macro_f1": round(out.report.macro_f1, 4),
+            "samples": len(samples),
+        }
+        failed = failed or not out.passed
+
+    if args.save_baseline:
+        # 只在全绿时写基线，否则会把一次退步固化成新标准
+        if failed:
+            print("\n✗ 有门禁未通过，不写基线——那会把退步固化成新标准")
+        else:
+            print(f"\n✅ 基线已更新：{R.save_baseline(outcomes)}")
+
+    print()
+    return 1 if failed else 0
+
+
+_TITLES = {
+    "intent": "意图分类（七类）",
+    "negative": "拒答（知识库没有的问题必须转人工）",
+    "safety": "安全（注入/违禁拦截，同时不误伤正常提问）",
+}
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """起 Web 调试台。
 
@@ -282,6 +348,15 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--reason", default="",
                    help="答非所问 / 信息错误 / 态度生硬 / 太啰嗦")
     s.set_defaults(func=cmd_feedback)
+
+    s = sub.add_parser("eval", parents=[common], help="跑评测集（意图/拒答/安全）")
+    s.add_argument("--suite", default="all",
+                   choices=["all", "intent", "negative", "safety"])
+    s.add_argument("--limit", type=int, default=0, help="只跑前 N 条，试水用")
+    s.add_argument("--show-errors", type=int, default=8)
+    s.add_argument("--save-baseline", action="store_true",
+                   help="把本次结果写成基线（仅在门禁全过时生效）")
+    s.set_defaults(func=cmd_eval)
 
     s = sub.add_parser("serve", help="起 Web 调试台（流式对话 + 诊断面板）")
     s.add_argument("--host", default="127.0.0.1")

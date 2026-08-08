@@ -1,0 +1,100 @@
+{"text":"这件是什么面料的","intent":"product_knowledge"}
+{"text":"含羊毛百分之多少","intent":"product_knowledge"}
+{"text":"会起球吗","intent":"product_knowledge"}
+{"text":"这个厚不厚啊 冬天能穿吗","intent":"product_knowledge"}
+{"text":"是不是纯棉的","intent":"product_knowledge"}
+{"text":"克重多少","intent":"product_knowledge"}
+{"text":"这款怎么洗","intent":"product_knowledge"}
+{"text":"会不会缩水","intent":"product_knowledge"}
+{"text":"能机洗吗还是只能干洗","intent":"product_knowledge"}
+{"text":"掉色吗","intent":"product_knowledge"}
+{"text":"里面有内衬吗","intent":"product_knowledge"}
+{"text":"这个包是真皮的还是pu的","intent":"product_knowledge"}
+{"text":"羽绒服含绒量多少","intent":"product_knowledge"}
+{"text":"版型是宽松的还是修身的","intent":"product_knowledge"}
+{"text":"有没有味道啊 新买的","intent":"product_knowledge"}
+{"text":"这个颜色会不会显黑","intent":"product_knowledge"}
+{"text":"衣服长度到哪里","intent":"product_knowledge"}
+{"text":"能不能水洗","intent":"product_knowledge"}
+{"text":"这款和上一季的有什么区别","intent":"product_knowledge"}
+{"text":"面料透气吗","intent":"product_knowledge"}
+{"text":"160穿什么码","intent":"sizing"}
+{"text":"我165 110斤选M还是L","intent":"sizing"}
+{"text":"这个偏大还是偏小","intent":"sizing"}
+{"text":"有没有尺码表","intent":"sizing"}
+{"text":"胸围90穿多大的","intent":"sizing"}
+{"text":"我平时穿M 这个要拍多大","intent":"sizing"}
+{"text":"175的男生穿L行吗","intent":"sizing"}
+{"text":"腰围偏小吗 我腰比较粗","intent":"sizing"}
+{"text":"是标准码吗","intent":"sizing"}
+{"text":"两个码之间怎么选","intent":"sizing"}
+{"text":"肩宽多少厘米","intent":"sizing"}
+{"text":"XL还有吗 我怕M小了","intent":"sizing"}
+{"text":"120斤穿S会不会紧","intent":"sizing"}
+{"text":"这个尺码正常吗要不要大一码","intent":"sizing"}
+{"text":"我想买宽松点的 该选哪个码","intent":"sizing"}
+{"text":"还有货吗","intent":"realtime_stock_price"}
+{"text":"多少钱","intent":"realtime_stock_price"}
+{"text":"这款现在什么价","intent":"realtime_stock_price"}
+{"text":"米白色M码还有库存吗","intent":"realtime_stock_price"}
+{"text":"现在有活动吗","intent":"realtime_stock_price"}
+{"text":"能便宜多少 有券吗","intent":"realtime_stock_price"}
+{"text":"什么时候补货","intent":"realtime_stock_price"}
+{"text":"黑色是不是卖完了","intent":"realtime_stock_price"}
+{"text":"双十一会降价吗","intent":"realtime_stock_price"}
+{"text":"这个价格是最终价吗","intent":"realtime_stock_price"}
+{"text":"满减怎么算","intent":"realtime_stock_price"}
+{"text":"L码什么时候有货","intent":"realtime_stock_price"}
+{"text":"原价多少现在多少","intent":"realtime_stock_price"}
+{"text":"库存还剩几件","intent":"realtime_stock_price"}
+{"text":"现在下单是这个价吗","intent":"realtime_stock_price"}
+{"text":"我的快递到哪了","intent":"order_logistics"}
+{"text":"订单2026080100001什么时候发货","intent":"order_logistics"}
+{"text":"我昨天下的单发了吗","intent":"order_logistics"}
+{"text":"帮我查下物流","intent":"order_logistics"}
+{"text":"怎么还没收到 都三天了","intent":"order_logistics"}
+{"text":"我的订单号是2026080200002 查一下状态","intent":"order_logistics"}
+{"text":"发的什么快递","intent":"order_logistics"}
+{"text":"单号是多少","intent":"order_logistics"}
+{"text":"显示已签收但我没收到","intent":"order_logistics"}
+{"text":"我这单退款到账了吗","intent":"order_logistics"}
+{"text":"能改地址吗 我下单填错了","intent":"order_logistics"}
+{"text":"什么时候能到 我急着穿","intent":"order_logistics"}
+{"text":"物流一直没更新","intent":"order_logistics"}
+{"text":"我买的那件在哪了","intent":"order_logistics"}
+{"text":"帮我看看订单进度","intent":"order_logistics"}
+{"text":"怎么退货","intent":"aftersale"}
+{"text":"退货运费谁承担","intent":"aftersale"}
+{"text":"支持七天无理由吗","intent":"aftersale"}
+{"text":"能换码吗","intent":"aftersale"}
+{"text":"收到货有问题怎么办","intent":"aftersale"}
+{"text":"质量问题怎么处理","intent":"aftersale"}
+{"text":"退货流程是什么","intent":"aftersale"}
+{"text":"吊牌剪了还能退吗","intent":"aftersale"}
+{"text":"多久之内可以申请退换","intent":"aftersale"}
+{"text":"换货要重新付运费吗","intent":"aftersale"}
+{"text":"有质保吗","intent":"aftersale"}
+{"text":"洗过了能退吗","intent":"aftersale"}
+{"text":"退货地址在哪","intent":"aftersale"}
+{"text":"退款一般几天到账","intent":"aftersale"}
+{"text":"发错货了怎么办","intent":"aftersale"}
+{"text":"能便宜点吗","intent":"sensitive"}
+{"text":"少20块我就买","intent":"sensitive"}
+{"text":"给个优惠呗 老客户了","intent":"sensitive"}
+{"text":"我要投诉你们","intent":"sensitive"}
+{"text":"这什么破质量 我要退钱","intent":"sensitive"}
+{"text":"再不处理我就去12315","intent":"sensitive"}
+{"text":"能不能包邮 不包邮我不要了","intent":"sensitive"}
+{"text":"我要求全额退款并且赔偿","intent":"sensitive"}
+{"text":"你们这是虚假宣传","intent":"sensitive"}
+{"text":"抹个零吧","intent":"sensitive"}
+{"text":"在吗","intent":"chitchat"}
+{"text":"你好","intent":"chitchat"}
+{"text":"谢谢啦","intent":"chitchat"}
+{"text":"好的 我再看看","intent":"chitchat"}
+{"text":"嗯嗯","intent":"chitchat"}
+{"text":"辛苦了","intent":"chitchat"}
+{"text":"在的话回我一下","intent":"chitchat"}
+{"text":"哈喽","intent":"chitchat"}
+{"text":"没事了 打扰了","intent":"chitchat"}
+{"text":"晚上好","intent":"chitchat"}
