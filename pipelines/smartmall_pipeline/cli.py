@@ -215,7 +215,27 @@ def cmd_clean(args: argparse.Namespace) -> int:
     print(f"==> 从 ODS 拉取最多 {args.limit} 条未处理对话")
     dialogues = ods.fetch_unprocessed(limit=args.limit)
     if not dialogues:
-        print("  没有待处理的对话。先跑 `cli ingest` 造一批。")
+        # 「没有待处理」有两种完全不同的原因，处置也完全不同：
+        # ODS 是空的要去 ingest，都清完了则该往下走 index。
+        # 只说一句"先跑 ingest"会把已经清完的人指向重复造数据。
+        from sqlalchemy import text as _sql
+
+        with ods.engine.connect() as conn:
+            total = conn.execute(
+                _sql("SELECT COUNT(*) FROM ods_raw_dialogue")
+            ).scalar() or 0
+            done = conn.execute(
+                _sql("SELECT COUNT(*) FROM ods_process_log")
+            ).scalar() or 0
+
+        if total == 0:
+            print("  ODS 里一条原始对话都没有。先跑 `ingest` 造一批：")
+            print("    smartmall-pipeline ingest --count 400")
+        else:
+            print(f"  ODS 共 {total} 条，已全部处理完（process_log {done} 条）。")
+            print("  下一步：`index` 向量化，或 `ingest` 再造一批。")
+            print("  想重新清洗（比如改了清洗规则）：`reset --yes` 清掉派生数据，"
+                  "ODS 原始数据会保留。")
         return 0
     print(f"  取到 {len(dialogues)} 条")
 
@@ -397,6 +417,14 @@ def cmd_stats(args: argparse.Namespace) -> int:
     repo = DwsRepository.from_env()
     queries = [
         ("ODS 原始对话", "SELECT COUNT(*) FROM ods_raw_dialogue"),
+        # 待处理量是流水线最重要的一个数：clean 说"没有待处理的对话"时，
+        # 得能立刻分清是"都清完了"还是"ODS 本身就是空的"
+        ("  已处理", "SELECT COUNT(*) FROM ods_process_log"),
+        ("    其中产出知识", "SELECT COUNT(*) FROM ods_process_log WHERE outcome='passed'"),
+        ("    其中被淘汰", "SELECT COUNT(*) FROM ods_process_log WHERE outcome='dropped'"),
+        ("  待处理", "SELECT COUNT(*) FROM ods_raw_dialogue o "
+                     "LEFT JOIN ods_process_log p ON p.ods_id = o.id "
+                     "WHERE p.id IS NULL"),
         ("DWD 标准化会话", "SELECT COUNT(*) FROM dwd_dialogue_session"),
         ("知识条目（全部）", "SELECT COUNT(*) FROM knowledge_item WHERE deleted=0"),
         ("  已审核", "SELECT COUNT(*) FROM knowledge_item WHERE deleted=0 AND review_status IN ('approved','revised')"),
