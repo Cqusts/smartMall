@@ -500,6 +500,19 @@ def cmd_index(args: argparse.Namespace) -> int:
         return 1
     print(f"==> 向量化后端：{provider.name}")
 
+    store = LocalVectorStore(engine=repo.engine)
+
+    # 换后端必须在**写入前**拦住。混用检测在加载索引时才报错，
+    # 那时候已经晚了：被拦住的是下游（Agent 起不来），
+    # 而制造混用的是这一步。
+    existing = store.providers_in_index()
+    others = {p: n for p, n in existing.items() if p and p != provider.name}
+    if others and not args.rebuild:
+        print(f"\n✗ 索引里已有其他后端的向量：{others}")
+        print(f"  当前后端是 {provider.name}，混进去会让相似度失去意义。")
+        print("  用 `index --rebuild` 全量重建（会删掉旧后端的向量）。")
+        return 1
+
     where = (
         "k.deleted = 0 AND k.review_status IN ('approved','revised')"
         if args.rebuild
@@ -517,6 +530,13 @@ def cmd_index(args: argparse.Namespace) -> int:
         return 0
     print(f"  待处理 {len(rows)} 条")
 
+    if args.rebuild and len(rows) == args.limit:
+        # 重建被 limit 截断的话，取不到的条目会连向量都没有——
+        # 检索时静默漏掉，比"混用"更隐蔽：不报错，只是永远查不到
+        print(f"\n✗ 重建时正好命中 --limit {args.limit}，可能还有条目没取到。")
+        print("  调大 --limit 重试，否则部分知识会没有向量、永远检索不到。")
+        return 1
+
     # 检索文本要带上标题：用户的提问更接近「问题」而非「答案」，
     # 只索引答案会显著降低召回
     payload = [
@@ -524,7 +544,15 @@ def cmd_index(args: argparse.Namespace) -> int:
         for r in rows
     ]
 
-    store = LocalVectorStore(engine=repo.engine)
+    if args.rebuild:
+        # REPLACE INTO 只覆盖主键相同的行。切分数量变了、条目被下架、
+        # 或者换了后端，都会留下没人覆盖到的旧行——它们正是"混用"的来源。
+        # 重建就要重建干净，先删再写。
+        n_other = store.delete_other_providers(provider.name)
+        store.delete_by_item([r["id"] for r in rows])
+        if n_other:
+            print(f"  已清理其他后端的旧向量 {n_other} 行")
+
     # 批次上限由 provider 声明——调用方猜错的后果是跑到一半被服务端 400
     batch = args.batch_size or getattr(provider, "max_batch", 10)
     print(f"  批次大小 {batch}")

@@ -135,6 +135,37 @@ class LocalVectorStore:
         with self.engine.begin() as conn:  # type: ignore[attr-defined]
             conn.execute(sql(f"DELETE FROM kb_embedding WHERE item_id IN ({ids})"))
 
+    def providers_in_index(self) -> dict[str, int]:
+        """索引里各后端各有多少行。
+
+        换后端前必须先问这个问题。混用检测在 :meth:`load` 里才报错，
+        那时候已经晚了——用户是在启动 Agent 时被拦住的，
+        而制造混用的是上一步的 index。
+        """
+        from sqlalchemy import text as sql
+
+        with self.engine.begin() as conn:  # type: ignore[attr-defined]
+            return {
+                r[0]: r[1]
+                for r in conn.execute(sql(
+                    "SELECT provider, COUNT(*) FROM kb_embedding GROUP BY provider"
+                ))
+            }
+
+    def delete_other_providers(self, provider_name: str) -> int:
+        """删掉非当前后端的向量。
+
+        它们本来就不可用——不同后端的向量不可比。留着只会让下一次
+        加载直接报"混用"，而不是留下什么可回退的东西。
+        """
+        from sqlalchemy import text as sql
+
+        with self.engine.begin() as conn:  # type: ignore[attr-defined]
+            return conn.execute(
+                sql("DELETE FROM kb_embedding WHERE provider <> :p"),
+                {"p": provider_name},
+            ).rowcount or 0
+
     # ---------------------------------------------------------------- 加载
 
     def load(self) -> int:
