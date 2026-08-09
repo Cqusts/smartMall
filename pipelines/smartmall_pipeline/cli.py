@@ -684,17 +684,33 @@ def cmd_clip(args: argparse.Namespace) -> int:
               f"（当前 {seg_model}）。")
         return 1
 
-    print(f"  分段 {len(segments)} 段 · 已对齐 {len(aligned)} · "
-          f"待人工确认 {len(pending)}")
+    guessed = [s for s in pending if s.binding == "model"]
+    print(f"  分段 {len(segments)} 段 · 文本证实 {len(aligned)} · "
+          f"待人工确认 {len(pending)}"
+          + (f"（其中 {len(guessed)} 段只有模型猜的商品）" if guessed else ""))
 
+    _BIND = {"spoken": "✓说到", "model": "?模型猜", "none": "—未绑定"}
     for s in segments:
         mark = f" ←新叫法「{s.matched_alias}」" if s.matched_alias else ""
         print(f"    {s.begin_ms / 1000:>7.1f}-{s.end_ms / 1000:<7.1f}s "
-              f"{pad(s.kind, 8)} #{s.product_id or '待定'}{mark}  "
-              f"{truncate(s.topic, 30)}")
+              f"{pad(s.kind, 8)} {pad(_BIND[s.binding], 8)} "
+              f"#{s.product_id or '待定'}{mark}  {truncate(s.topic, 28)}")
+
+    if guessed and not aligned:
+        # 全靠模型猜 = 这场直播讲的多半根本不是库里的商品。
+        # 给模型一份清单它一定会挑一个，"都不是"要由别的东西来说
+        print("\n  ⚠ 没有任何一段在转写里出现过商品名。"
+              "\n    多半是这场直播讲的商品不在库里——模型拿到清单一定会从中挑一个，"
+              "\n    别把它的选择当成识别结果。切片与话术仍会入库，但都需人工确认。")
+
+    # 切片与入库覆盖**所有**有用片段，包括只有模型猜出商品的那些——
+    # 内容本身是有价值的，不确定的只是"讲的哪件商品"。
+    # 那个不确定性由 asset_product_rel.bind_conf 与知识条目里空着的
+    # product_ids 表达，而不是靠整段丢掉
+    usable = aligned + guessed
 
     out_dir = Path(args.out or f"clips/{Path(args.video).stem}")
-    result = cut_segments(args.video, aligned, out_dir, precise=args.precise)
+    result = cut_segments(args.video, usable, out_dir, precise=args.precise)
     print(f"\n  出口①素材：{len(result.clips)} 个切片 → {out_dir}")
     for e in result.errors:
         print(f"    ✗ {e}")
@@ -702,11 +718,13 @@ def cmd_clip(args: argparse.Namespace) -> int:
         print(f"    跳过：{result.skipped}")
 
     items = to_knowledge_items(
-        aligned, source_ref=Path(args.video).stem,
+        usable, source_ref=Path(args.video).stem,
         category_of={p["id"]: p["category_id"] for p in products},
     )
+    unbound = sum(1 for i in items if not i.product_ids)
     if args.dry_run:
-        print(f"\n  出口②知识：{len(items)} 条（--dry-run 未写库）")
+        print(f"\n  出口②知识：{len(items)} 条（--dry-run 未写库）"
+              + (f"，其中 {unbound} 条未绑商品" if unbound else ""))
         if items:
             print(f"\n  样例：{items[0].title}\n    {items[0].content}")
         return 0
@@ -727,6 +745,10 @@ def cmd_clip(args: argparse.Namespace) -> int:
 
     n = repo.save_knowledge_items(items)
     print(f"\n  出口②知识：已写入 knowledge_item {n} 条（全部 pending）")
+    if unbound:
+        print(f"    其中 {unbound} 条**没有绑定商品**——绑定只有模型猜的，"
+              "转写里找不到商品名。")
+        print("    挂错商品比不挂更糟：用户问 A 商品会被答以 B 商品的话术。")
     print("    转写有错字、模型整理有偏差，这条路上没有任何东西印证过它——")
     print("    跑 `smartmall-pipeline approve <id>` 人工确认后才进索引")
     try:

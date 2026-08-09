@@ -72,6 +72,18 @@ class Segment:
     raw_text: str = ""
     matched_alias: str = ""
     """主播实际用的叫法。人工确认后回写进商品别名，成为下一场的热词。"""
+    binding: str = "none"
+    """商品绑定的可信度来源，三态：
+
+    * ``spoken`` —— 主播说出口的叫法在文本里命中了。字面匹配，可信。
+    * ``model`` —— 只有模型猜的，文本里**一个商品名都找不到**。
+      未经证实，必须进人工确认队列。
+    * ``none``  —— 压根没绑上。
+
+    **不分开就等于默认相信模型。** 实测：一段讲"防晒 UPF50+"的录像，
+    库里根本没有防晒衣，模型把三段全绑到了"高腰垂感束脚休闲长裤"
+    （材质醋酸纤维），而报告显示"已对齐 3 · 待人工确认 0"。
+    """
 
     @property
     def duration_ms(self) -> int:
@@ -207,13 +219,27 @@ def _dedup(segs: list[Segment]) -> list[Segment]:
 def align_products(
     segments: Sequence[Segment], products: Sequence[dict[str, Any]]
 ) -> tuple[list[Segment], list[Segment]]:
-    """把没对上商品的片段用文本再兜一次，返回 ``(已对齐, 待人工确认)``。
+    """用文本校验模型给的商品绑定，返回 ``(可信, 待人工确认)``。
 
     模型分段时已经给过 product_id，但它看的是一个窗口的上下文，
     经常在商品切换处判错。这里用主播实际说出口的**叫法**再校一遍——
     命中了就记下那个叫法（``matched_alias``），人工确认后回写成别名，
     下一场直播它就是 ASR 热词。这就是闭环。
+
+    **第一版这个函数只能确认、不能否定，于是它永远放行。**
+    实测抓到：一段讲"防晒 UPF50+"的录像，商品库里根本没有防晒衣，
+    模型把三段全绑到了「高腰垂感束脚休闲长裤」（材质醋酸纤维），
+    而文本里一个商品名都没出现——旧写法不会去动模型给的 id，
+    于是报告显示"已对齐 3 · 待人工确认 0"，一条都没送人工。
+
+    这和检索那边的 ``has_lexical_support`` 是同一个形状的错：一个只有
+    通过分支的判据，等于没有判据。**给模型一份商品清单，它一定会从里面
+    挑一个**——"都不是"这个选项要由别的东西来给。
+
+    所以现在分三态（见 :attr:`Segment.binding`）：文本命中才算可信，
+    模型独断的一律送人工。
     """
+    valid_ids = {int(p["id"]) for p in products}
     lookup: list[tuple[str, int]] = []
     for p in products:
         for name in filter(None, [p.get("short_name"), p.get("name"),
@@ -222,17 +248,30 @@ def align_products(
     # 长的叫法优先：「马丁短靴」比「靴」更可信
     lookup.sort(key=lambda kv: -len(kv[0]))
 
-    aligned, pending = [], []
+    trusted, review = [], []
     for seg in segments:
         text = seg.raw_text or seg.script
+
+        # 模型可能报一个清单里没有的 id（尤其是它在硬凑的时候）
+        if seg.product_id is not None and seg.product_id not in valid_ids:
+            seg.product_id = None
+
+        seg.binding = "none"
         for name, pid in lookup:
             if name and name in text:
                 if seg.product_id != pid:
                     seg.matched_alias = name
                 seg.product_id = pid
+                seg.binding = "spoken"
                 break
-        (aligned if seg.product_id else pending).append(seg)
-    return aligned, pending
+
+        if seg.binding != "spoken" and seg.product_id:
+            # 模型给了商品，但文本里找不到任何商品名——**没有第二个来源
+            # 支持它**。留着 product_id 供人工参考，但不当成已对齐
+            seg.binding = "model"
+
+        (trusted if seg.binding == "spoken" else review).append(seg)
+    return trusted, review
 
 
 # ---------------------------------------------------------------- 出口
@@ -263,8 +302,13 @@ def to_knowledge_items(
             title=seg.topic or f"直播讲解片段 {i + 1}",
             content=seg.script,
             summary=seg.topic or None,
-            product_ids=[seg.product_id] if seg.product_id else [],
-            category_id=category_of.get(seg.product_id or -1),
+            # **只有文本证实过的绑定才写进知识条目。** 知识是直接进检索的，
+            # 而检索会按 product_id 过滤——挂错商品意味着用户问"休闲长裤"
+            # 时被答以"UPF50+ 防晒"。内容留着还有用，错的商品号比没有更糟。
+            product_ids=([seg.product_id]
+                         if seg.product_id and seg.binding == "spoken" else []),
+            category_id=(category_of.get(seg.product_id or -1)
+                         if seg.binding == "spoken" else None),
             tags=["直播", "口播话术"] + (["答疑"] if seg.kind == "qa" else []),
             source="live_clip",
             source_ref=f"{source_ref}#{seg.begin_ms}-{seg.end_ms}",

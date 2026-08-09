@@ -240,6 +240,42 @@ class TestProductAlignment:
         aligned, pending = align_products([seg], PRODUCTS)
         assert not aligned and len(pending) == 1
 
+    def test_a_model_only_guess_is_not_trusted(self):
+        """**这条是三态存在的理由，也是实测抓到的事故。**
+
+        一段讲"防晒 UPF50+"的直播录像，商品库里根本没有防晒衣。模型拿到
+        商品清单，把三段全绑到了「高腰垂感束脚休闲长裤」（材质醋酸纤维），
+        而转写里一个商品名都没出现。旧版这个函数只会"确认或覆盖"，
+        不会否定，于是报告显示"已对齐 3 · 待人工确认 0"，一条都没送人工。
+
+        **给模型一份清单，它一定会从里面挑一个。**"都不是"这个选项
+        必须由别的东西来给。
+        """
+        # 9011 确实在清单里——问题不是 id 不合法，而是**没有第二个来源
+        # 支持它**：转写里一个商品名都没出现
+        seg = Segment(0, 5000, "feature", 9011,
+                      raw_text="这个防晒是UPF50+的，出门晒不黑")
+        trusted, review = align_products([seg], PRODUCTS)
+        assert not trusted, "文本里没有任何商品名，不能算已对齐"
+        assert review and review[0].binding == "model"
+        assert review[0].product_id == 9011, "id 留着供人工参考，只是不当真"
+
+    def test_binding_states_are_distinguished(self):
+        spoken = Segment(0, 1, raw_text="这件针织衫真软")
+        guess = Segment(0, 1, product_id=9001, raw_text="这个特别好穿")
+        none_ = Segment(0, 1, raw_text="今天天气不错")
+        trusted, review = align_products([spoken, guess, none_], PRODUCTS)
+        assert [s.binding for s in trusted] == ["spoken"]
+        assert sorted(s.binding for s in review) == ["model", "none"]
+
+    def test_an_id_outside_the_catalog_is_dropped(self):
+        """模型硬凑时会报一个清单里没有的 id。留着它，下游会拿一个
+        不存在的商品去关联素材。"""
+        seg = Segment(0, 1, product_id=99999, raw_text="这个不错")
+        trusted, review = align_products([seg], PRODUCTS)
+        assert not trusted and review[0].product_id is None
+        assert review[0].binding == "none"
+
     def test_no_alias_recorded_when_the_model_was_already_right(self):
         """模型判对了就不算"新叫法"，别把商品自己的名字回写成别名。"""
         seg = Segment(0, 1, product_id=9001, raw_text="这件针织衫")
@@ -289,10 +325,30 @@ class TestKnowledgeExit:
         items = to_knowledge_items(self._segs(), source_ref="x")
         assert all(i.review_status is ReviewStatus.PENDING for i in items)
 
-    def test_product_binding_is_carried(self):
-        items = to_knowledge_items(self._segs(), source_ref="x",
-                                   category_of={9001: 1024})
+    def test_product_binding_is_carried_when_confirmed(self):
+        segs = [s for s in self._segs()]
+        for s in segs:
+            s.binding = "spoken"
+        items = to_knowledge_items(segs, source_ref="x", category_of={9001: 1024})
         assert items[0].product_ids == [9001] and items[0].category_id == 1024
+
+    def test_an_unconfirmed_binding_is_not_written_into_knowledge(self):
+        """**只有文本证实过的绑定才进知识条目。**
+
+        知识是直接进检索的，检索按 product_id 过滤——挂错商品意味着
+        用户问"休闲长裤"时被答以"UPF50+ 防晒"。内容留着还有用，
+        错的商品号比没有更糟。
+
+        实测抓到的：一段讲防晒的录像，库里没有防晒衣，模型把三段全绑到了
+        「高腰垂感束脚休闲长裤」，而转写里一个商品名都没出现。
+        """
+        segs = self._segs()
+        for s in segs:
+            s.binding = "model"      # 只有模型猜的
+        items = to_knowledge_items(segs, source_ref="x", category_of={9001: 1024})
+        assert items and all(not i.product_ids for i in items)
+        assert all(i.category_id is None for i in items)
+        assert all(i.content for i in items), "内容本身还是有用的，不该丢"
 
     def test_qa_segments_are_tagged(self):
         """答疑类要能被单独捞出来——它们是知识库里质量最高的一批。"""
