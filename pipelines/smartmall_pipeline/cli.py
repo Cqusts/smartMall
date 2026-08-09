@@ -711,13 +711,94 @@ def cmd_clip(args: argparse.Namespace) -> int:
             print(f"\n  样例：{items[0].title}\n    {items[0].content}")
         return 0
 
+    from .clip.register import propose_aliases, register_clips
+
+    live_ref = Path(args.video).stem
+    try:
+        reg = register_clips(repo, result.clips, live_id=args.live_id or 1,
+                             live_title=live_ref, source_ref=live_ref)
+        print(f"    入库 asset {reg.assets} 条 · 关联商品 {reg.relations} 条"
+              + (f" · 跳过重复 {reg.skipped_duplicate} 条"
+                 if reg.skipped_duplicate else ""))
+    except Exception as exc:  # noqa: BLE001
+        # 素材入库失败不该让话术那一路也白跑——两个出口是独立的
+        print(f"    ⚠ 素材入库失败（{type(exc).__name__}: {exc}）")
+        print("      建表：deploy/sql/mysql/02_asset.sql")
+
     n = repo.save_knowledge_items(items)
     print(f"\n  出口②知识：已写入 knowledge_item {n} 条（全部 pending）")
     print("    转写有错字、模型整理有偏差，这条路上没有任何东西印证过它——")
     print("    跑 `smartmall-pipeline approve <id>` 人工确认后才进索引")
+    try:
+        n_alias = propose_aliases(repo, aligned, source_ref=live_ref)
+        if n_alias:
+            print(f"\n  主播叫法待确认 {n_alias} 条 —— 这是闭环的最后一步：")
+            print("    smartmall-pipeline alias list      看提案")
+            print("    smartmall-pipeline alias approve <id>")
+            print("    确认后写进 product.alias，下一场直播它就是 ASR 热词")
+    except Exception as exc:  # noqa: BLE001
+        print(f"\n  ⚠ 叫法队列不可用（{type(exc).__name__}）")
+        print("    建表：deploy/sql/migrations/006_clip_alias_proposal.sql")
+
     if pending:
-        print(f"\n  ⚠ {len(pending)} 段没对上商品，未切片也未入库。"
-              f"确认商品后回写别名，下一场转写就能认出来。")
+        print(f"\n  ⚠ {len(pending)} 段没对上商品，未切片也未入库。")
+    return 0
+
+
+def cmd_alias(args: argparse.Namespace) -> int:
+    """主播叫法的确认队列 —— 切片闭环的最后一环。
+
+    **不自动回写。** 对齐命中的词可能是巧合（"这颜色跟刚才那件米白很像"
+    讲的其实是另一件商品），而错的别名会喂回热词表，让往后每一场直播都
+    朝错的方向偏。这类错误自己会放大，必须有人看一眼。
+    """
+    from sqlalchemy import text
+
+    from .clip.register import apply_alias
+
+    repo = DwsRepository.from_env()
+
+    if args.action == "approve":
+        got = apply_alias(repo, args.proposal_id)
+        if not got:
+            print(f"  ✗ 提案 #{args.proposal_id} 不存在或已处理")
+            return 1
+        pid, alias = got
+        print(f"  ✓ 「{alias}」已写入商品 {pid} 的别名")
+        print("    下一场直播的热词表会包含它，转写不会再听错")
+        return 0
+
+    if args.action == "reject":
+        with repo.engine.begin() as conn:
+            n = conn.execute(text(
+                "UPDATE clip_alias_proposal SET status = 'rejected' "
+                "WHERE id = :i AND status = 'pending'"
+            ), {"i": args.proposal_id}).rowcount
+        print(f"  {'✓ 已驳回' if n else '✗ 提案不存在或已处理'}")
+        return 0 if n else 1
+
+    with repo.engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT p.id, p.product_id, p.alias, p.times, p.sample, "
+            " pr.name AS product_name "
+            "FROM clip_alias_proposal p "
+            "LEFT JOIN product pr ON pr.id = p.product_id "
+            "WHERE p.status = 'pending' ORDER BY p.times DESC, p.id"
+        )).mappings().fetchall()
+
+    if not rows:
+        print("  没有待确认的叫法。跑一次 `clip` 之后再看。")
+        return 0
+
+    print(f"  {pad('#', 5)} {pad('叫法', 16)} {pad('次数', 5)} 商品")
+    print("  " + "─" * 66)
+    for r in rows:
+        print(f"  {pad(str(r['id']), 5)} {pad(str(r['alias']), 16)} "
+              f"{pad(str(r['times']), 5)} "
+              f"{truncate(str(r['product_name'] or r['product_id']), 34)}")
+        if r["sample"]:
+            print(f"        原话：{truncate(str(r['sample']), 60)}")
+    print("\n  确认：smartmall-pipeline alias approve <id>")
     return 0
 
 
@@ -1328,11 +1409,21 @@ def build_parser() -> argparse.ArgumentParser:
     # 真正的默认在 _resolve_model_name 里，从环境变量取
     s.add_argument("--segment-model", help="分段模型名，默认取环境变量")
     s.add_argument("--asr-model", help="覆盖本地 ASR 模型名")
+    s.add_argument("--live-id", type=int, help="直播场次 ID，写进 asset_clip_meta")
     s.add_argument("--out", help="切片输出目录，默认 clips/<视频名>")
     s.add_argument("--precise", action="store_true",
                    help="精确切点（重编码，慢约四倍）；默认按关键帧切")
     s.add_argument("--dry-run", action="store_true", help="不写库")
     s.set_defaults(func=cmd_clip)
+
+    s = sub.add_parser("alias", help="主播叫法确认队列（切片闭环最后一环）")
+    asub = s.add_subparsers(dest="action", required=True)
+    asub.add_parser("list", help="待确认的叫法")
+    a = asub.add_parser("approve", help="确认并写入 product.alias")
+    a.add_argument("proposal_id", type=int)
+    a = asub.add_parser("reject", help="驳回")
+    a.add_argument("proposal_id", type=int)
+    s.set_defaults(func=cmd_alias)
 
     s = sub.add_parser("vision", help="商品图打标：VLM 看图产出商品知识")
     s.add_argument("--product", help="只跑这几个商品，逗号分隔")

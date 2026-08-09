@@ -543,3 +543,247 @@ class TestModelNameResolution:
 
         walk(build_parser())
         assert not bad, f"这些参数把网关别名写死成了默认值：{bad}"
+
+
+# ---------------------------------------------------------------- 出口①素材
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """一套真的（SQLite）建好表的库。
+
+    mock 掉 execute 只能证明"我调了一次"，证明不了那条 INSERT 写得对——
+    而这几条 SQL 里出错的恰恰是列名和方言（LAST_INSERT_ID、INSERT IGNORE、
+    ON DUPLICATE KEY 全是 MySQL 独有的）。
+    """
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'x.db'}")
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE asset (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, asset_no TEXT,
+            modality TEXT, scene TEXT, oss_key TEXT, file_size INT,
+            mime_type TEXT, duration_ms INT, file_hash TEXT, source TEXT,
+            status TEXT, vlm_description TEXT, desc_review_status TEXT,
+            tags TEXT, ai_generated INT DEFAULT 0, deleted INT DEFAULT 0)"""))
+        c.execute(text("""CREATE TABLE asset_product_rel (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, asset_id INT,
+            product_id INT, rel_type TEXT, bind_source TEXT,
+            bind_conf REAL, UNIQUE(asset_id, product_id, rel_type))"""))
+        c.execute(text("""CREATE TABLE asset_clip_meta (
+            asset_id INT PRIMARY KEY, live_id INT, live_title TEXT,
+            start_ms INT, end_ms INT, transcript TEXT, objection_qa TEXT)"""))
+        c.execute(text("""CREATE TABLE product (
+            id INT PRIMARY KEY, name TEXT, alias TEXT)"""))
+        c.execute(text("INSERT INTO product VALUES (9001, '针织衫', NULL)"))
+        c.execute(text("""CREATE TABLE clip_alias_proposal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INT,
+            alias TEXT, times INT DEFAULT 1, source_ref TEXT, sample TEXT,
+            status TEXT DEFAULT 'pending', UNIQUE(product_id, alias))"""))
+
+    class R:
+        pass
+
+    r = R()
+    r.engine = engine
+    return r
+
+
+class TestRegisterClips:
+    """**素材落在磁盘上不算入库。**
+
+    只有进了 asset 表，切片才谈得上被商品详情页挂载、被客服答案引用、
+    被审核流管起来——否则它就是一堆没人知道存在的 mp4。
+
+    用真的 SQLite 跑真的 SQL：mock 掉 execute 只能证明"我调了一次"，
+    证明不了那条 INSERT 写得对。
+    """
+
+    @pytest.fixture
+    def clips(self, tmp_path):
+        from smartmall_pipeline.clip.cut import ClipFile
+
+        out = []
+        for i, (kind, pid, alias) in enumerate(
+            [("feature", 9001, ""), ("qa", 9001, "米白针织")]
+        ):
+            p = tmp_path / f"c{i}.mp4"
+            p.write_bytes(b"fake-video-" + str(i).encode())
+            seg = Segment(i * 9000, (i + 1) * 9000, kind, pid, f"话题{i}",
+                          f"话术{i}", raw_text=f"原话{i}", matched_alias=alias)
+            out.append(ClipFile(segment=seg, path=p, begin_ms=seg.begin_ms,
+                                end_ms=seg.end_ms, bytes=p.stat().st_size))
+        return out
+
+    def test_writes_all_three_tables(self, repo, clips):
+        """三张表一起写。只写主表不写关联的话，素材存在但挂不到商品上，
+        看起来"入库成功"实际没用。"""
+        from sqlalchemy import text
+
+        from smartmall_pipeline.clip.register import register_clips
+
+        r = register_clips(repo, clips, live_id=7, source_ref="live-0801")
+        assert r.assets == 2 and r.relations == 2
+
+        with repo.engine.connect() as c:
+            assert c.execute(text("SELECT COUNT(*) FROM asset")).scalar() == 2
+            assert c.execute(
+                text("SELECT COUNT(*) FROM asset_clip_meta")).scalar() == 2
+            meta = c.execute(text(
+                "SELECT live_id, start_ms, transcript FROM asset_clip_meta "
+                "ORDER BY asset_id")).mappings().first()
+            assert meta["live_id"] == 7 and meta["transcript"] == "原话0"
+
+    def test_spoken_alias_gets_higher_confidence(self, repo, clips):
+        """主播说出口的叫法是字面匹配，模型猜的是概率——不该同等对待。
+        schema 里 bind_conf < 0.85 要进人工队列。"""
+        from sqlalchemy import text
+
+        from smartmall_pipeline.clip.register import register_clips
+
+        register_clips(repo, clips, live_id=7)
+        with repo.engine.connect() as c:
+            confs = [r[0] for r in c.execute(text(
+                "SELECT bind_conf FROM asset_product_rel ORDER BY asset_id"))]
+        assert confs[0] < 0.85 <= confs[1]
+
+    def test_reruns_do_not_duplicate(self, repo, clips):
+        """同一段直播重跑一次不该产生两份素材。按文件 hash 去重。"""
+        from smartmall_pipeline.clip.register import register_clips
+
+        register_clips(repo, clips, live_id=7)
+        again = register_clips(repo, clips, live_id=7)
+        assert again.assets == 0 and again.skipped_duplicate == 2
+
+    def test_clips_are_not_marked_ai_generated(self, repo, clips):
+        """直播切片是真人录像的片段，不是 AI 生成的。标错会给它加上本不该
+        有的 AI 标识角标——那是另一种意义上的不实标注。"""
+        from sqlalchemy import text
+
+        from smartmall_pipeline.clip.register import register_clips
+
+        register_clips(repo, clips, live_id=7)
+        with repo.engine.connect() as c:
+            assert all(r[0] == 0 for r in c.execute(
+                text("SELECT ai_generated FROM asset")))
+
+    def test_qa_script_is_stored_separately(self, repo, clips):
+        """异议处理话术是价值最高的一类，单独存一份便于捞取。"""
+        from sqlalchemy import text
+
+        from smartmall_pipeline.clip.register import register_clips
+
+        register_clips(repo, clips, live_id=7)
+        with repo.engine.connect() as c:
+            qas = [r[0] for r in c.execute(
+                text("SELECT objection_qa FROM asset_clip_meta ORDER BY asset_id"))]
+        assert qas[0] is None and "话术1" in qas[1]
+
+    def test_empty_input_is_a_noop(self, repo):
+        from smartmall_pipeline.clip.register import register_clips
+
+        assert register_clips(repo, [], live_id=1).assets == 0
+
+
+class TestAliasLoop:
+    """**闭环的最后一环。**
+
+    商品名 → 热词 → 转写更准 → 对齐更准 → 主播叫法 → 人工确认 → 回写别名
+    → 下一场的热词。缺了回写这一步，前面那条链就不是环，只是一条线。
+    """
+
+    def test_proposals_are_queued_not_applied(self, repo):
+        """**不自动回写。** 对齐命中的词可能是巧合——"这颜色跟刚才那件
+        米白很像"讲的其实是另一件商品。错别名喂回热词表会让往后每一场
+        直播都朝错的方向偏，这类错误自己会放大。"""
+        from sqlalchemy import text
+
+        from smartmall_pipeline.clip.register import propose_aliases
+
+        segs = [Segment(0, 1, "qa", 9001, "t", "s", raw_text="这件米白真软",
+                        matched_alias="米白")]
+        assert propose_aliases(repo, segs, source_ref="live-0801") == 1
+
+        with repo.engine.connect() as c:
+            row = c.execute(text(
+                "SELECT alias, status, sample FROM clip_alias_proposal"
+            )).mappings().first()
+            assert row["status"] == "pending"
+            assert "这件米白真软" in row["sample"], "人工要看上下文才能判断"
+            # 还没进商品别名
+            assert c.execute(
+                text("SELECT alias FROM product WHERE id=9001")).scalar() is None
+
+    def test_repeats_accumulate(self, repo):
+        """说得越多越可信。次数是人工排序的依据。"""
+        from sqlalchemy import text
+
+        from smartmall_pipeline.clip.register import propose_aliases
+
+        segs = [Segment(0, 1, "qa", 9001, "t", "s", raw_text="x",
+                        matched_alias="米白")]
+        propose_aliases(repo, segs)
+        propose_aliases(repo, segs)
+        with repo.engine.connect() as c:
+            assert c.execute(
+                text("SELECT times FROM clip_alias_proposal")).scalar() == 2
+
+    def test_approve_writes_into_product_alias(self, repo):
+        """写进去之后，下一次 build_hotwords 就会把它算进热词表。"""
+        import json as _j
+
+        from sqlalchemy import text
+
+        from smartmall_pipeline.clip.register import apply_alias, propose_aliases
+
+        propose_aliases(repo, [Segment(0, 1, "qa", 9001, "t", "s",
+                                       raw_text="x", matched_alias="米白")])
+        with repo.engine.connect() as c:
+            pid = c.execute(text("SELECT id FROM clip_alias_proposal")).scalar()
+
+        assert apply_alias(repo, pid) == (9001, "米白")
+        with repo.engine.connect() as c:
+            alias = _j.loads(c.execute(
+                text("SELECT alias FROM product WHERE id=9001")).scalar())
+            assert alias == ["米白"]
+            assert c.execute(
+                text("SELECT status FROM clip_alias_proposal")).scalar() == "approved"
+
+    def test_the_loop_closes_into_hotwords(self, repo):
+        """**把整个环跑一遍。** 确认后的叫法必须真的出现在热词表里，
+        否则这条链只是看起来闭合。"""
+        import json as _j
+
+        from sqlalchemy import text
+
+        from smartmall_pipeline.clip.register import apply_alias, propose_aliases
+
+        propose_aliases(repo, [Segment(0, 1, "qa", 9001, "t", "s",
+                                       raw_text="x", matched_alias="米白")])
+        with repo.engine.connect() as c:
+            pid = c.execute(text("SELECT id FROM clip_alias_proposal")).scalar()
+        apply_alias(repo, pid)
+
+        with repo.engine.connect() as c:
+            alias = _j.loads(c.execute(
+                text("SELECT alias FROM product WHERE id=9001")).scalar())
+        assert "米白" in build_hotwords([
+            {"id": 9001, "name": "针织衫", "short_name": "针织衫", "alias": alias}
+        ])
+
+    def test_approving_twice_is_harmless(self, repo):
+        from smartmall_pipeline.clip.register import apply_alias, propose_aliases
+        from sqlalchemy import text
+
+        propose_aliases(repo, [Segment(0, 1, "qa", 9001, "t", "s",
+                                       raw_text="x", matched_alias="米白")])
+        with repo.engine.connect() as c:
+            pid = c.execute(text("SELECT id FROM clip_alias_proposal")).scalar()
+        assert apply_alias(repo, pid) is not None
+        assert apply_alias(repo, pid) is None, "已处理的提案不该再生效"
+
+    def test_segments_without_an_alias_are_not_queued(self, repo):
+        from smartmall_pipeline.clip.register import propose_aliases
+
+        segs = [Segment(0, 1, "qa", 9001, "t", "s", raw_text="x")]
+        assert propose_aliases(repo, segs) == 0
