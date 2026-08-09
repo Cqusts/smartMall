@@ -486,3 +486,60 @@ class _StubPipe:
     def generate(self, **kwargs):
         self.kwargs = kwargs
         return self.result
+
+
+class TestModelNameResolution:
+    """**同一个坑这个项目栽过三次了，这次钉住。**
+
+    网关别名（chat-default / chat-light）只有 DashScope 的客户端翻译得了。
+    把它当默认值写死，非 DashScope 用户必然撞 400，而症状离病因很远：
+    第一次是服务端 new AgentConfig，表现成"这个问题我不太确定，帮您转接
+    人工"；第二次是 clip 的 --segment-model，表现成"分段 0 段"。
+    """
+
+    def test_explicit_wins(self, monkeypatch):
+        from smartmall_pipeline.cli import _resolve_model_name
+
+        monkeypatch.setenv("SMARTMALL_SEGMENT_MODEL", "from-env")
+        assert _resolve_model_name("cli-said", "SMARTMALL_SEGMENT_MODEL") == "cli-said"
+
+    def test_env_beats_the_alias(self, monkeypatch):
+        from smartmall_pipeline.cli import _resolve_model_name
+
+        monkeypatch.setenv("SMARTMALL_EXTRACT_MODEL", "deepseek-chat")
+        got = _resolve_model_name(None, "SMARTMALL_SEGMENT_MODEL",
+                                  "SMARTMALL_EXTRACT_MODEL")
+        assert got == "deepseek-chat"
+
+    def test_alias_only_as_the_last_resort(self, monkeypatch):
+        from smartmall_pipeline.cli import _resolve_model_name
+
+        monkeypatch.delenv("SMARTMALL_SEGMENT_MODEL", raising=False)
+        monkeypatch.delenv("SMARTMALL_EXTRACT_MODEL", raising=False)
+        assert _resolve_model_name(None, "SMARTMALL_SEGMENT_MODEL") == "chat-default"
+
+    def test_no_subcommand_hardcodes_a_gateway_alias(self):
+        """扫整个 parser 树：任何参数的 default 都不许是网关别名。
+
+        这是一条**结构性**的守卫——它拦的不是这一次的 bug，
+        是下一次有人图省事写 default="chat-default"。
+        """
+        from smartmall_pipeline.cli import build_parser
+
+        aliases = {"chat-default", "chat-light", "chat-fallback", "reasoning"}
+        bad = []
+
+        def walk(parser, path=""):
+            for act in parser._actions:
+                if isinstance(act.default, str) and act.default in aliases:
+                    bad.append(f"{path} {act.option_strings or act.dest}")
+                # choices 对普通参数是 list（--llm 的取值），
+                # 只有子命令那一层才是 {名字: 子 parser}
+                choices = getattr(act, "choices", None)
+                if isinstance(choices, dict):
+                    for name, sub in choices.items():
+                        if hasattr(sub, "_actions"):
+                            walk(sub, f"{path}/{name}")
+
+        walk(build_parser())
+        assert not bad, f"这些参数把网关别名写死成了默认值：{bad}"

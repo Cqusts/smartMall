@@ -127,10 +127,16 @@ def segment_transcript(
                 model=model, system=SEGMENT_SYSTEM,
                 user=SEGMENT_USER.format(catalog=catalog, lines=lines),
             )
-        except LlmError:
+        except LlmError as exc:
             # 一个窗口失败不该毁掉整场。**但也不能当成"这段没内容"**——
             # 记进 dropped，否则漏斗会把模型故障显示成主播没说话
-            stats.dropped["分段调用失败"] = stats.dropped.get("分段调用失败", 0) + 1
+            n = stats.dropped.get("分段调用失败", 0) + 1
+            stats.dropped["分段调用失败"] = n
+            if n == 1:
+                # **第一条原文必须打出来。** 只记个数的话，命令行上看到的
+                # 是"分段 0 段"，而真正的原因（模型名不对被拒 400）
+                # 藏在一个计数器里——实测就是这么绕进去的
+                print(f"  ✗ 分段调用失败：{exc}")
             start += max(1, window - overlap)
             continue
 
