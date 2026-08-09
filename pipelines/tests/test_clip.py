@@ -299,3 +299,111 @@ class TestKnowledgeExit:
         items = to_knowledge_items(self._segs(), source_ref="x")
         qa = [i for i in items if "答疑" in i.tags]
         assert len(qa) == 1
+
+
+# ---------------------------------------------------------------- 切片
+
+import shutil
+
+from smartmall_pipeline.clip.cut import (
+    CutResult, FfmpegMissing, cut_segments, ffmpeg_path, probe_duration_ms,
+)
+
+pytestmark_ff = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None, reason="需要 ffmpeg"
+)
+
+
+@pytest.fixture(scope="module")
+def video(tmp_path_factory):
+    """造一段 25 秒的测试视频，关键帧间隔 2 秒。
+
+    间隔要明确设死：``-c copy`` 的切点误差完全由关键帧密度决定，
+    不设的话编码器默认值一变，测试就会莫名其妙地飘。
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("需要 ffmpeg")
+    import subprocess
+
+    out = tmp_path_factory.mktemp("clip") / "live.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "testsrc=size=320x180:rate=25:duration=25",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=25",
+        "-c:v", "libx264", "-preset", "ultrafast", "-g", "50",
+        "-c:a", "aac", "-shortest", str(out),
+    ], check=True, capture_output=True, timeout=120)
+    return out
+
+
+@pytestmark_ff
+class TestCutting:
+    def _segs(self):
+        return [
+            Segment(0, 9000, "feature", 9001, "针织衫材质", "羊毛的", raw_text="x"),
+            Segment(9000, 11000, "urge", 9001, "催单", "上链接", raw_text="x"),
+            Segment(16000, 25000, "qa", 9011, "选码", "大一码", raw_text="x"),
+        ]
+
+    def test_cuts_useful_segments_only(self, video, tmp_path):
+        """催单话术切出来没人看，而每切一段都要读写一遍磁盘。"""
+        r = cut_segments(video, self._segs(), tmp_path)
+        assert len(r.clips) == 2
+        assert r.skipped.get("非讲解片段") == 1
+
+    def test_files_are_playable(self, video, tmp_path):
+        """**返回码 0 不代表切出了东西。** ``-c copy`` 在起点落在关键帧
+        之后时会产出 0 字节文件，而 ffmpeg 一声不吭。"""
+        r = cut_segments(video, self._segs(), tmp_path)
+        for c in r.clips:
+            assert c.bytes > 0 and probe_duration_ms(c.path) > 0
+
+    def test_padding_is_applied(self, video, tmp_path):
+        """按 ASR 时间戳硬切，开头第一个字会被削掉半个音节。"""
+        r = cut_segments(video, self._segs()[:1], tmp_path, pad_ms=400)
+        assert r.clips[0].begin_ms == 0          # 已经在 0，不能切成负数
+        assert r.clips[0].end_ms == 9400
+
+    def test_end_is_clamped_to_the_video(self, video, tmp_path):
+        """ASR 最后一句的时间戳偶尔超过视频实际长度（VAD 补的尾巴），
+        照切会产出 0 字节文件。"""
+        seg = [Segment(20000, 99000, "qa", 9001, "尾巴", "话术", raw_text="x")]
+        r = cut_segments(video, seg, tmp_path)
+        assert r.clips and r.clips[0].end_ms <= 25000
+
+    def test_too_short_is_skipped(self, video, tmp_path):
+        seg = [Segment(5000, 5500, "qa", 9001, "太短", "话术", raw_text="x")]
+        r = cut_segments(video, seg, tmp_path, pad_ms=0)
+        assert not r.clips and r.skipped.get("片段过短") == 1
+
+    def test_precise_mode_is_tighter_than_copy(self, video, tmp_path):
+        """把这个取舍钉住，别让人以为 copy 是精确的。
+
+        实测 9.4 秒的片段：copy 切出 11.1 秒（关键帧对齐），
+        precise 切出 9.4 秒但慢四倍。
+        """
+        seg = [Segment(16000, 25000, "qa", 9011, "选码", "大一码", raw_text="x")]
+        fast = cut_segments(video, seg, tmp_path / "f", precise=False).clips[0]
+        exact = cut_segments(video, seg, tmp_path / "p", precise=True).clips[0]
+        drift_fast = abs(probe_duration_ms(fast.path) - fast.duration_ms)
+        drift_exact = abs(probe_duration_ms(exact.path) - exact.duration_ms)
+        assert drift_exact < drift_fast
+
+    def test_filenames_carry_product_and_topic(self, video, tmp_path):
+        """人工审片时靠文件名判断，点开一个个看太慢。"""
+        r = cut_segments(video, self._segs(), tmp_path)
+        assert "9001" in r.clips[0].path.name
+        assert "针织衫材质" in r.clips[0].path.name
+
+    def test_missing_video_fails_loudly(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            cut_segments(tmp_path / "nope.mp4", self._segs(), tmp_path)
+
+
+class TestFfmpegAvailability:
+    def test_missing_ffmpeg_says_how_to_install(self, monkeypatch):
+        """这条路径没有降级方案，所以报错要能照着做。"""
+        monkeypatch.setattr(shutil, "which", lambda _: None)
+        with pytest.raises(FfmpegMissing) as e:
+            ffmpeg_path()
+        assert "winget" in str(e.value) or "brew" in str(e.value)

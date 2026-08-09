@@ -243,33 +243,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
 
     backend = _resolve_llm_backend(args)
     try:
-        if backend == "fake":
-            print("  使用 FakeLlmClient（不调用真实模型，不产生费用）")
-            llm = gate3_model.FakeLlmClient(items_per_dialogue=args.items_per_dialogue)
-        elif backend == "dashscope":
-            print("  直连 DashScope（未经网关，无统一成本记账）")
-            llm = gate3_model.DashScopeLlmClient()
-        elif backend == "openai":
-            base = os.environ.get("SMARTMALL_LLM_BASE_URL", "").strip()
-            if not base:
-                print("\n✗ --llm openai 需要指定服务地址。在 deploy/.env 里加：")
-                print("    SMARTMALL_LLM_BASE_URL=https://api.deepseek.com")
-                print("    SMARTMALL_LLM_API_KEY=sk-xxx")
-                print("    SMARTMALL_TRIAGE_MODEL=deepseek-chat")
-                print("    SMARTMALL_EXTRACT_MODEL=deepseek-chat")
-                print("    SMARTMALL_STYLE_MODEL=deepseek-chat")
-                return 1
-            print(f"  直连 OpenAI 兼容服务：{base}")
-            llm = gate3_model.LiteLlmClient(
-                base_url=base,
-                api_key=os.environ.get("SMARTMALL_LLM_API_KEY", ""),
-            )
-        else:
-            base = os.environ.get("LITELLM_BASE_URL", "http://localhost:9000")
-            print(f"  经 ai-gateway 调用模型：{base}")
-            llm = gate3_model.LiteLlmClient(
-                base_url=base, api_key=os.environ.get("LITELLM_API_KEY", "")
-            )
+        llm = _make_llm(args, backend)
     except gate3_model.LlmError as exc:
         print(f"\n✗ {exc}")
         return 1
@@ -548,6 +522,157 @@ def cmd_vision(args: argparse.Namespace) -> int:
         print(f"  其中 {len(flagged)} 条为 pending，跑 "
               f"`smartmall-pipeline approve` 人工确认后才会进索引")
     print("\n  下一步：smartmall-pipeline index  （把新知识向量化）")
+    return 0
+
+
+def _make_llm(args: argparse.Namespace, backend: str | None = None):
+    """按后端选项造一个 LLM 客户端。
+
+    **一处装配，两处使用**（clean 与 clip）。这段逻辑原本写死在 cmd_clean
+    里，第二个命令要用时最省事的做法是复制一份——而这个项目已经因为
+    复制装配逻辑吃过一次亏了（服务端自己 new AgentConfig，拿着网关别名
+    去调 DeepSeek 直接 400，症状离病因隔三层）。
+    """
+    backend = backend or _resolve_llm_backend(args)
+
+    if backend == "fake":
+        print("  使用 FakeLlmClient（不调用真实模型，不产生费用）")
+        return gate3_model.FakeLlmClient(
+            items_per_dialogue=getattr(args, "items_per_dialogue", 2)
+        )
+    if backend == "dashscope":
+        print("  直连 DashScope（未经网关，无统一成本记账）")
+        return gate3_model.DashScopeLlmClient()
+    if backend == "openai":
+        base = os.environ.get("SMARTMALL_LLM_BASE_URL", "").strip()
+        if not base:
+            raise gate3_model.LlmConfigError(
+                "--llm openai 需要指定服务地址。在 deploy/.env 里加：\n"
+                "    SMARTMALL_LLM_BASE_URL=https://api.deepseek.com\n"
+                "    SMARTMALL_LLM_API_KEY=sk-xxx\n"
+                "    SMARTMALL_TRIAGE_MODEL=deepseek-chat\n"
+                "    SMARTMALL_EXTRACT_MODEL=deepseek-chat\n"
+                "    SMARTMALL_STYLE_MODEL=deepseek-chat"
+            )
+        print(f"  直连 OpenAI 兼容服务：{base}")
+        return gate3_model.LiteLlmClient(
+            base_url=base, api_key=os.environ.get("SMARTMALL_LLM_API_KEY", ""),
+        )
+
+    base = os.environ.get("LITELLM_BASE_URL", "http://localhost:9000")
+    print(f"  经 ai-gateway 调用模型：{base}")
+    return gate3_model.LiteLlmClient(
+        base_url=base, api_key=os.environ.get("LITELLM_API_KEY", "")
+    )
+
+
+def load_products_for_clip(repo: DwsRepository) -> list[dict]:
+    """商品清单，供热词生成与商品对齐用。"""
+    from sqlalchemy import text
+
+    with repo.engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, name, short_name, alias, category_id FROM product "
+            "WHERE deleted = 0 AND status = 'on_sale' ORDER BY id"
+        )).mappings().fetchall()
+        out = []
+        for r in rows:
+            try:
+                alias = json.loads(r["alias"]) if r["alias"] else []
+            except (json.JSONDecodeError, TypeError):
+                alias = []
+            attrs = {
+                a["attr_key"]: a["attr_value"] for a in conn.execute(text(
+                    "SELECT attr_key, attr_value FROM product_attr "
+                    "WHERE product_id = :pid"), {"pid": r["id"]}
+                ).mappings().fetchall()
+            }
+            out.append({"id": int(r["id"]), "name": r["name"],
+                        "short_name": r["short_name"], "alias": alias,
+                        "category_id": r["category_id"], "attrs": attrs})
+    return out
+
+
+def cmd_clip(args: argparse.Namespace) -> int:
+    """直播切片：录像 → 转写 → 分段 → 商品对齐 → 切片 + 话术入库。
+
+    **双出口**是这条链路的意义所在：视频进素材中心，口播话术进知识库。
+    现成的切片工具只做前者，因为它们没有知识库可以喂。
+    """
+    from .clip.asr import DashScopeAsrClient, FakeAsrClient, LocalFunAsrClient
+    from .clip.cut import cut_segments, ffmpeg_path
+    from .clip.segment import align_products, segment_transcript, to_knowledge_items
+    from .clip.transcript import build_hotwords
+
+    ffmpeg_path()  # 早失败：切不了片的话，前面那些模型调用白花钱
+
+    repo = DwsRepository.from_env()
+    products = load_products_for_clip(repo)
+    if not products:
+        print("  没有在售商品。商品对齐会全部落到人工队列。")
+
+    hotwords = build_hotwords(products)
+    print(f"==> 热词 {len(hotwords)} 个：{'、'.join(hotwords[:8])}"
+          f"{' …' if len(hotwords) > 8 else ''}")
+
+    if args.fake_asr:
+        asr = FakeAsrClient()
+    elif args.asr == "dashscope":
+        asr = DashScopeAsrClient()
+    else:
+        asr = LocalFunAsrClient(device=args.device)
+
+    print(f"  转写：{type(asr).__name__}")
+    transcript = asr.transcribe(args.video, hotwords=hotwords)
+    print(f"  转写完成 {len(transcript.sentences)} 句 / "
+          f"{transcript.duration_ms / 60000:.1f} 分钟")
+    if not transcript.sentences:
+        print("  ✗ 没转出任何内容。检查音轨是否存在、语言是否匹配。")
+        return 1
+
+    try:
+        llm = _make_llm(args)
+    except gate3_model.LlmError as exc:
+        print(f"\n✗ {exc}")
+        return 1
+    segments, stats = segment_transcript(llm, transcript, products,
+                                         model=args.segment_model)
+    aligned, pending = align_products(segments, products)
+    print(f"\n{stats.render() if hasattr(stats, 'render') else ''}")
+    print(f"  分段 {len(segments)} 段 · 已对齐 {len(aligned)} · "
+          f"待人工确认 {len(pending)}")
+
+    for s in segments:
+        mark = f" ←新叫法「{s.matched_alias}」" if s.matched_alias else ""
+        print(f"    {s.begin_ms / 1000:>7.1f}-{s.end_ms / 1000:<7.1f}s "
+              f"{pad(s.kind, 8)} #{s.product_id or '待定'}{mark}  "
+              f"{truncate(s.topic, 30)}")
+
+    out_dir = Path(args.out or f"clips/{Path(args.video).stem}")
+    result = cut_segments(args.video, aligned, out_dir, precise=args.precise)
+    print(f"\n  出口①素材：{len(result.clips)} 个切片 → {out_dir}")
+    for e in result.errors:
+        print(f"    ✗ {e}")
+    if result.skipped:
+        print(f"    跳过：{result.skipped}")
+
+    items = to_knowledge_items(
+        aligned, source_ref=Path(args.video).stem,
+        category_of={p["id"]: p["category_id"] for p in products},
+    )
+    if args.dry_run:
+        print(f"\n  出口②知识：{len(items)} 条（--dry-run 未写库）")
+        if items:
+            print(f"\n  样例：{items[0].title}\n    {items[0].content}")
+        return 0
+
+    n = repo.save_knowledge_items(items)
+    print(f"\n  出口②知识：已写入 knowledge_item {n} 条（全部 pending）")
+    print("    转写有错字、模型整理有偏差，这条路上没有任何东西印证过它——")
+    print("    跑 `smartmall-pipeline approve <id>` 人工确认后才进索引")
+    if pending:
+        print(f"\n  ⚠ {len(pending)} 段没对上商品，未切片也未入库。"
+              f"确认商品后回写别名，下一场转写就能认出来。")
     return 0
 
 
@@ -1143,6 +1268,21 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("dedup", help="清掉库里已有的同题重复知识")
     s.add_argument("--yes", action="store_true", help="确认执行")
     s.set_defaults(func=cmd_dedup)
+
+    s = sub.add_parser("clip", parents=[], help="直播切片：录像→转写→分段→切片+话术入库")
+    s.add_argument("video", help="直播录像路径（本地文件）")
+    s.add_argument("--asr", choices=["funasr", "dashscope"], default="funasr",
+                   help="转写后端。funasr 读本地文件；dashscope 要求公网 URL")
+    s.add_argument("--device", default="cpu", help="本地 FunASR 设备，cpu 或 cuda:0")
+    s.add_argument("--fake-asr", action="store_true", help="替身转写，不调真实服务")
+    s.add_argument("--llm", choices=["fake", "gateway", "dashscope", "openai"],
+                   help="分段用的模型后端")
+    s.add_argument("--segment-model", default="chat-default")
+    s.add_argument("--out", help="切片输出目录，默认 clips/<视频名>")
+    s.add_argument("--precise", action="store_true",
+                   help="精确切点（重编码，慢约四倍）；默认按关键帧切")
+    s.add_argument("--dry-run", action="store_true", help="不写库")
+    s.set_defaults(func=cmd_clip)
 
     s = sub.add_parser("vision", help="商品图打标：VLM 看图产出商品知识")
     s.add_argument("--product", help="只跑这几个商品，逗号分隔")
