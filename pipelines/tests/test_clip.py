@@ -843,3 +843,28 @@ class TestAliasLoop:
 
         segs = [Segment(0, 1, "qa", 9001, "t", "s", raw_text="x")]
         assert propose_aliases(repo, segs) == 0
+
+
+class TestRerunIsIdempotent:
+    """两个出口对"重跑"必须处理一致。
+
+    素材那一路按文件 hash 去重，知识那一路第一版没有——于是跑两次
+    攒出两套同样的话术，而素材只有一套。数据会悄悄地不对称，
+    而"悄悄"正是问题所在：没人会去数知识条目。
+    """
+
+    def test_source_ref_is_stable_across_runs(self):
+        """去重靠 source_ref，它必须是确定的——带时间戳或随机数就永远
+        去不了重。"""
+        segs = [Segment(0, 9000, "feature", 9001, "t", "s", raw_text="x")]
+        a = to_knowledge_items(segs, source_ref="live-0801")
+        b = to_knowledge_items(segs, source_ref="live-0801")
+        assert a[0].source_ref == b[0].source_ref == "live-0801#0-9000"
+
+    def test_refs_are_scoped_by_live_so_the_like_pattern_is_safe(self):
+        """按 `<场次>#%` 去重的前提是场次名不会互相包含前缀。
+        用 # 分隔就够了——它不会出现在文件名里。"""
+        segs = [Segment(0, 1000, "feature", 9001, "t", "s", raw_text="x")]
+        ref = to_knowledge_items(segs, source_ref="live-0801")[0].source_ref
+        assert ref.startswith("live-0801#")
+        assert not ref.startswith("live-08#"), "前缀不能被别的场次误伤"

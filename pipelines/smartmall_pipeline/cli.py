@@ -743,6 +743,20 @@ def cmd_clip(args: argparse.Namespace) -> int:
         print(f"    ⚠ 素材入库失败（{type(exc).__name__}: {exc}）")
         print("      建表：deploy/sql/mysql/02_asset.sql")
 
+    # 同一场直播重跑要覆盖而不是叠加。素材那一路按文件 hash 去了重，
+    # 知识这一路没有，于是跑两次就攒出两套同样的话术——两个出口对同一件事
+    # 的处理必须一致，否则数据会悄悄地不对称
+    from sqlalchemy import text as _sql
+
+    with repo.engine.begin() as conn:
+        stale = conn.execute(_sql(
+            "UPDATE knowledge_item SET deleted = 1 "
+            "WHERE source = 'live_clip' AND deleted = 0 "
+            "AND source_ref LIKE :pat"
+        ), {"pat": f"{live_ref}#%"}).rowcount
+    if stale:
+        print(f"\n  覆盖同场旧话术 {stale} 条")
+
     n = repo.save_knowledge_items(items)
     print(f"\n  出口②知识：已写入 knowledge_item {n} 条（全部 pending）")
     if unbound:
@@ -762,8 +776,12 @@ def cmd_clip(args: argparse.Namespace) -> int:
         print(f"\n  ⚠ 叫法队列不可用（{type(exc).__name__}）")
         print("    建表：deploy/sql/migrations/006_clip_alias_proposal.sql")
 
-    if pending:
-        print(f"\n  ⚠ {len(pending)} 段没对上商品，未切片也未入库。")
+    # 只有**完全没绑上**的才是真的没入库。model 猜的那些照样切了、
+    # 照样入了库，只是绑定待确认——这一行原先用 pending 计数，
+    # 于是紧跟在"3 个切片""3 条知识"后面说"未切片也未入库"，自相矛盾
+    orphan = [s for s in pending if s.binding == "none" and s.is_useful]
+    if orphan:
+        print(f"\n  ⚠ {len(orphan)} 段完全没对上商品，已切片但未关联到任何商品。")
     return 0
 
 
