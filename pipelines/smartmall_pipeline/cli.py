@@ -200,9 +200,12 @@ def _resolve_llm_backend(args: argparse.Namespace) -> str:
     ``SMARTMALL_LLM_BASE_URL`` 就说明厂商已经选好了，此时还默认走
     dashscope 只会撞上一个他明明不打算用的通道（比如免费额度已用尽）。
     """
-    if args.fake_llm:
+    # getattr 而不是直接取：不是每个子命令都有 --fake-llm。
+    # 直接取的话，新加一个用模型的子命令就会在这里 AttributeError，
+    # 而报错指向的是这个解析函数，跟真正忘了加参数的地方隔着老远
+    if getattr(args, "fake_llm", False):
         return "fake"
-    if args.llm:
+    if getattr(args, "llm", None):
         return args.llm
     if os.environ.get("SMARTMALL_LLM_BASE_URL", "").strip():
         return "openai"
@@ -620,9 +623,13 @@ def cmd_clip(args: argparse.Namespace) -> int:
     elif args.asr == "dashscope":
         asr = DashScopeAsrClient()
     else:
-        asr = LocalFunAsrClient(device=args.device)
+        kw = {"device": args.device}
+        if args.asr_model:
+            kw["model"] = args.asr_model
+        asr = LocalFunAsrClient(**kw)
 
-    print(f"  转写：{type(asr).__name__}")
+    print(f"  转写：{type(asr).__name__}"
+          + (f"（{asr.model}）" if hasattr(asr, "model") else ""))
     transcript = asr.transcribe(args.video, hotwords=hotwords)
     print(f"  转写完成 {len(transcript.sentences)} 句 / "
           f"{transcript.duration_ms / 60000:.1f} 分钟")
@@ -1277,7 +1284,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fake-asr", action="store_true", help="替身转写，不调真实服务")
     s.add_argument("--llm", choices=["fake", "gateway", "dashscope", "openai"],
                    help="分段用的模型后端")
+    s.add_argument("--fake-llm", action="store_true",
+                   help="替身分段，不调真实模型")
     s.add_argument("--segment-model", default="chat-default")
+    s.add_argument("--asr-model", help="覆盖本地 ASR 模型名")
     s.add_argument("--out", help="切片输出目录，默认 clips/<视频名>")
     s.add_argument("--precise", action="store_true",
                    help="精确切点（重编码，慢约四倍）；默认按关键帧切")

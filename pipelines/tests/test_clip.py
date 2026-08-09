@@ -407,3 +407,82 @@ class TestFfmpegAvailability:
         with pytest.raises(FfmpegMissing) as e:
             ffmpeg_path()
         assert "winget" in str(e.value) or "brew" in str(e.value)
+
+
+class TestLocalAsrModelChoice:
+    """**第一版默认选了 SenseVoiceSmall，两样致命的问题。**
+
+    它更小更快、还能识别情绪，看起来是个好选择。实测：40 秒音频返回
+    **一整句**（FunASR 打了 ``punctuation timestamps could not be aligned,
+    falling back to VAD segments``），而且热词参数传进去不报错、只是不生效——
+    那套"商品名→热词→转写更准"的闭环一直在空转，没有任何迹象。
+    """
+
+    def test_default_model_supports_timestamps_and_hotwords(self):
+        from smartmall_pipeline.clip.asr import LocalFunAsrClient
+
+        c = LocalFunAsrClient()
+        assert "paraformer" in c.model.lower(), (
+            "默认必须是 Paraformer 系：时间戳和热词只有它两样都有"
+        )
+        assert c.supports_hotwords
+
+    def test_sensevoice_is_flagged_as_unable(self):
+        from smartmall_pipeline.clip.asr import LocalFunAsrClient
+
+        assert not LocalFunAsrClient(model="iic/SenseVoiceSmall").supports_hotwords
+
+    def test_hotwords_are_not_silently_dropped(self, capsys):
+        """静默失效是最糟的一种：不报错、只是不生效，
+        而"商品名全是错字"看起来像模型不行，不像配置错了。"""
+        from smartmall_pipeline.clip.asr import LocalFunAsrClient
+
+        c = LocalFunAsrClient(model="iic/SenseVoiceSmall")
+        c._pipe = _StubPipe([{"sentence_info": [
+            {"text": "甲", "start": 0, "end": 1000}]}])
+        c.transcribe("x.wav", hotwords=["针织衫", "马丁靴"])
+        assert "不支持热词" in capsys.readouterr().out
+
+    def test_hotwords_reach_a_capable_model(self):
+        from smartmall_pipeline.clip.asr import LocalFunAsrClient
+
+        c = LocalFunAsrClient()
+        c._pipe = pipe = _StubPipe([{"sentence_info": [
+            {"text": "甲", "start": 0, "end": 1000}]}])
+        c.transcribe("x.wav", hotwords=["针织衫"])
+        assert "针织衫" in pipe.kwargs["hotword"]
+
+    def test_a_single_sentence_over_long_audio_is_flagged(self, capsys):
+        """整段音频只回来一两句 = 时间戳没对上，模型退化成 VAD 整段。
+
+        不检查的话下游会安静地把整场直播当成一个片段，而"分段效果差"
+        看起来像提示词问题，不像转写问题——实测就是这么被绕进去的。
+        """
+        from smartmall_pipeline.clip.asr import LocalFunAsrClient
+
+        c = LocalFunAsrClient()
+        c._pipe = _StubPipe([{"sentence_info": [
+            {"text": "整整四十秒都在这一句里", "start": 0, "end": 40000}]}])
+        t = c.transcribe("x.wav")
+        assert len(t.sentences) == 1
+        assert "时间戳多半没对上" in capsys.readouterr().out
+
+    def test_normal_output_is_quiet(self, capsys):
+        from smartmall_pipeline.clip.asr import LocalFunAsrClient
+
+        c = LocalFunAsrClient()
+        c._pipe = _StubPipe([{"sentence_info": [
+            {"text": f"第{i}句", "start": i * 4000, "end": (i + 1) * 4000}
+            for i in range(10)]}])
+        c.transcribe("x.wav", hotwords=["针织衫"])
+        assert capsys.readouterr().out == ""
+
+
+class _StubPipe:
+    def __init__(self, result):
+        self.result = result
+        self.kwargs: dict = {}
+
+    def generate(self, **kwargs):
+        self.kwargs = kwargs
+        return self.result

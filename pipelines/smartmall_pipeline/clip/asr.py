@@ -146,17 +146,39 @@ class DashScopeAsrClient:
         return Transcript.from_rows(rows, source=source)
 
 
+#: 支持句级时间戳与热词的模型。**这条链路两样都必须有**：
+#: 没有时间戳切不了片，没有热词商品名全是错字。
+_TIMESTAMP_MODELS = ("paraformer", "seaco")
+
+
 @dataclass
 class LocalFunAsrClient:
-    """本地 FunASR。无网络时的退路，CPU 也能跑（慢）。
+    """本地 FunASR。读本地文件，不需要公网 URL，CPU 也能跑。
 
-    默认 SenseVoice-Small（约 120M 参数）而不是 Paraformer-Large：
-    这条路是退路不是主路，跑得动比跑得准重要。
+    **默认必须是 Paraformer 系，不能用 SenseVoice。** 第一版默认选了
+    SenseVoiceSmall——它更小更快、还能识别情绪，看起来是个好选择，
+    实测下来两样致命：
+
+    * **它不产可靠的句级时间戳。** FunASR 会打一行
+      ``punctuation timestamps could not be aligned, falling back to VAD
+      segments``，然后把 40 秒音频返回成**一整句**。时间戳是这条链路的
+      全部意义——没有它，分段和切片都无从谈起。
+    * **热词只有 Paraformer 支持。** ``hotword`` 参数传给 SenseVoice
+      不报错，只是不生效——于是那套"商品名→热词→转写更准"的闭环
+      一直在空转，而且没有任何迹象。
+
+    SeACo-Paraformer（``paraformer-zh``）两样都有，代价是模型大一些、
+    慢一些。这条路上跑得准比跑得动重要——跑得动但结果没法用，
+    等于没跑。
     """
 
-    model: str = "iic/SenseVoiceSmall"
+    model: str = "paraformer-zh"
     device: str = "cpu"
     _pipe: Any = field(default=None, repr=False)
+
+    @property
+    def supports_hotwords(self) -> bool:
+        return any(k in self.model.lower() for k in _TIMESTAMP_MODELS)
 
     def _load(self):
         if self._pipe is None:
@@ -174,13 +196,35 @@ class LocalFunAsrClient:
 
     def transcribe(self, audio_url, *, hotwords=(), speakers=True) -> Transcript:
         pipe = self._load()
+
+        kwargs: dict[str, Any] = {"input": audio_url, "sentence_timestamp": True}
+        if hotwords:
+            if self.supports_hotwords:
+                kwargs["hotword"] = " ".join(hotwords)
+            else:
+                # 静默失效是最糟的一种：参数传进去不报错，只是不生效，
+                # 而"商品名全是错字"看起来像模型不行，不像配置错了
+                print(f"  ⚠ {self.model} 不支持热词，{len(hotwords)} 个热词不会生效。"
+                      f"\n    换 --asr-model paraformer-zh 才有热词与句级时间戳。")
+
         try:
-            res = pipe.generate(input=audio_url, sentence_timestamp=True,
-                                hotword=" ".join(hotwords) if hotwords else None)
+            res = pipe.generate(**kwargs)
         except Exception as exc:  # noqa: BLE001
             raise LlmUnavailableError(f"本地转写失败：{type(exc).__name__}: {exc}") from exc
-        rows = (res[0] if isinstance(res, list) and res else {}).get("sentence_info") or []
-        return Transcript.from_rows(rows, source=str(audio_url))
+
+        first = res[0] if isinstance(res, list) and res else {}
+        rows = first.get("sentence_info") or []
+        transcript = Transcript.from_rows(rows, source=str(audio_url))
+
+        # 整段音频只回来一两句 = 时间戳没对上，模型退化成了 VAD 整段。
+        # 不检查的话下游会安静地把整场直播当成一个片段，
+        # 而"分段效果差"看起来像提示词问题，不像转写问题
+        if transcript.duration_ms > 30_000 and len(transcript.sentences) <= 2:
+            print(f"  ⚠ {transcript.duration_ms / 1000:.0f} 秒音频只转出 "
+                  f"{len(transcript.sentences)} 句，时间戳多半没对上。"
+                  f"\n    {self.model} 若不是 paraformer 系，换 "
+                  f"--asr-model paraformer-zh。")
+        return transcript
 
 
 @dataclass
