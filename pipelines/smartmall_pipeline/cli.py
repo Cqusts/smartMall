@@ -528,6 +528,27 @@ def cmd_vision(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_model_name(explicit: str | None, *env_keys: str) -> str:
+    """解析模型名：命令行 > 环境变量 > 网关别名。
+
+    **别把网关别名当默认值写死。** 这个项目已经在同一个坑里栽过三次：
+    服务端自己 new AgentConfig 拿着 ``chat-default`` 去调 DeepSeek 直接
+    400（症状是"这个问题我不太确定，帮您转接人工"，离病因隔三层）；
+    这次是 clip 的 ``--segment-model`` 默认写死 ``chat-default``，
+    DeepSeek 又是 400，而表面现象是"分段 0 段"。
+
+    别名只有 DashScope 的客户端翻译得了。换 DeepSeek、Kimi、智谱或本地
+    vLLM 时它翻不出来，硬编码就成了拦路虎——所以默认值必须从环境变量走。
+    """
+    if explicit:
+        return explicit
+    for key in env_keys:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return "chat-default"
+
+
 def _make_llm(args: argparse.Namespace, backend: str | None = None):
     """按后端选项造一个 LLM 客户端。
 
@@ -642,10 +663,27 @@ def cmd_clip(args: argparse.Namespace) -> int:
     except gate3_model.LlmError as exc:
         print(f"\n✗ {exc}")
         return 1
+    seg_model = _resolve_model_name(
+        args.segment_model, "SMARTMALL_SEGMENT_MODEL", "SMARTMALL_EXTRACT_MODEL"
+    )
+    print(f"  分段模型：{seg_model}")
+
     segments, stats = segment_transcript(llm, transcript, products,
-                                         model=args.segment_model)
+                                         model=seg_model)
     aligned, pending = align_products(segments, products)
-    print(f"\n{stats.render() if hasattr(stats, 'render') else ''}")
+
+    # 淘汰原因必须打出来。**"分段 0 段"看起来像主播没说话，
+    # 而实际可能是模型名不对被拒了 400** —— 实测就是这么绕进去的。
+    # 原先这里写的是 hasattr(stats,'render')，而 GateStats 根本没有
+    # render，于是这一行永远打印空字符串
+    for reason, n in stats.dropped.items():
+        print(f"  ✗ {pad(reason, 20)} {n}")
+    if not segments:
+        print("\n  ✗ 一段都没分出来。转写有内容而分段为空，多半是模型调用被拒——"
+              "\n    检查 --segment-model 是不是厂商认识的名字"
+              f"（当前 {seg_model}）。")
+        return 1
+
     print(f"  分段 {len(segments)} 段 · 已对齐 {len(aligned)} · "
           f"待人工确认 {len(pending)}")
 
@@ -1286,7 +1324,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="分段用的模型后端")
     s.add_argument("--fake-llm", action="store_true",
                    help="替身分段，不调真实模型")
-    s.add_argument("--segment-model", default="chat-default")
+    # 不给默认值：默认写死网关别名就等于给非 DashScope 用户埋一个 400。
+    # 真正的默认在 _resolve_model_name 里，从环境变量取
+    s.add_argument("--segment-model", help="分段模型名，默认取环境变量")
     s.add_argument("--asr-model", help="覆盖本地 ASR 模型名")
     s.add_argument("--out", help="切片输出目录，默认 clips/<视频名>")
     s.add_argument("--precise", action="store_true",
