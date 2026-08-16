@@ -52,14 +52,47 @@ class TestEventStream:
         assert _types(_events()).count("done") == 1
         assert _types(_events())[-1] == "done"
 
-    def test_status_events_come_before_text(self):
+    def test_step_events_come_before_text(self):
         """中间状态是给用户看的进度，晚于正文就没有意义了。"""
         types = _types(_events())
-        assert types.index("status") < types.index("delta")
+        assert types.index("step") < types.index("delta")
 
-    def test_reports_the_stages_a_user_waits_on(self):
-        stages = [e["stage"] for e in _events() if e["type"] == "status"]
-        assert "retrieve" in stages and "generate" in stages
+    def test_every_node_reports_itself(self):
+        """**每个节点都要有痕迹，一个都不能漏。**
+
+        原先是在 5 个节点里手写 emit_event——加一个节点就会漏一个，
+        而且漏了看不出来（页面上少一行而已）。现在埋点包在派发处，
+        这条测试钉住"跑过的节点必然出现在事件流里"。
+        """
+        events = _events()
+        steps = [e for e in events if e["type"] == "step"]
+        nodes_seen = {e["node"] for e in steps}
+        assert {"ingest", "guard", "intent", "retrieve", "generate",
+                "postcheck", "emit"} <= nodes_seen
+
+    def test_each_step_has_enter_and_exit(self):
+        """只有进没有出 = 那个节点抛异常了。成对出现才说明它跑完了。"""
+        steps = [e for e in _events() if e["type"] == "step"]
+        for node in {e["node"] for e in steps}:
+            phases = [e["phase"] for e in steps if e["node"] == node]
+            assert phases.count("enter") == phases.count("exit"), node
+
+    def test_steps_carry_what_happened_not_just_a_name(self):
+        """**光有节点名说明不了问题。**"检索知识库"跑完了，命中几条？
+        最高分多少？有没有词汇支撑？这三个数才是判断它做得对不对的依据。"""
+        exits = [e for e in _events()
+                 if e["type"] == "step" and e["phase"] == "exit"]
+        retrieve = next(e for e in exits if e["node"] == "retrieve")
+        assert set(retrieve["detail"]) == {"命中", "最高相似度", "词汇覆盖率"}
+        assert "ms" in retrieve
+
+        intent = next(e for e in exits if e["node"] == "intent")
+        assert intent["detail"]["意图"]
+
+    def test_labels_are_human_readable(self):
+        """这个面板是给人看的，演示时对方不该需要先读一遍源码。"""
+        steps = [e for e in _events() if e["type"] == "step"]
+        assert any(e["label"] == "检索知识库" for e in steps)
 
     def test_deltas_concatenate_to_the_final_answer(self):
         events = _events()

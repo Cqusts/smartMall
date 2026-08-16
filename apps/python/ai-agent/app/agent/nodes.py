@@ -128,6 +128,83 @@ def _knowledge_text(hits: list[Citation]) -> str:
 # ---------------------------------------------------------------- 节点
 
 
+# ---------------------------------------------------------------- 步骤埋点
+
+#: 节点在页面上的名字。用中文而不是函数名——这个面板是给人看的，
+#: 演示时对方不该需要先读一遍源码。
+NODE_LABELS = {
+    "ingest": "接收消息",
+    "vision": "看图理解",
+    "guard": "输入安全检查",
+    "intent": "识别意图",
+    "retrieve": "检索知识库",
+    "rewrite": "改写查询重试",
+    "clarify": "请求澄清",
+    "chitchat": "寒暄应答",
+    "tools": "调用业务工具",
+    "generate": "生成答案",
+    "postcheck": "出口合规检查",
+    "handover": "转接人工",
+    "emit": "收尾落库",
+}
+
+
+def step_detail(name: str, state: AgentState) -> dict[str, Any]:
+    """这一步到底发生了什么。
+
+    每个节点报告自己的关键产出——**光有节点名说明不了问题**：
+    "检索知识库"跑完了，命中几条？最高分多少？有没有词汇支撑？
+    这三个数才是判断它做得对不对的依据，而它们平时全是隐形的。
+    """
+    if name == "intent":
+        return {"意图": state.intent.value}
+    if name == "vision":
+        d: dict[str, Any] = {"图片类型": state.image_kind or "-"}
+        if state.trace.image_pii_hits:
+            d["脱敏命中"] = state.trace.image_pii_hits
+        return d
+    if name == "retrieve":
+        return {
+            "命中": state.trace.retrieval_hit_count,
+            "最高相似度": round(state.trace.retrieval_max_score, 3),
+            "词汇覆盖率": round(state.trace.retrieval_lexical_overlap, 3),
+        }
+    if name == "rewrite":
+        return {"改写为": state.trace.rewritten_query}
+    if name == "tools":
+        return {"调用": [t["name"] for t in state.trace.tools_called]} \
+            if state.trace.tools_called else {"调用": "无"}
+    if name == "postcheck":
+        return {"合规": state.postcheck_flags or "通过"}
+    if name == "handover":
+        return {"原因": state.handover_reason.value if state.handover_reason else "-"}
+    if name == "clarify":
+        return {"澄清": state.clarify_question[:40] or "判定澄清无意义"}
+    return {}
+
+
+def run_node(name: str, fn: Any, state: AgentState, deps: Deps) -> AgentState:
+    """执行一个节点并埋点。
+
+    **包一层而不是在每个节点里手写 emit_event。** 原先只有 5 个节点发事件，
+    而且是散着手写的——加一个节点就会漏一个，漏了还看不出来（页面上少一行
+    而已，没人会发现）。包在派发处，谁也漏不掉。
+
+    ``run_turn`` 与 LangGraph 两条路径都走这里，所以页面上看到的流程
+    和图里跑的流程必然一致。
+    """
+    t0 = time.time()
+    deps.emit_event(type="step", node=name,
+                    label=NODE_LABELS.get(name, name), phase="enter")
+    state = fn(state, deps)
+    deps.emit_event(
+        type="step", node=name, label=NODE_LABELS.get(name, name),
+        phase="exit", ms=int((time.time() - t0) * 1000),
+        detail=step_detail(name, state),
+    )
+    return state
+
+
 def ingest(state: AgentState, deps: Deps) -> AgentState:
     """接入消息，写入会话历史。"""
     state.query = state.message
@@ -184,7 +261,6 @@ def understand_image(state: AgentState, deps: Deps) -> AgentState:
     state.image_kind = state.trace.image_kind = result.kind
     state.image_observations = result.observations
     state.trace.image_pii_hits = result.pii_hits
-    deps.emit_event(type="status", stage="vision", detail=result.kind)
 
     if result.kind == "other":
         state.clarify_question = (
@@ -271,7 +347,6 @@ def classify_intent(state: AgentState, deps: Deps) -> AgentState:
 
     state.trace.intent = state.intent.value
     state.trace.latency_ms["intent"] = int((time.time() - t0) * 1000)
-    deps.emit_event(type="status", stage="intent", detail=state.intent.value)
 
     if state.intent is Intent.SENSITIVE:
         state.to_handover(HandoverReason.SENSITIVE_INTENT)
@@ -286,7 +361,6 @@ def retrieve(state: AgentState, deps: Deps) -> AgentState:
     对用户说"没找到相关信息"而真相是服务宕了，那是撒谎。
     """
     t0 = time.time()
-    deps.emit_event(type="status", stage="retrieve")
     try:
         state.hits = deps.retriever.search(
             state.query,
@@ -427,7 +501,6 @@ def call_tools(state: AgentState, deps: Deps) -> AgentState:
         return state
 
     t0 = time.time()
-    deps.emit_event(type="status", stage="tools")
     product_id = state.session.current_product_id
 
     try:
@@ -502,7 +575,6 @@ def _tool_size_chart(state: AgentState, deps: Deps, product_id: int | None) -> N
 def generate(state: AgentState, deps: Deps) -> AgentState:
     """基于检索到的知识生成答案。"""
     t0 = time.time()
-    deps.emit_event(type="status", stage="generate")
     user_prompt = prompts.ANSWER_USER.format(
         knowledge=_knowledge_text(state.hits),
         tools=_tools_text(state),

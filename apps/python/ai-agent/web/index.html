@@ -236,6 +236,32 @@ table.size th{background:#fafafa;color:var(--ink-2);font-weight:500}
 .fb button.done{background:#fff4ee;border-color:var(--orange);color:var(--orange)}
 .fb .tid{font-size:11px;color:#c4c4c4;margin-left:auto;font-family:monospace}
 .cstatus{padding:0 14px;min-height:22px;display:flex;gap:5px;flex-wrap:wrap}
+
+/* 执行轨迹：Agent 每走一个节点留一行，跑完不清空。
+   原先只有一个会被下一个状态覆盖的胶囊——看得见"正在检索"，
+   看不见它检索完命中了几条，更看不见整轮到底走了哪条路径 */
+.trace{margin:0 14px 8px;border:1px solid var(--line);border-radius:6px;
+       background:#fbfbfc;overflow:hidden;display:none}
+.trace.on{display:block}
+.trace .th{display:flex;align-items:center;gap:7px;padding:7px 10px;
+           font-size:12px;color:var(--ink-2);cursor:pointer;user-select:none;
+           background:#f6f7f9;border-bottom:1px solid var(--line)}
+.trace .th b{font-weight:600;color:var(--ink)}
+.trace .th .sp{flex:1}
+.trace .th .tot{font-family:monospace;color:var(--ink-3)}
+.trace .tb{max-height:210px;overflow-y:auto;padding:4px 0}
+.trace.folded .tb{display:none}
+.stp{display:flex;align-items:flex-start;gap:8px;padding:4px 11px;font-size:12px}
+.stp .dot{width:6px;height:6px;border-radius:50%;background:var(--line);
+          margin-top:6px;flex:none}
+.stp.run .dot{background:var(--orange);animation:pulse 1s infinite}
+.stp.ok .dot{background:#1a7f37}
+@keyframes pulse{50%{opacity:.25}}
+@media(prefers-reduced-motion:reduce){.stp.run .dot{animation:none}}
+.stp .nm{width:88px;flex:none;color:var(--ink)}
+.stp .dt{flex:1;color:var(--ink-2);font-family:monospace;font-size:11px;
+         line-height:1.5;word-break:break-all}
+.stp .ms{color:var(--ink-3);font-family:monospace;font-size:11px;flex:none}
 .pill{font-size:11px;background:#eef2f7;color:var(--ink-2);padding:1px 7px;
       border-radius:9px}
 .pill.live{background:#fff0e8;color:var(--orange)}
@@ -422,6 +448,14 @@ footer code{background:#ececec;padding:1px 5px;border-radius:2px}
     <div class="cmain">
       <div class="ctx" id="ctx"></div>
       <div class="clog" id="clog"></div>
+      <div class="trace" id="trace">
+        <div class="th" onclick="toggleTrace()">
+          <span id="traceCaret">▾</span><b>执行轨迹</b>
+          <span id="traceNow" style="color:var(--orange)"></span>
+          <span class="sp"></span><span class="tot" id="traceTot"></span>
+        </div>
+        <div class="tb" id="traceBody"></div>
+      </div>
       <div class="cstatus" id="cstatus"></div>
       <div class="quick" id="quick"></div>
       <div class="pending" id="pending"></div>
@@ -444,9 +478,65 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-const STAGES = {intent:'识别意图', retrieve:'检索知识库', rewrite:'改写查询',
-                tools:'查商品数据', generate:'生成回答', postcheck:'合规检查',
-                handover:'转接人工', clarify:'请求澄清'};
+/* 节点中文名由服务端随事件下发（nodes.NODE_LABELS），前端不再维护一份——
+   两处各写一份必然漂移，而漂移的表现是页面显示英文函数名 */
+let steps = [];        // 本轮走过的节点
+let traceFolded = false;
+
+function resetTrace(){
+  steps = [];
+  $('#trace').classList.add('on');
+  $('#traceBody').innerHTML = '';
+  $('#traceTot').textContent = '';
+  $('#traceNow').textContent = '';
+}
+
+function toggleTrace(){
+  traceFolded = !traceFolded;
+  $('#trace').classList.toggle('folded', traceFolded);
+  $('#traceCaret').textContent = traceFolded ? '▸' : '▾';
+}
+
+function fmtDetail(d){
+  if (!d) return '';
+  return Object.entries(d)
+    .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
+    .join('  ');
+}
+
+function onStep(ev){
+  if (ev.phase === 'enter'){
+    steps.push({node: ev.node, label: ev.label, running: true});
+    $('#traceNow').textContent = '· ' + ev.label;
+  } else {
+    // 从后往前找同名的那一步：rewrite 之后 retrieve 会跑第二次，
+    // 按 node 名从前往后找会更新错行
+    for (let i = steps.length - 1; i >= 0; i--){
+      if (steps[i].node === ev.node && steps[i].running){
+        Object.assign(steps[i], {running: false, ms: ev.ms, detail: ev.detail});
+        break;
+      }
+    }
+  }
+  renderTrace();
+}
+
+function renderTrace(){
+  $('#traceBody').innerHTML = steps.map(s => `
+    <div class="stp ${s.running ? 'run' : 'ok'}">
+      <span class="dot"></span>
+      <span class="nm">${esc(s.label)}</span>
+      <span class="dt">${esc(fmtDetail(s.detail))}</span>
+      <span class="ms">${s.running ? '…' : s.ms + 'ms'}</span>
+    </div>`).join('');
+  const done = steps.filter(s => !s.running);
+  if (done.length){
+    $('#traceTot').textContent =
+      `${done.length} 步 · ${done.reduce((a, s) => a + (s.ms || 0), 0)}ms`;
+  }
+  const b = $('#traceBody');
+  b.scrollTop = b.scrollHeight;
+}
 
 let products = [], current = null, cat = '全部';
 let ws, connected = false, sessionId = null, draft = null, greeted = false;
@@ -698,6 +788,7 @@ function send(e){
   if (text) el.appendChild(document.createTextNode(text));
 
   $('#cinput').value = '';
+  resetTrace();
   $('#cstatus').innerHTML = '<span class="pill live">思考</span>';
   ws.send(JSON.stringify({
     message: text,
@@ -710,9 +801,8 @@ function send(e){
 }
 
 function handle(ev){
-  if (ev.type === 'status'){
-    $('#cstatus').innerHTML = `<span class="pill live">${STAGES[ev.stage] || ev.stage}</span>`
-      + (ev.detail ? `<span class="pill">${esc(ev.detail)}</span>` : '');
+  if (ev.type === 'step'){
+    onStep(ev);
     return;
   }
   if (ev.type === 'delta'){
@@ -736,6 +826,7 @@ function handle(ev){
   if (ev.type !== 'done') return;
 
   $('#cstatus').innerHTML = '';
+  $('#traceNow').textContent = '';
   sessionId = ev.session_id;
 
   // 定稿：合规检查可能改写过（"保证明天到"→"通常明天到"）或整段拦下

@@ -155,76 +155,76 @@ def run_turn(message: str, state: AgentState, deps: Deps) -> AgentState:
     state.message = message
     cfg = deps.config
 
-    state = nodes.ingest(state, deps)
+    state = nodes.run_node("ingest", nodes.ingest, state, deps)
 
     # 图片在安全检查之前转成文本：安全规则是纯文本规则，
     # 图不转述的话，"忽略上面所有指令"写在图上就绕过去了
-    state = nodes.understand_image(state, deps)
+    state = nodes.run_node("vision", nodes.understand_image, state, deps)
     step = route_after_vision(state)
     if step == "emit":
-        return nodes.emit(state, deps)
+        return nodes.run_node("emit", nodes.emit, state, deps)
     if step == "handover":
-        return nodes.emit(nodes.handover(state, deps), deps)
+        return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
 
-    state = nodes.guard_input(state, deps)
+    state = nodes.run_node("guard", nodes.guard_input, state, deps)
 
     step = route_after_guard(state)
     if step == "emit":
-        return nodes.emit(state, deps)
+        return nodes.run_node("emit", nodes.emit, state, deps)
     if step == "handover":
-        return nodes.emit(nodes.handover(state, deps), deps)
+        return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
 
-    state = nodes.classify_intent(state, deps)
+    state = nodes.run_node("intent", nodes.classify_intent, state, deps)
     step = route_after_intent(state)
     if step == "handover":
-        return nodes.emit(nodes.handover(state, deps), deps)
+        return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
     if step == "chitchat":
-        state = nodes.chitchat(state, deps)
+        state = nodes.run_node("chitchat", nodes.chitchat, state, deps)
         if route_after_chitchat(state) == "emit":
-            return nodes.emit(state, deps)
+            return nodes.run_node("emit", nodes.emit, state, deps)
         # 需要事实 → 落回主链路，走下面的检索
 
     if step == "tools":
-        state = nodes.call_tools(state, deps)
+        state = nodes.run_node("tools", nodes.call_tools, state, deps)
         step = route_after_tools(state)
         if step == "handover":
-            return nodes.emit(nodes.handover(state, deps), deps)
+            return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
         if step == "emit":
-            return nodes.emit(state, deps)
+            return nodes.run_node("emit", nodes.emit, state, deps)
         if step == "generate":
-            state = nodes.generate(state, deps)
+            state = nodes.run_node("generate", nodes.generate, state, deps)
             if route_after_generate(state) == "handover":
-                return nodes.emit(nodes.handover(state, deps), deps)
-            state = nodes.post_check(state, deps)
+                return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
+            state = nodes.run_node("postcheck", nodes.post_check, state, deps)
             if route_after_postcheck(state) == "handover":
-                return nodes.emit(nodes.handover(state, deps), deps)
-            return nodes.emit(state, deps)
+                return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
+            return nodes.run_node("emit", nodes.emit, state, deps)
 
     # 检索 →（必要时改写重试一次）→ 打分分流
-    state = nodes.retrieve(state, deps)
+    state = nodes.run_node("retrieve", nodes.retrieve, state, deps)
     step = route_after_retrieve(state, cfg)
     if step == "rewrite":
-        state = nodes.rewrite_query(state, deps)
-        state = nodes.retrieve(state, deps)
+        state = nodes.run_node("rewrite", nodes.rewrite_query, state, deps)
+        state = nodes.run_node("retrieve", nodes.retrieve, state, deps)
         step = route_after_retrieve(state, cfg)
 
     if step == "handover":
-        return nodes.emit(nodes.handover(state, deps), deps)
+        return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
     if step == "clarify":
-        state = nodes.clarify(state, deps)
+        state = nodes.run_node("clarify", nodes.clarify, state, deps)
         if state.handover:
-            return nodes.emit(nodes.handover(state, deps), deps)
-        return nodes.emit(state, deps)
+            return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
+        return nodes.run_node("emit", nodes.emit, state, deps)
 
-    state = nodes.generate(state, deps)
+    state = nodes.run_node("generate", nodes.generate, state, deps)
     if route_after_generate(state) == "handover":
-        return nodes.emit(nodes.handover(state, deps), deps)
+        return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
 
-    state = nodes.post_check(state, deps)
+    state = nodes.run_node("postcheck", nodes.post_check, state, deps)
     if route_after_postcheck(state) == "handover":
-        return nodes.emit(nodes.handover(state, deps), deps)
+        return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
 
-    return nodes.emit(state, deps)
+    return nodes.run_node("emit", nodes.emit, state, deps)
 
 
 def safe_run_turn(message: str, state: AgentState, deps: Deps) -> AgentState:
@@ -239,11 +239,11 @@ def safe_run_turn(message: str, state: AgentState, deps: Deps) -> AgentState:
         state.to_handover(HandoverReason.INTERNAL_ERROR)
         state.trace.error = f"{type(exc).__name__}: {exc}"
         try:
-            state = nodes.handover(state, deps)
+            state = nodes.run_node("handover", nodes.handover, state, deps)
         except Exception:  # noqa: BLE001  连交接摘要都生成不了
             state.answer = "系统开小差了，正在为您转接人工客服～"
             state.trace.handover = True
-        return nodes.emit(state, deps)
+        return nodes.run_node("emit", nodes.emit, state, deps)
 
 
 # ---------------------------------------------------------------- LangGraph
@@ -283,7 +283,8 @@ def build_graph(deps: Deps):
         ("handover", nodes.handover),
         ("emit", nodes.emit),
     ):
-        g.add_node(name, (lambda f: lambda s: f(s, deps))(fn))
+        # 与 run_turn 共用 run_node：页面上看到的流程和图里跑的必然一致
+        g.add_node(name, (lambda n, f: lambda s: nodes.run_node(n, f, s, deps))(name, fn))
 
     g.add_edge(START, "ingest")
     g.add_edge("ingest", "vision")
