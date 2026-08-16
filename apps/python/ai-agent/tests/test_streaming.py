@@ -327,12 +327,102 @@ class TestWebPage:
                     "....//deploy/.env", "9001.jpg/../../.env"):
             assert c.get(f"/img/{bad}").status_code in (404, 400), bad
 
+    def test_buy_button_is_actually_wired(self):
+        """「立即购买」必须真的绑了处理函数。
+
+        这条测试的由来：之前它是 `<button class="buy">立即购买</button>`，
+        没有 onclick、没有 addEventListener，全文件里 buy 只出现两次
+        （一次 CSS 一次这里）——一个长得完全像能点的死按钮。
+        看起来能用而实际不能用，比明摆着没做更糟。
+        """
+        text = self._client().get("/").text
+        assert 'onclick="buyNow()"' in text, "购买按钮没有绑处理函数"
+        assert "function buyNow()" in text
+        assert "/api/orders" in text, "没有真的去调下单接口"
+        assert "requestId" in text, "下单请求缺幂等键"
+
+    def test_sku_chips_are_selectable(self):
+        """不能选规格就无法下单——SKU 必须可点，且缺货的不可点。"""
+        text = self._client().get("/").text
+        assert "function pickSku(" in text
+        assert "onclick=\\\"pickSku(" in text or "onclick=\"pickSku(" in text \
+            or "pickSku('" in text
+
+    def test_sku_spec_is_parsed_not_spread_into_characters(self):
+        """spec 从接口回来是 JSON 字符串，不是对象。
+
+        原来写的是 `Object.values(s.spec || {})`——对字符串取 values 会
+        拆成一个个字符，规格标签渲染出来是逐字打散的原始 JSON。
+        """
+        text = self._client().get("/").text
+        assert "function specText(" in text
+        assert "JSON.parse(v)" in text
+        # 正向断言渲染路径真的走 specText。原本这里写的是「不许出现
+        # Object.values(s.spec」，结果匹配到了解释旧写法的那段注释上——
+        # 负向的字符串断言会被自己的注释绊倒
+        assert "esc(specText(s))" in text, "SKU 标签没有走 specText 解析"
+
     def test_products_api_degrades_instead_of_500(self):
-        """商品查不到不该让整页白屏——前端退化成只有客服入口。"""
+        """商品查不到不该让整页白屏——前端退化成只有客服入口。
+
+        兜的是 BaseException 而不是 Exception：cryptography 的 Rust 扩展
+        装坏时 pymysql 导入会抛 pyo3_runtime.PanicException，它继承
+        BaseException，`except Exception` 漏得干干净净。这条测试在
+        没有 MySQL 的环境里跑，走的正是那条降级分支。
+        """
         r = self._client().get("/api/products")
         assert r.status_code == 200
         body = r.json()
         assert "items" in body and isinstance(body["items"], list)
+
+
+class TestOrderProxy:
+    """下单接口只做转发，实现在 mall-product。
+
+    在这里再写一份扣库存逻辑，就等于在只读工具层旁边开了个写口子，
+    而且两份实现迟早漂移——库存以谁为准会说不清。
+    """
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        return TestClient(app)
+
+    def test_order_service_down_returns_actionable_error(self, monkeypatch):
+        """订单服务没起来是演示时最常见的情况，不能只回一句「下单失败」。
+
+        **显式把地址指到一个确定没人监听的端口**，而不是依赖默认的 8081
+        恰好空着。原本这条就是靠"测试机上没起 mall-product"通过的，
+        本地真把服务跑起来之后它立刻变红——一条会因为环境里多了个
+        进程就失败的测试，测的不是代码。
+        """
+        from app.config import settings
+        monkeypatch.setattr(settings, "order_base_url", "http://127.0.0.1:1")
+
+        r = self._client().post("/api/orders", json={
+            "requestId": "t-1", "userId": 10086, "skuNo": "S9001-BEIGE-M",
+            "quantity": 1,
+        })
+        assert r.status_code == 200, "连不上下游不该把 500 甩给浏览器"
+        body = r.json()
+        assert body["code"] == 9503
+        assert "127.0.0.1:1" in body["message"], "错误里要指明是哪个服务，否则没法排查"
+
+    def test_agent_tool_layer_stays_read_only(self):
+        """转发口子开在 HTTP 层，工具层必须仍然是全只读的。
+
+        这条盯的是边界本身：哪天有人图方便把下单塞进 tools.py，
+        这里会挂。工具层能被 LLM 直接调用，一个写操作进去就是
+        AI 可以自己下单。
+        """
+        import re
+        from pathlib import Path
+
+        src = Path("app/agent/tools.py").read_text(encoding="utf-8")
+        # 只看 SQL 字符串里的动词，注释与文档里提到这些词是允许的
+        sql_writes = re.findall(
+            r'"\s*(INSERT|UPDATE|DELETE|REPLACE)\s', src, re.IGNORECASE)
+        assert not sql_writes, f"工具层出现了写操作 SQL：{sql_writes}"
 
 
 class TestDepsAssemblyIsShared:

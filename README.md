@@ -276,7 +276,53 @@ pip install -e "apps/python/ai-agent[server]"
 smartmall-agent serve          # → http://127.0.0.1:9002/
 ```
 
-商品列表 → 商品详情（价格 / SKU 库存 / 尺码表）→ 右下角「联系客服」浮窗。
+商品列表 → 商品详情（价格 / SKU 库存 / 尺码表）→ 选规格下单 → 右下角「联系客服」浮窗。
+
+### 下单
+
+下单由 `mall-product` 实现（Java），店铺页通过 ai-agent 的 `/api/orders` 转发过去。
+**需要额外起一个服务**——只跑 `smartmall-agent serve` 的话，页面能逛，点购买会
+明确提示订单服务没起来，其余功能不受影响：
+
+```bash
+mysql -u root -p --default-character-set=utf8mb4 smartmall \
+  < deploy/sql/migrations/007_order_placement.sql     # 幂等键，一次性
+
+cd apps/java && mvn -pl mall-product -am install -DskipTests
+MYSQL_HOST=127.0.0.1 java -jar mall-product/target/mall-product-0.1.0-SNAPSHOT.jar
+```
+
+三条不变式，各自对应代码里一处具体写法：
+
+| 不变式 | 靠什么保证 |
+|---|---|
+| **不超卖** | `UPDATE sku SET stock=stock-? WHERE sku_no=? AND stock>=?` —— 判断与扣减在同一条 UPDATE 里，InnoDB 持行锁求值谓词，并发自动串行 |
+| **不重单** | `request_id` 唯一索引 + 快慢两条回查路径 |
+| **不漏库存** | 扣库存与建单同事务；幂等落败的那笔整体回滚，扣掉的库存跟着吐回来 |
+
+**为什么订单放在 mall-product 而不是独立的 mall-order**：扣库存与建单必须原子，
+而库存归 mall-product 管。拆开这个原子性就得靠 Saga / TCC 补偿维持，而整个项目
+跑在一个 MySQL 上，付出分布式事务的复杂度换不来任何东西。真要拆时接缝是
+`OrderService` 的公开方法，不是数据库。
+
+**下单接口在 ai-agent 这边只是转发，不是实现。**工具层是刻意全只读的（AI 误触发的
+退款、改价是不可逆的资金损失），在 Python 侧再写一份扣库存逻辑等于给那道边界开
+口子，还会出现两份实现漂移——库存以谁为准就说不清了。转发只是因为演示页由
+ai-agent 托管，跨域调另一个端口不如在这里转一次省事。
+
+超卖这类问题在手工点击下永远复现不出来，所以有测试盯着：29 个 Java 测试，
+其中并发那组是 50 线程抢 5 件、100 线程抢 3 件。H2 的行锁语义与 InnoDB 不等价，
+所以另有一个脚本对真库复核：
+
+```bash
+./deploy/scripts/verify-order-concurrency.sh                          # 50 抢 5
+SKU_NO=S9002-WHITE-M STOCK=3 CONCURRENCY=100 ./deploy/scripts/verify-order-concurrency.sh
+```
+
+**userId 目前从请求体传，这是已知的临时方案**——项目还没有认证体系，现在任何人
+都能以任意身份下单。代码里显式标了出来而不是假装安全；接入认证时改动只在控制器
+一层。越权口径与客服工具层一致：不属于你的订单，返回的错误与「订单不存在」
+一字不差，不给攻击者存在性预言机。
 
 **做成店铺而不是裸聊天页是有理由的**：当前商品是客服最重要的上下文——
 它决定检索的过滤范围、决定查哪个 SKU 的库存。从商品详情页点「联系客服」

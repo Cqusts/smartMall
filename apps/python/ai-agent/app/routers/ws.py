@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from ..agent.state import AgentState
 from ..agent.streaming import stream_turn
+from ..config import settings
 from .chat import _sessions, get_deps
 
 router = APIRouter(tags=["客服"])
@@ -88,9 +89,53 @@ async def products() -> dict[str, Any]:
             detail["size_chart"] = box.get_size_chart(pid)
             items.append(detail)
         return {"ok": True, "items": items}
-    except Exception as exc:  # noqa: BLE001
-        # 商品挂了不该让整个页面白屏——前端会退化成只有客服入口
+    except BaseException as exc:  # noqa: BLE001
+        # 商品挂了不该让整个页面白屏——前端会退化成只有客服入口。
+        #
+        # 这里必须是 BaseException 而不是 Exception：pymysql 的依赖链上有
+        # cryptography，它的 Rust 扩展装坏时抛的是 pyo3_runtime.PanicException，
+        # 那是 BaseException 的直接子类，`except Exception` 兜不住，
+        # 整个降级保证就在最需要它的时候失效了（实测踩过）
         return {"ok": False, "items": [], "error": type(exc).__name__}
+
+
+@router.post("/api/orders", summary="下单（转发到 mall-product）")
+async def create_order(payload: dict[str, Any]) -> dict[str, Any]:
+    """把下单请求转发给 mall-product。
+
+    **这里只是转发，不是实现。**下单是写操作，而本服务的工具层是刻意全只读的
+    （见 ``agent/tools.py``：AI 误触发的退款、改价是不可逆的资金损失）。
+    在 Python 侧再写一份扣库存逻辑，等于把那道只读边界开个口子，还会出现
+    两份实现漂移——库存到底以谁为准就说不清了。所以扣库存、幂等、事务
+    全在 mall-product 一处，这里连参数都不解释，原样透传。
+
+    转发而不是让浏览器直连 8081，纯粹是因为演示页由本服务托管，跨域调
+    另一个端口要么开 CORS 要么改 host，都比在这里转一次麻烦。
+    """
+    import httpx
+
+    url = f"{settings.order_base_url.rstrip('/')}/api/product/orders"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, json=payload)
+    except Exception as exc:  # noqa: BLE001
+        # 订单服务没起来是演示时最常见的情况，错误要说清楚是哪个服务、
+        # 怎么起——只回一句"下单失败"，用户会以为是代码坏了
+        return {
+            "code": 9503,
+            "message": f"订单服务不可用（{settings.order_base_url}）："
+                       f"{type(exc).__name__}",
+            "data": None,
+        }
+
+    try:
+        return resp.json()
+    except ValueError:
+        return {
+            "code": 9503,
+            "message": f"订单服务返回了非 JSON 响应（HTTP {resp.status_code}）",
+            "data": None,
+        }
 
 
 @router.websocket("/ws/chat")
