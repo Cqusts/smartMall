@@ -35,6 +35,15 @@ mybatis-plus:
       logic-delete-value: 1
       logic-not-delete-value: 0
 
+smartmall:
+  order:
+    release-expired:
+      # 测试里必须关掉。定时任务在后台自己跑会让测试结果不可复现——
+      # 一笔刚建的订单可能在断言之前就被回收了，而且失败只在特定时序下出现。
+      # 超时逻辑本身由测试直接调 OrderService#releaseExpired 覆盖，
+      # 时间点完全可控
+      enabled: false
+
 logging:
   level:
     root: WARN

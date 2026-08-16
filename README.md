@@ -292,13 +292,46 @@ cd apps/java && mvn -pl mall-product -am install -DskipTests
 MYSQL_HOST=127.0.0.1 java -jar mall-product/target/mall-product-0.1.0-SNAPSHOT.jar
 ```
 
-三条不变式，各自对应代码里一处具体写法：
+完整生命周期：**下单（扣库存）→ 支付 / 取消（回补）→ 超时未支付自动回补**。
+
+```
+POST /api/product/orders                     下单
+POST /api/product/orders/{orderNo}/pay       支付
+POST /api/product/orders/{orderNo}/cancel    取消
+GET  /api/product/orders/{orderNo}           查询
+```
+
+四条不变式，各自对应代码里一处具体写法：
 
 | 不变式 | 靠什么保证 |
 |---|---|
 | **不超卖** | `UPDATE sku SET stock=stock-? WHERE sku_no=? AND stock>=?` —— 判断与扣减在同一条 UPDATE 里，InnoDB 持行锁求值谓词，并发自动串行 |
 | **不重单** | `request_id` 唯一索引 + 快慢两条回查路径 |
 | **不漏库存** | 扣库存与建单同事务；幂等落败的那笔整体回滚，扣掉的库存跟着吐回来 |
+| **库存至多回补一次** | 手动取消与超时回收共用同一个入口，判据是 `UPDATE ... WHERE status='pending_payment'`——谁的 UPDATE 返回 1 谁才有资格回补 |
+
+**下单即扣库存（预占）**，因为"判断有没有货"和"把货占住"必须是同一个动作，
+放到支付时再扣就又出现窗口。代价是没付钱的单占着货，所以有个定时任务回收——
+不回收的话，一批放弃支付的订单能把热销 SKU 永久锁死：页面显示无货而一件没卖出去。
+
+```yaml
+smartmall.order.payment-ttl: PT30M              # 多久算超时
+smartmall.order.release-expired.enabled: true   # 关掉它
+smartmall.order.release-expired.interval: PT1M  # 扫描间隔（fixedDelay）
+```
+
+**30 分钟是拍的不是算的**，真实场景由支付渠道超时与大促周转速度决定（通常 15–30 分钟），
+上生产前按实测重定。页面上的「几点前未支付将自动释放」由服务端按这个配置算出来
+（`OrderView.expiresAt`），不在前端写死——写死的话改了配置页面就开始骗人。
+
+**多实例不需要分布式锁**：两个 mall-product 的定时任务会扫到同一批订单，但都要过
+那句条件 UPDATE，同一笔订单只有一个实例拿得到 1。重复扫描浪费几次查询，
+正确性由数据库的行锁保证。
+
+最危险的一刻是**用户在超时那一秒点支付**：支付与回收必须恰好成功一个。
+支付赢则订单 paid、库存保持扣减；回收赢则订单 cancelled、库存回补，
+而支付**必须报错**——若此时还允许置为 paid，就会出现"付了钱但货已还回库存"，
+超卖从这个口子漏出来。有一条 15 轮的竞态测试盯着它。
 
 **为什么订单放在 mall-product 而不是独立的 mall-order**：扣库存与建单必须原子，
 而库存归 mall-product 管。拆开这个原子性就得靠 Saga / TCC 补偿维持，而整个项目
@@ -310,8 +343,8 @@ MYSQL_HOST=127.0.0.1 java -jar mall-product/target/mall-product-0.1.0-SNAPSHOT.j
 口子，还会出现两份实现漂移——库存以谁为准就说不清了。转发只是因为演示页由
 ai-agent 托管，跨域调另一个端口不如在这里转一次省事。
 
-超卖这类问题在手工点击下永远复现不出来，所以有测试盯着：29 个 Java 测试，
-其中并发那组是 50 线程抢 5 件、100 线程抢 3 件。H2 的行锁语义与 InnoDB 不等价，
+超卖这类问题在手工点击下永远复现不出来，所以有测试盯着：46 个 Java 测试，
+其中并发那组是 50 线程抢 5 件、100 线程抢 3 件，另有 15 轮的支付/回收竞态。H2 的行锁语义与 InnoDB 不等价，
 所以另有一个脚本对真库复核：
 
 ```bash

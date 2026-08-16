@@ -99,28 +99,35 @@ async def products() -> dict[str, Any]:
         return {"ok": False, "items": [], "error": type(exc).__name__}
 
 
-@router.post("/api/orders", summary="下单（转发到 mall-product）")
-async def create_order(payload: dict[str, Any]) -> dict[str, Any]:
-    """把下单请求转发给 mall-product。
+#: 订单号白名单。转发时它会被拼进下游 URL，不校验就等于把路径拼接权
+#: 交给调用方（`../../actuator/env` 之类）。合法订单号只有「20 位数字」
+#: 这一种形状——与 OrderService.nextOrderNo 的生成规则对齐
+_SAFE_ORDER_NO = re.compile(r"\d{14,24}")
+
+
+async def _forward(method: str, path: str, *,
+                   json_body: dict[str, Any] | None = None,
+                   params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """把请求原样转给 mall-product。
 
     **这里只是转发，不是实现。**下单是写操作，而本服务的工具层是刻意全只读的
     （见 ``agent/tools.py``：AI 误触发的退款、改价是不可逆的资金损失）。
     在 Python 侧再写一份扣库存逻辑，等于把那道只读边界开个口子，还会出现
-    两份实现漂移——库存到底以谁为准就说不清了。所以扣库存、幂等、事务
-    全在 mall-product 一处，这里连参数都不解释，原样透传。
+    两份实现漂移——库存到底以谁为准就说不清了。所以扣库存、幂等、事务、
+    超时释放全在 mall-product 一处，这里连参数都不解释。
 
     转发而不是让浏览器直连 8081，纯粹是因为演示页由本服务托管，跨域调
     另一个端口要么开 CORS 要么改 host，都比在这里转一次麻烦。
     """
     import httpx
 
-    url = f"{settings.order_base_url.rstrip('/')}/api/product/orders"
+    url = f"{settings.order_base_url.rstrip('/')}{path}"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.request(method, url, json=json_body, params=params)
     except Exception as exc:  # noqa: BLE001
         # 订单服务没起来是演示时最常见的情况，错误要说清楚是哪个服务、
-        # 怎么起——只回一句"下单失败"，用户会以为是代码坏了
+        # 怎么起——只回一句"失败"，用户会以为是代码坏了
         return {
             "code": 9503,
             "message": f"订单服务不可用（{settings.order_base_url}）："
@@ -136,6 +143,27 @@ async def create_order(payload: dict[str, Any]) -> dict[str, Any]:
             "message": f"订单服务返回了非 JSON 响应（HTTP {resp.status_code}）",
             "data": None,
         }
+
+
+@router.post("/api/orders", summary="下单（转发到 mall-product）")
+async def create_order(payload: dict[str, Any]) -> dict[str, Any]:
+    return await _forward("POST", "/api/product/orders", json_body=payload)
+
+
+@router.post("/api/orders/{order_no}/pay", summary="支付（转发到 mall-product）")
+async def pay_order(order_no: str, user_id: int) -> dict[str, Any]:
+    if not _SAFE_ORDER_NO.fullmatch(order_no):
+        raise HTTPException(status_code=400, detail="订单号格式不合法")
+    return await _forward("POST", f"/api/product/orders/{order_no}/pay",
+                          params={"userId": user_id})
+
+
+@router.post("/api/orders/{order_no}/cancel", summary="取消（转发到 mall-product）")
+async def cancel_order(order_no: str, user_id: int) -> dict[str, Any]:
+    if not _SAFE_ORDER_NO.fullmatch(order_no):
+        raise HTTPException(status_code=400, detail="订单号格式不合法")
+    return await _forward("POST", f"/api/product/orders/{order_no}/cancel",
+                          params={"userId": user_id})
 
 
 @router.websocket("/ws/chat")

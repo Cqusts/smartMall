@@ -41,6 +41,13 @@ public class OrderController {
     // 绑定名一律显式写出。父 POM 已经开了编译器的 -parameters，靠推断本也能work，
     // 但那意味着一个构建参数没了、接口就在运行时炸——显式写死两个字符的成本，
     // 换掉对编译选项的隐式依赖
+    @PostMapping("/{orderNo}/pay")
+    @Operation(summary = "支付", description = "重复支付幂等返回成功；已取消的订单报错，不会改成已支付")
+    public ApiResponse<OrderView> pay(@PathVariable("orderNo") String orderNo,
+                                      @RequestParam("userId") Long userId) {
+        return ApiResponse.ok(orderService.pay(orderNo, userId));
+    }
+
     @PostMapping("/{orderNo}/cancel")
     @Operation(summary = "取消订单", description = "回补库存。仅待支付可取消，且至多回补一次")
     public ApiResponse<OrderView> cancel(@PathVariable("orderNo") String orderNo,

@@ -408,6 +408,32 @@ class TestOrderProxy:
         assert body["code"] == 9503
         assert "127.0.0.1:1" in body["message"], "错误里要指明是哪个服务，否则没法排查"
 
+    def test_order_no_is_whitelisted_before_being_put_into_a_url(self):
+        """订单号会被拼进下游 URL，不校验等于把路径拼接权交给调用方。
+
+        白名单而不是黑名单：合法订单号只有「一串数字」这一种形状，
+        黑掉 ".." 还剩下编码变体一堆绕法。
+        """
+        c = self._client()
+        for bad in ("../../actuator/env", "..%2f..%2factuator", "1234;rm",
+                    "abc", "", "1"):
+            r = c.post(f"/api/orders/{bad}/pay", params={"user_id": 10086})
+            assert r.status_code in (400, 404, 422), f"{bad!r} 应被拒绝"
+
+    def test_pay_and_cancel_are_forwarded_not_reimplemented(self):
+        """支付与取消同样只转发。连不上时给的是可排查的错误。"""
+        from app.config import settings
+        import pytest
+
+        c = self._client()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(settings, "order_base_url", "http://127.0.0.1:1")
+            for action in ("pay", "cancel"):
+                r = c.post(f"/api/orders/20260816142625765414/{action}",
+                           params={"user_id": 10086})
+                assert r.status_code == 200
+                assert r.json()["code"] == 9503, action
+
     def test_agent_tool_layer_stays_read_only(self):
         """转发口子开在 HTTP 层，工具层必须仍然是全只读的。
 

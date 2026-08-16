@@ -753,14 +753,8 @@ async function buyNow(){
       return;
     }
 
-    const o = d.data;
-    const verb = o.idempotentHit ? '该订单已创建（幂等命中，未重复下单）' : '下单成功';
-    orderMsg('ok',
-      `${verb}　订单号 <b>${esc(o.orderNo)}</b><br>`
-      + `${esc(o.spec ? specLabel(o.spec) : o.skuNo)} × ${o.quantity}　`
-      + `实付 ¥${Number(o.amount).toFixed(2)}　状态：${esc(o.status)}<br>`
-      + `<a onclick="askOrder('${esc(o.orderNo)}')">问客服这单到哪了 →</a>`
-      + `<span class="hint">　（库存已扣减，刷新页面可见）</span>`);
+    renderOrder(d.data, d.data.idempotentHit
+      ? '该订单已创建（幂等命中，未重复下单）' : '下单成功');
 
     // 库存变了，页面上的数字不能还停在旧值——"页面显示什么客服就得答什么"
     // 这条规矩对下单后同样成立
@@ -780,6 +774,75 @@ function specLabel(spec){
   try { return Object.values(JSON.parse(spec)).join(' '); }
   catch(e){ return spec; }
 }
+
+/** "2026-08-16T15:12:34" → "15:12"。服务端回的是本地时间、不带时区。 */
+function hhmm(iso){
+  const m = /T(\d{2}:\d{2})/.exec(String(iso || ''));
+  return m ? m[1] : String(iso || '');
+}
+
+const STATUS_CN = {
+  pending_payment: '待支付', paid: '已支付', shipped: '已发货',
+  delivered: '已送达', completed: '已完成', cancelled: '已取消',
+  refunding: '退款中',
+};
+
+/** 渲染订单结果块。待支付才给支付/取消入口——按状态给动作，不给死按钮。 */
+function renderOrder(o, verb){
+  const pending = o.status === 'pending_payment';
+  const actions = pending
+    ? `<a onclick="payOrder('${esc(o.orderNo)}')">模拟支付</a>　`
+    + `<a onclick="cancelOrder('${esc(o.orderNo)}')">取消订单</a>　`
+    : '';
+  // 到期时刻由服务端给（expiresAt），不在前端写死「30 分钟」——超时时长是
+  // 配置项，写死的话改了配置页面就开始骗人
+  const note = pending
+    ? `<span class="hint">　（库存已预占${
+         o.expiresAt ? `，${esc(hhmm(o.expiresAt))} 前未支付将自动释放` : '，未支付将自动释放'
+       }）</span>`
+    : (o.status === 'paid'
+        ? '<span class="hint">　（库存已确认扣减）</span>'
+        : '<span class="hint">　（库存已回补）</span>');
+
+  orderMsg(o.status === 'cancelled' ? 'err' : 'ok',
+    `${verb}　订单号 <b>${esc(o.orderNo)}</b><br>`
+    + `${esc(o.spec ? specLabel(o.spec) : o.skuNo)} × ${o.quantity}　`
+    + `实付 ¥${Number(o.amount).toFixed(2)}　`
+    + `状态：${esc(STATUS_CN[o.status] || o.status)}<br>`
+    + actions
+    + `<a onclick="askOrder('${esc(o.orderNo)}')">问客服这单到哪了 →</a>`
+    + note);
+}
+
+async function orderAction(orderNo, action, verbs){
+  if (placing) return;
+  placing = true;
+  const userId = parseInt($('#user').value, 10) || 10086;
+  try{
+    const r = await fetch(`/api/orders/${encodeURIComponent(orderNo)}/${action}`
+                          + `?user_id=${userId}`, {method: 'POST'});
+    const d = await r.json();
+    if (d.code !== 0){
+      // 失败也要把当前真实状态显示出来，而不是只报一句错——超时被自动取消
+      // 那一刻点支付就会走到这里，用户需要知道单没了、钱没扣
+      orderMsg('err', `${verbs.fail}：${esc(d.message || '未知错误')}`);
+      return;
+    }
+    renderOrder(d.data, d.data.idempotentHit ? verbs.again : verbs.ok);
+    await loadProducts();
+    const fresh = products.find(x => x.id === (current && current.id));
+    if (fresh) current = fresh;
+  }catch(e){
+    orderMsg('err', `${verbs.fail}：${esc(e.message || e)}`);
+  }finally{
+    placing = false;
+  }
+}
+
+const payOrder = no => orderAction(no, 'pay', {
+  ok: '支付成功', again: '该订单已支付（幂等命中）', fail: '支付失败'});
+const cancelOrder = no => orderAction(no, 'cancel', {
+  ok: '订单已取消', again: '订单已取消', fail: '取消失败'});
 
 /** 下完单直接去问客服——这条链路闭上，才叫「下单」和「查单」用的是同一份数据。 */
 function askOrder(orderNo){

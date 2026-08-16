@@ -7,6 +7,9 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
+import java.time.LocalDateTime;
+import java.util.List;
+
 @Mapper
 public interface MallOrderMapper extends BaseMapper<MallOrder> {
 
@@ -31,8 +34,23 @@ public interface MallOrderMapper extends BaseMapper<MallOrder> {
 
     /**
      * 支付。同样用条件更新保证只成功一次，避免重复的支付回调把订单推过头。
+     *
+     * <p>它与 {@link #markCancelled} 抢的是同一个前置状态，这一点是刻意的：
+     * 用户点支付与超时任务判超时可能同时发生，两条 UPDATE 争同一行，
+     * 数据库替我们裁决，赢家唯一。
      */
     @Update("UPDATE mall_order SET status = 'paid' "
             + "WHERE id = #{id} AND status = 'pending_payment'")
     int markPaid(@Param("id") Long id);
+
+    /**
+     * 超期未支付的订单。给超时释放任务用。
+     *
+     * <p>{@code ORDER BY id} + {@code LIMIT} 是为了让每一轮的工作量有上界。
+     * 不限量的话，积压几万单时这个任务会一次性拉进内存、并且长时间持锁。
+     */
+    @Select("SELECT * FROM mall_order WHERE status = 'pending_payment' "
+            + "AND created_at < #{before} ORDER BY id LIMIT #{limit}")
+    List<MallOrder> findExpiredPending(@Param("before") LocalDateTime before,
+                                       @Param("limit") int limit);
 }

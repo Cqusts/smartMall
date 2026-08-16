@@ -10,14 +10,17 @@ import com.smartmall.product.order.mapper.MallOrderMapper;
 import com.smartmall.product.order.mapper.SkuMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -49,10 +52,27 @@ public class OrderService {
     private final SkuMapper skuMapper;
     private final TransactionTemplate tx;
 
-    public OrderService(MallOrderMapper orderMapper, SkuMapper skuMapper, TransactionTemplate tx) {
+    /**
+     * 库存预占时长。**单一事实来源**——出参里的 expiresAt 与超时回收任务
+     * 用的是同一个值，两边各配一份迟早对不上：页面说「还有 30 分钟」而
+     * 任务 15 分钟就把单收走了。
+     */
+    private final Duration paymentTtl;
+
+    private final int releaseBatchSize;
+
+    public OrderService(MallOrderMapper orderMapper, SkuMapper skuMapper, TransactionTemplate tx,
+                        @Value("${smartmall.order.payment-ttl:PT30M}") Duration paymentTtl,
+                        @Value("${smartmall.order.release-expired.batch-size:200}") int releaseBatchSize) {
         this.orderMapper = orderMapper;
         this.skuMapper = skuMapper;
         this.tx = tx;
+        this.paymentTtl = paymentTtl;
+        this.releaseBatchSize = releaseBatchSize;
+    }
+
+    public Duration paymentTtl() {
+        return paymentTtl;
     }
 
     /**
@@ -71,12 +91,12 @@ public class OrderService {
         MallOrder hit = orderMapper.findByRequestId(req.requestId());
         if (hit != null) {
             log.info("幂等命中（快路径） requestId={} orderNo={}", req.requestId(), hit.getOrderNo());
-            return OrderView.of(hit, true);
+            return OrderView.of(hit, true, paymentTtl);
         }
 
         try {
             MallOrder created = tx.execute(status -> doPlace(req));
-            return OrderView.of(created, false);
+            return OrderView.of(created, false, paymentTtl);
         } catch (DuplicateKeyException e) {
             // 慢路径：两个同 request_id 的请求并发，快路径都没命中。
             // 到这里事务已经回滚，扣掉的库存跟着回滚了，回查赢家返回即可。
@@ -88,7 +108,7 @@ public class OrderService {
             }
             log.info("幂等命中（慢路径·并发） requestId={} orderNo={}",
                     req.requestId(), winner.getOrderNo());
-            return OrderView.of(winner, true);
+            return OrderView.of(winner, true, paymentTtl);
         }
     }
 
@@ -160,15 +180,125 @@ public class OrderService {
                     "订单当前状态为 " + order.getStatus() + "，不可取消");
         }
 
-        // 条件更新是这里的关键：并发取消只有一个能拿到 1，也就只回补一次库存
-        if (orderMapper.markCancelled(order.getId()) == 0) {
+        if (!cancelAndRestore(order, "用户取消")) {
             throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL, "订单状态已变更，请刷新后重试");
         }
-        skuMapper.restoreStock(order.getSkuNo(), order.getQuantity());
-        log.info("订单已取消，库存回补 orderNo={} skuNo={} qty={}",
-                orderNo, order.getSkuNo(), order.getQuantity());
+        return OrderView.of(orderMapper.findByOrderNo(orderNo), false, paymentTtl);
+    }
 
-        return OrderView.of(orderMapper.findByOrderNo(orderNo), false);
+    /**
+     * 「置为已取消 + 回补库存」这一对动作的<b>唯一</b>入口。
+     *
+     * <p>手动取消与超时释放都走这里，不是为了少写几行，而是因为**这两条路
+     * 必须共用同一个 at-most-once 判据**。各写一份的话，两边并发时可能都
+     * 认为自己该回补，同一笔订单的库存就会被加回去两次——凭空多出货来。
+     *
+     * <p>判据就是 {@code markCancelled} 里那句 {@code AND status =
+     * 'pending_payment'}：谁的 UPDATE 返回 1，谁才有资格回补。返回 0 的
+     * 一方什么都不做，因为状态已经被别人推走了（可能是另一个取消，
+     * 也可能是用户刚好支付成功）。
+     *
+     * @return true 表示本次调用完成了取消并回补了库存
+     */
+    private boolean cancelAndRestore(MallOrder order, String reason) {
+        if (orderMapper.markCancelled(order.getId()) == 0) {
+            return false;
+        }
+        skuMapper.restoreStock(order.getSkuNo(), order.getQuantity());
+        log.info("订单已取消（{}），库存回补 orderNo={} skuNo={} qty={}",
+                reason, order.getOrderNo(), order.getSkuNo(), order.getQuantity());
+        return true;
+    }
+
+    /**
+     * 支付。
+     *
+     * <p><b>已支付的订单再次调用返回成功而不是报错</b>，这是刻意的：真实支付
+     * 渠道的回调会重试（网络抖动、我们这边响应慢），回调收到错误就会继续重试
+     * 甚至走对账补偿。对同一笔已完成的支付，「再说一次成功」才是正确答复。
+     *
+     * <p><b>而已取消的订单必须报错，不能顺手改成 paid。</b>取消时库存已经回补，
+     * 若此时还允许置为 paid，就会出现一笔"付了钱但货已经还回库存"的订单——
+     * 超卖会从这个口子漏出来。这条路径在超时释放上线后不再是理论问题：
+     * 用户在超时那一刻点支付，就正好撞上。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public OrderView pay(String orderNo, Long userId) {
+        MallOrder order = orderMapper.findByOrderNo(orderNo);
+        if (order == null || !order.getUserId().equals(userId)) {
+            if (order != null) {
+                log.warn("越权支付：用户 {} 试图支付属于 {} 的订单 {}",
+                        userId, order.getUserId(), orderNo);
+            }
+            throw new BizException(ErrorCode.ORDER_NOT_FOUND);
+        }
+        if ("paid".equals(order.getStatus())) {
+            return OrderView.of(order, true, paymentTtl);
+        }
+        if (!"pending_payment".equals(order.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL,
+                    "订单当前状态为 " + order.getStatus() + "，不可支付");
+        }
+
+        if (orderMapper.markPaid(order.getId()) == 0) {
+            // 抢输了。要么是另一个支付回调抢先（幂等，返回成功），
+            // 要么是超时任务刚把它取消了（必须如实报错——钱不能收）
+            MallOrder now = orderMapper.findByOrderNo(orderNo);
+            if (now != null && "paid".equals(now.getStatus())) {
+                return OrderView.of(now, true, paymentTtl);
+            }
+            String state = now == null ? "unknown" : now.getStatus();
+            log.warn("支付未生效，订单状态已变为 {} orderNo={}", state, orderNo);
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL,
+                    "订单状态已变更为 " + state + "，支付未生效"
+                            + ("cancelled".equals(state) ? "（超时已自动取消，请重新下单）" : ""));
+        }
+
+        log.info("订单已支付 orderNo={}", orderNo);
+        return OrderView.of(orderMapper.findByOrderNo(orderNo), false, paymentTtl);
+    }
+
+    /**
+     * 释放超时未支付订单占用的库存。
+     *
+     * <p><b>为什么需要它：</b>下单即扣库存（预占），这样才能在最早的时刻杜绝
+     * 超卖。代价是没付钱的单会一直占着货——不回收的话，一批放弃支付的订单
+     * 就能把热销 SKU 的库存永久锁死，页面显示无货而实际一件没卖出去。
+     *
+     * <p><b>关于多实例：这里不需要分布式锁。</b>两个 mall-product 实例的定时
+     * 任务会扫到同一批订单，但它们最终都要过 {@code markCancelled} 那句条件
+     * UPDATE，同一笔订单只有一个实例能拿到 1。重复扫描浪费的是几次查询，
+     * 而正确性由数据库保证——用行锁充当互斥，比引一套分布式锁简单得多。
+     *
+     * <p>逐单一个小事务，而不是整批一个大事务：一笔出问题不该连累其余，
+     * 而且大事务会长时间持有一批行锁，挡住正在下单的人。
+     *
+     * @param ttl        下单后多久算超时
+     * @param batchLimit 单轮最多处理多少笔
+     * @return 本次实际释放的订单数
+     */
+    /** 按配置的超时时长与批量上限释放。定时任务走这个重载，参数不重复配一份。 */
+    public int releaseExpired() {
+        return releaseExpired(paymentTtl, releaseBatchSize);
+    }
+
+    public int releaseExpired(Duration ttl, int batchLimit) {
+        LocalDateTime deadline = LocalDateTime.now().minus(ttl);
+        List<MallOrder> expired = orderMapper.findExpiredPending(deadline, batchLimit);
+        if (expired.isEmpty()) {
+            return 0;
+        }
+
+        int released = 0;
+        for (MallOrder order : expired) {
+            Boolean done = tx.execute(s -> cancelAndRestore(order, "超时未支付"));
+            if (Boolean.TRUE.equals(done)) {
+                released++;
+            }
+        }
+        log.info("超时释放：扫到 {} 笔超期未支付，实际释放 {} 笔（其余已被支付或取消）",
+                expired.size(), released);
+        return released;
     }
 
     /** 查单。同样的越权口径：不属于你的单，就是"不存在"。 */
@@ -181,7 +311,7 @@ public class OrderService {
             }
             throw new BizException(ErrorCode.ORDER_NOT_FOUND);
         }
-        return OrderView.of(order, false);
+        return OrderView.of(order, false, paymentTtl);
     }
 
     /**

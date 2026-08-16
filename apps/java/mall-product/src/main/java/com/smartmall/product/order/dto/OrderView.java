@@ -3,6 +3,7 @@ package com.smartmall.product.order.dto;
 import com.smartmall.product.order.entity.MallOrder;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.LocalDateTime;
 
 /**
@@ -15,6 +16,11 @@ import java.time.LocalDateTime;
  * @param idempotentHit true 表示本次请求命中幂等、没有新建订单。
  *                      前端据此把提示从「下单成功」换成「该订单已创建」，
  *                      否则用户双击两次会看到两次「下单成功」，以为买了两单。
+ * @param expiresAt     待支付订单的库存预占到期时刻；非待支付时为 null。
+ *                      <b>由服务端算而不是让前端写死「30 分钟」</b>——超时时长是
+ *                      配置项（{@code smartmall.order.payment-ttl}），前端硬编码
+ *                      的话，改了配置页面就开始骗人。这条规矩和商品页与客服
+ *                      读同一份数据是同一条：显示的东西必须来自真实来源。
  */
 public record OrderView(
         String orderNo,
@@ -25,10 +31,15 @@ public record OrderView(
         BigDecimal amount,
         String status,
         LocalDateTime createdAt,
+        LocalDateTime expiresAt,
         boolean idempotentHit
 ) {
 
-    public static OrderView of(MallOrder o, boolean idempotentHit) {
+    public static OrderView of(MallOrder o, boolean idempotentHit, Duration paymentTtl) {
+        LocalDateTime expiresAt =
+                "pending_payment".equals(o.getStatus()) && o.getCreatedAt() != null
+                        ? o.getCreatedAt().plus(paymentTtl)
+                        : null;
         return new OrderView(
                 o.getOrderNo(),
                 o.getProductId(),
@@ -38,6 +49,7 @@ public record OrderView(
                 o.getAmount(),
                 o.getStatus(),
                 o.getCreatedAt(),
+                expiresAt,
                 idempotentHit
         );
     }
