@@ -293,6 +293,10 @@ mysql -u root -p --default-character-set=utf8mb4 smartmall \
 make run-product        # 编译 + 启动，:8081
 ```
 
+**前置：Maven ≥ 3.6.3**（Spring Boot 3.x 的要求）。低于这个版本构建会在第一步
+被 enforcer 拦下并提示怎么升级 —— 不拦的话，老 Maven 报出来的是「不再支持源选项 5」
+这类和 pom 里写的 `release 21` 完全对不上的错，很难查。`mvn -v` 看当前版本。
+
 **不能只跑 `mvn -pl mall-product spring-boot:run`，两种写法都会失败：**
 
 | 命令 | 报错 | 原因 |

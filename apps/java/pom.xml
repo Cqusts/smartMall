@@ -42,6 +42,13 @@
                编译报错至少看得见，测试静默归零看不见。 -->
         <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
         <maven-surefire-plugin.version>3.2.5</maven-surefire-plugin.version>
+
+        <!-- enforcer 用 3.0.0 而不是更新的版本：它自己只要求 Maven 3.1.1，
+             在老 Maven 上跑得起来。这一点是刚需 —— 它的职责就是在老 Maven 上
+             给出可读的报错，要是它自己都因为版本太低起不来，就白加了。 -->
+        <maven-enforcer-plugin.version>3.0.0</maven-enforcer-plugin.version>
+        <!-- Spring Boot 3.x 官方要求 Maven 3.6.3+，本项目跟随 -->
+        <minimum.maven.version>3.6.3</minimum.maven.version>
     </properties>
 
     <dependencyManagement>
@@ -79,6 +86,55 @@
     </dependencyManagement>
 
     <build>
+        <plugins>
+            <!-- **在构建的第一步就把 Maven 版本卡掉。**
+                 不卡的话，老 Maven 上的报错是这样的：
+
+                   The plugin maven-compiler-plugin:3.13.0 requires Maven version 3.6.3
+
+                 看得懂，但它出现在编译阶段、指向一个插件，人的第一反应是
+                 「那把插件降下来」——而降插件治不了本：Spring Boot 3.x 本身
+                 就要求 Maven 3.6.3+，降完只是把失败推到下一步。
+
+                 更早的一版更难查：不锁插件版本时，老 Maven 拿到 compiler 3.1，
+                 它不认识 maven.compiler.release，回退到 source/target 1.5，
+                 报「不再支持源选项 5」——而 pom 里明明写着 release 21，
+                 报错和配置对不上，根本想不到是 Maven 版本的问题。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>enforce-maven-version</id>
+                        <!-- validate 是生命周期第一个阶段，早于 compile -->
+                        <phase>validate</phase>
+                        <goals><goal>enforce</goal></goals>
+                        <configuration>
+                            <rules>
+                                <requireMavenVersion>
+                                    <version>[${minimum.maven.version},)</version>
+                                    <!-- 关键信息用 ASCII 打头：Windows 控制台
+                                         常年是 GBK/936，Maven 输出的中文在某些
+                                         终端会变成一片问号。真正要照做的那几行
+                                         必须在任何 codepage 下都读得出来。 -->
+                                    <message>
+smartMall requires Maven ${minimum.maven.version}+ (Spring Boot 3.x requirement).
+Check yours: mvn -v      Download: https://maven.apache.org/download.cgi
+  Windows  winget install Apache.Maven    or  scoop install maven
+  macOS    brew install maven
+  Linux    sdk install maven
+(smartMall 需要 Maven ${minimum.maven.version} 或更高版本，这是 Spring Boot 3.x 的要求。
+ 降低插件版本治标不治本 —— Spring Boot 自身就不支持更老的 Maven。)
+                                    </message>
+                                </requireMavenVersion>
+                            </rules>
+                            <fail>true</fail>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+
         <!-- 编译与测试插件都是默认生命周期绑定的，在 pluginManagement 里
              给出版本与配置就够了，不必再在 <plugins> 里声明一遍。 -->
         <pluginManagement>
@@ -108,6 +164,12 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${maven-surefire-plugin.version}</version>
+                </plugin>
+
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-enforcer-plugin</artifactId>
+                    <version>${maven-enforcer-plugin.version}</version>
                 </plugin>
 
                 <plugin>
