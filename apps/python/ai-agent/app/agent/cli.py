@@ -4,6 +4,7 @@
     smartmall-agent chat --product-id 1024   # 带商品上下文
     smartmall-agent ask "这件是什么面料"      # 单轮
     smartmall-agent trace "会起球吗"          # 单轮 + 打印完整 Trace
+    smartmall-agent shop -v                  # 导购 Agent：多轮收敛出商品
 
 调试台的价值在于**看得见中间过程**：意图分到哪一类、检索命中了什么、
 分数多少、为什么转人工。这些在聊天界面里全是隐形的，而它们恰恰是
@@ -61,7 +62,7 @@ def _default_env_files() -> list[Path]:
 # ---------------------------------------------------------------- 装配
 
 
-def _build_deps(args: argparse.Namespace) -> Deps:
+def _build_deps(args: argparse.Namespace, *, with_retriever: bool = True) -> Deps:
     """CLI 侧装配。只负责把命令行参数翻成配置，装配本身走 assembly。"""
     from .assembly import build_deps, config_from_env
 
@@ -75,6 +76,7 @@ def _build_deps(args: argparse.Namespace) -> Deps:
         rag_url=args.rag_url,
         with_store=not args.no_trace,
         with_tools=not args.no_tools,
+        with_retriever=with_retriever,
         config=cfg,
     )
 
@@ -153,6 +155,63 @@ def cmd_chat(args: argparse.Namespace) -> int:
         state.trace = type(state.trace)()
         state = safe_run_turn(message, state, deps)
         _render(state, verbose=args.verbose)
+        print()
+    return 0
+
+
+def cmd_shop(args: argparse.Namespace) -> int:
+    """导购 Agent 的交互式调试。
+
+    这里 verbose 显示的东西和客服那边不一样，因为**要看的东西不一样**。
+    客服看的是"这条回答有没有依据"（命中、分数、覆盖率）；导购看的是
+    **收敛过程**——攒到了哪些条件、按这些条件搜出几件、放宽了什么。
+    多轮下来那几行叠在一起，就是这个 Agent 到底在不在收敛的全部证据。
+    """
+    from .shopping.graph import safe_run_turn
+    from .shopping.nodes import MAX_ASKS
+    from .shopping.state import ShoppingState
+
+    deps = _build_deps(args, with_retriever=False)
+    state = ShoppingState(session=SessionContext(
+        user_id=args.user_id, current_product_id=args.product_id,
+        category_id=args.category_id,
+    ))
+    print("\n说说你想买什么，Ctrl+C 或输入 exit 退出。\n")
+
+    while True:
+        try:
+            message = input("你：").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if message.lower() in ("exit", "quit", "q"):
+            break
+        if not message:
+            continue
+
+        state = safe_run_turn(message, state, deps)
+
+        if args.verbose:
+            print(f"\n  ── 已知需求：{state.need.describe()}")
+            print(f"     候选 {len(state.candidates)} 件"
+                  f" · 已追问 {state.asked}/{MAX_ASKS}"
+                  f" · 结果 {state.outcome}")
+            if state.relaxed:
+                print(f"     ⚠ 放宽了：{'、'.join(state.relaxed)}")
+            for t in state.trace.tools_called:
+                mark = "有结果" if t.get("hit") else "零条"
+                print(f"     🔧 {t['name']} {t['latency_ms']}ms {mark}")
+            if state.trace.error:
+                print(f"     ✗ {state.trace.error}")
+
+        print(f"\n导购：{state.answer}")
+        if state.recommended:
+            by_id = {int(c["id"]): c for c in state.candidates}
+            print("\n  推荐商品：")
+            for pid in state.recommended:
+                item = by_id.get(pid, {})
+                print(f"    #{pid} {truncate(str(item.get('name', '')), 40)}"
+                      f"  {item.get('price_from', '')} 元")
         print()
     return 0
 
@@ -343,6 +402,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("chat", parents=[common], help="交互式多轮对话").set_defaults(
         func=cmd_chat
+    )
+    sub.add_parser("shop", parents=[common],
+                   help="导购 Agent：多轮收敛出具体商品").set_defaults(
+        func=cmd_shop
     )
     s = sub.add_parser("ask", parents=[common], help="单轮提问")
     s.add_argument("question")

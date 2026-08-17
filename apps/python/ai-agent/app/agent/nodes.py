@@ -183,7 +183,10 @@ def step_detail(name: str, state: AgentState) -> dict[str, Any]:
     return {}
 
 
-def run_node(name: str, fn: Any, state: AgentState, deps: Deps) -> AgentState:
+def run_node(
+    name: str, fn: Any, state: Any, deps: Deps,
+    *, labels: dict[str, str] | None = None, detail: Any = None,
+) -> Any:
     """执行一个节点并埋点。
 
     **包一层而不是在每个节点里手写 emit_event。** 原先只有 5 个节点发事件，
@@ -192,15 +195,23 @@ def run_node(name: str, fn: Any, state: AgentState, deps: Deps) -> AgentState:
 
     ``run_turn`` 与 LangGraph 两条路径都走这里，所以页面上看到的流程
     和图里跑的流程必然一致。
+
+    ``labels`` 与 ``detail`` 让别的 Agent（导购、知识运维）复用同一套埋点，
+    只换自己的词表。**不给它们换的话会静默退化**：标签落回英文节点名、
+    detail 一律是空字典——页面照样有行，只是每行都看不出发生了什么，
+    而这正是加这个面板要解决的问题。所以导购那边有一条用例专门断言
+    「标签不等于节点名」。
     """
+    labels = NODE_LABELS if labels is None else labels
+    detail_of = step_detail if detail is None else detail
     t0 = time.time()
     deps.emit_event(type="step", node=name,
-                    label=NODE_LABELS.get(name, name), phase="enter")
+                    label=labels.get(name, name), phase="enter")
     state = fn(state, deps)
     deps.emit_event(
-        type="step", node=name, label=NODE_LABELS.get(name, name),
+        type="step", node=name, label=labels.get(name, name),
         phase="exit", ms=int((time.time() - t0) * 1000),
-        detail=step_detail(name, state),
+        detail=detail_of(name, state),
     )
     return state
 

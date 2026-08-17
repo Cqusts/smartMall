@@ -240,8 +240,11 @@ async def ws_chat(ws: WebSocket) -> None:
             if payload.get("product_id") is not None:
                 ctx.current_product_id = payload["product_id"]
 
-            state = AgentState(session=ctx, image=image, image_mime=mime)
-            await _pump(ws, loop, message, state)
+            if payload.get("agent") == "shopping":
+                await _pump_shopping(ws, loop, message, ctx)
+            else:
+                state = AgentState(session=ctx, image=image, image_mime=mime)
+                await _pump(ws, loop, message, state)
             _sessions.touch(ctx)
 
     except WebSocketDisconnect:
@@ -285,21 +288,23 @@ def _decode_image(raw: Any) -> tuple[bytes | None, str]:
         return None, ""
 
 
-async def _pump(
-    ws: WebSocket, loop: asyncio.AbstractEventLoop, message: str, state: AgentState
-) -> None:
+async def _relay(ws: WebSocket, loop: asyncio.AbstractEventLoop, events) -> None:
     """把同步生成器的事件搬到事件循环里发出去。
 
     生成器在线程里跑；每产出一个事件就 ``call_soon_threadsafe`` 塞进
     asyncio 队列，主协程取出来发。这样首个 token 一出来就能到前端，
     而不是等整轮跑完。
+
+    ``events`` 是个**无参可调用**而不是生成器，因为生成器要在工作线程里
+    才开始跑——传进来一个已经创建好的生成器，第一次 ``next`` 仍然发生在
+    这里，等于白搭一个线程。
     """
     q: asyncio.Queue = asyncio.Queue()
     done = object()
 
     def _produce() -> None:
         try:
-            for event in stream_turn(message, state, get_deps()):
+            for event in events():
                 loop.call_soon_threadsafe(q.put_nowait, event)
         finally:
             loop.call_soon_threadsafe(q.put_nowait, done)
@@ -311,6 +316,31 @@ async def _pump(
             break
         await ws.send_json(event)
     await task
+
+
+async def _pump(
+    ws: WebSocket, loop: asyncio.AbstractEventLoop, message: str, state: AgentState
+) -> None:
+    await _relay(ws, loop, lambda: stream_turn(message, state, get_deps()))
+
+
+async def _pump_shopping(
+    ws: WebSocket, loop: asyncio.AbstractEventLoop, message: str, ctx
+) -> None:
+    """导购一轮。
+
+    state 从会话存储里取——**不能每轮新建**。新建的话用户说过的条件
+    全丢，系统会一遍遍问同样的问题，而这恰恰是导购唯一比客服多出来的
+    能力（见 ShoppingState 的类注释）。
+    """
+    from ..agent.shopping.state import ShoppingState
+    from ..agent.streaming import stream_shopping_turn
+
+    state = _sessions.agent_state(
+        ctx, "shopping", lambda: ShoppingState(session=ctx)
+    )
+    await _relay(ws, loop,
+                 lambda: stream_shopping_turn(message, state, get_deps()))
 
 
 async def _handle_feedback(ws: WebSocket, payload: dict[str, Any]) -> None:

@@ -29,7 +29,7 @@ from app.agent.tools import (  # noqa: E402
 _DDL = [
     """CREATE TABLE product (id INTEGER PRIMARY KEY, product_no TEXT, name TEXT,
         short_name TEXT, category_id INTEGER, brand TEXT, status TEXT,
-        deleted INTEGER DEFAULT 0)""",
+        main_image TEXT DEFAULT '', deleted INTEGER DEFAULT 0)""",
     "CREATE TABLE category (id INTEGER PRIMARY KEY, name TEXT)",
     """CREATE TABLE product_attr (product_id INTEGER, attr_key TEXT,
         attr_value TEXT, is_core INTEGER DEFAULT 0)""",
@@ -47,13 +47,31 @@ _DDL = [
 
 _SEED = [
     "INSERT INTO category VALUES (1024, '针织衫')",
+    "INSERT INTO category VALUES (1030, '夹克')",
     "INSERT INTO product VALUES (9001,'P9001','米白针织衫','针织衫',1024,"
-    "'smartMall','on_sale',0)",
+    "'smartMall','on_sale','9001.jpg',0)",
     "INSERT INTO product_attr VALUES (9001,'材质','100%羊毛',1)",
     "INSERT INTO sku (sku_no,product_id,spec,price,origin_price,stock,status) "
     "VALUES ('S-M',9001,'{\"尺码\":\"M\"}',299.0,399.0,38,'on_sale')",
     "INSERT INTO sku (sku_no,product_id,spec,price,origin_price,stock,status) "
     "VALUES ('S-L',9001,'{\"尺码\":\"L\"}',299.0,399.0,0,'on_sale')",
+    # 导购要按颜色+尺码筛，所以这几条 spec 里两样都有
+    "INSERT INTO product VALUES (9002,'P9002','复古工装夹克','夹克',1030,"
+    "'smartMall','on_sale','9002.jpg',0)",
+    "INSERT INTO sku (sku_no,product_id,spec,price,origin_price,stock,status) "
+    "VALUES ('J-A',9002,'{\"颜色\":\"藏青\",\"尺码\":\"M\"}',459.0,599.0,12,"
+    "'on_sale')",
+    "INSERT INTO sku (sku_no,product_id,spec,price,origin_price,stock,status) "
+    "VALUES ('J-B',9002,'{\"颜色\":\"藏青\",\"尺码\":\"L\"}',479.0,599.0,0,"
+    "'on_sale')",
+    "INSERT INTO sku (sku_no,product_id,spec,price,origin_price,stock,status) "
+    "VALUES ('J-C',9002,'{\"颜色\":\"焦糖\",\"尺码\":\"M\"}',459.0,599.0,7,"
+    "'on_sale')",
+    "INSERT INTO product VALUES (9003,'P9003','已下架夹克','夹克',1030,"
+    "'smartMall','off_sale','9003.jpg',0)",
+    "INSERT INTO sku (sku_no,product_id,spec,price,origin_price,stock,status) "
+    "VALUES ('X-A',9003,'{\"颜色\":\"藏青\",\"尺码\":\"M\"}',199.0,299.0,50,"
+    "'on_sale')",
     "INSERT INTO size_chart VALUES (9001,"
     "'{\"表头\":[\"尺码\",\"胸围\"],\"行\":[[\"M\",100],[\"L\",104]]}',"
     "'宽松版型')",
@@ -124,6 +142,70 @@ class TestOrderPermission:
 
 
 # ---------------------------------------------------------------- 商品数据
+
+
+class TestSearchProducts:
+    """导购 Agent 的主力工具。**这段 SQL 真跑起来才算数。**
+
+    这个项目里 SQL 已经栽过一次（``LAST_INSERT_ID`` 之类的 MySQL 方言
+    在 SQLite 上直接炸），而工具层出错的表现是"搜不到"——
+    和"确实没货"长得一模一样，从对话上根本分辨不出来。
+    """
+
+    def test_finds_by_category(self, box):
+        found = box.search_products(category="夹克")
+        assert [i["id"] for i in found] == [9002]
+
+    def test_skus_are_merged_under_one_product(self, box):
+        """同一件商品的多个 SKU 要合成一条。
+
+        不合并的话，一件夹克按颜色尺码铺开成六条，用户看到的是
+        "为您找到 6 款"，点进去全是同一件。
+        """
+        item = box.search_products(category="夹克")[0]
+        assert len(item["skus"]) == 2  # 藏青 L 库存 0，被 in_stock_only 滤掉
+        assert item["price_from"] == 459.0
+
+    def test_filters_at_sku_level_not_product_level(self, box):
+        """颜色尺码是 SKU 的属性。
+
+        按商品粒度过滤会把"这件有藏青"和"藏青这个码有货"混为一谈——
+        用户点进去才发现选不了，正是工具层存在的意义被抵消的地方。
+        """
+        found = box.search_products(colors=["藏青"], sizes=["L"])
+        assert found == [], "藏青 L 库存为 0，不该出现在结果里"
+        assert [i["id"] for i in box.search_products(colors=["藏青"],
+                                                    sizes=["M"])] == [9002]
+
+    def test_price_range_is_applied(self, box):
+        assert box.search_products(price_max=300)[0]["id"] == 9001
+        assert box.search_products(price_min=400)[0]["id"] == 9002
+        assert box.search_products(price_min=1000) == []
+
+    def test_off_sale_products_are_excluded(self, box):
+        """下架商品不能出现在推荐里，哪怕它库存充足、正好符合条件。"""
+        ids = [i["id"] for i in box.search_products(colors=["藏青"])]
+        assert 9003 not in ids
+
+    def test_out_of_stock_only_skus_drop_the_product(self, box):
+        assert box.search_products(colors=["藏青"], sizes=["L"]) == []
+
+    def test_in_stock_only_can_be_turned_off(self, box):
+        found = box.search_products(colors=["藏青"], sizes=["L"],
+                                    in_stock_only=False)
+        assert [i["id"] for i in found] == [9002]
+
+    def test_no_conditions_returns_everything_on_sale(self, box):
+        """导购第一轮往往什么条件都没有——这时候不能报错也不能返回空。"""
+        assert {i["id"] for i in box.search_products()} == {9001, 9002}
+
+    def test_failure_raises_instead_of_returning_empty(self, box):
+        """**查不到 ≠ 没有货。** 返回空列表等于对上层撒谎。"""
+        from sqlalchemy import create_engine
+
+        broken = MySqlToolBox(engine=create_engine("sqlite://"))
+        with pytest.raises(ToolError):
+            broken.search_products(category="夹克")
 
 
 class TestProductTools:

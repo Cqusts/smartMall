@@ -150,6 +150,25 @@ class HttpRetriever:
         ]
 
 
+class NullRetriever:
+    """不检索的检索器。给根本不走 RAG 的 Agent 用（导购只查结构化商品）。
+
+    **为什么不是直接传 None。** 导购不检索是它现在的形状，不是一条保证。
+    真传了 None，哪天有人在导购链路里加一句检索，跑到那行才 AttributeError；
+    而返回空列表更糟——那等于对上层说"知识库里确实没有"，
+    正是 :class:`RetrievalError` 那段注释里说的那种撒谎。
+
+    所以这里的行为是**被调用就报错**：装配时就说清楚这条链路没有检索能力，
+    谁要用谁自己去装一个。
+    """
+
+    def search(self, query, *, top_k=5, product_ids=None, category_id=None):
+        raise RetrievalError(
+            "这条链路没有装检索器（导购只查结构化商品数据）。"
+            "需要检索的话，装配时传 with_retriever=True。"
+        )
+
+
 class StubRetriever:
     """测试替身。让整张图不碰数据库就能跑通。"""
 

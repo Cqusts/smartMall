@@ -53,6 +53,12 @@ class ToolBox(Protocol):
 
     def list_on_sale_product_ids(self, limit: int = 60) -> list[int]: ...
 
+    def search_products(
+        self, *, category: str | None = None, price_min: float | None = None,
+        price_max: float | None = None, colors: Sequence[str] = (),
+        sizes: Sequence[str] = (), in_stock_only: bool = True, limit: int = 20,
+    ) -> list[dict[str, Any]]: ...
+
     def get_product_detail(self, product_id: int) -> dict[str, Any] | None: ...
 
     def get_sku_stock_price(
@@ -113,6 +119,70 @@ class MySqlToolBox:
                 {"lim": limit},
             )
         ]
+
+    def search_products(
+        self, *, category=None, price_min=None, price_max=None,
+        colors=(), sizes=(), in_stock_only=True, limit=20,
+    ) -> list[dict[str, Any]]:
+        """按条件筛商品。导购 Agent 的主力工具。
+
+        **筛选条件落在 SKU 上而不是商品上。** 颜色尺码是 SKU 的属性，
+        一件商品可能只有 M 码缺货、L 码有货——按商品粒度过滤会把
+        "有你要的码"和"这件商品存在"混为一谈，用户点进去才发现选不了。
+
+        返回的每条带上**命中的 SKU**，让下游能说清"藏青 M 码有货"
+        而不是含糊的"这件有货"。
+        """
+        where = ["p.deleted = 0", "p.status = 'on_sale'", "s.deleted = 0"]
+        params: dict[str, Any] = {"lim": int(limit)}
+
+        if category:
+            where.append("(c.name LIKE :cat OR p.short_name LIKE :cat"
+                         " OR p.name LIKE :cat)")
+            params["cat"] = f"%{category}%"
+        if price_min is not None:
+            where.append("s.price >= :pmin")
+            params["pmin"] = float(price_min)
+        if price_max is not None:
+            where.append("s.price <= :pmax")
+            params["pmax"] = float(price_max)
+        if in_stock_only:
+            where.append("s.stock > 0 AND s.status = 'on_sale'")
+
+        # 颜色尺码存在 spec 这个 JSON 里。用 LIKE 而不是 JSON_EXTRACT：
+        # 后者在不同 MySQL 版本上行为有差异，而这里只需要包含匹配
+        for i, c in enumerate(colors):
+            where.append(f"s.spec LIKE :c{i}")
+            params[f"c{i}"] = f'%{c}%'
+        for i, z in enumerate(sizes):
+            where.append(f"s.spec LIKE :z{i}")
+            params[f"z{i}"] = f'%{z}%'
+
+        rows = self._rows(
+            "SELECT p.id, p.name, p.short_name, p.main_image, c.name AS category,"
+            " s.sku_no, s.spec, s.price, s.origin_price, s.stock "
+            "FROM product p JOIN sku s ON s.product_id = p.id "
+            "LEFT JOIN category c ON c.id = p.category_id "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY s.price, p.id LIMIT :lim",
+            params,
+        )
+
+        # 同一商品的多个 SKU 合并成一条，SKU 挂在下面
+        out: dict[int, dict[str, Any]] = {}
+        for r in rows:
+            item = out.setdefault(int(r["id"]), {
+                "id": int(r["id"]), "name": r["name"],
+                "short_name": r["short_name"], "category": r["category"],
+                "main_image": r.get("main_image") or "", "skus": [],
+                "price_from": float(r["price"]),
+            })
+            item["skus"].append({
+                "sku_no": r["sku_no"], "spec": r["spec"],
+                "price": float(r["price"]), "stock": int(r["stock"]),
+            })
+            item["price_from"] = min(item["price_from"], float(r["price"]))
+        return list(out.values())
 
     _BASE_COLS = "p.id, p.name, p.short_name, p.brand, p.status, c.name AS category"
 
@@ -254,9 +324,13 @@ class StubToolBox:
     skus: dict[int, list[dict]] = field(default_factory=dict)
     charts: dict[int, dict] = field(default_factory=dict)
     orders: dict[str, dict] = field(default_factory=dict)
+    catalog: list[dict] = field(default_factory=list)
+    """search_products 的候选池。测试直接给结果，不模拟 SQL 筛选——
+    要验的是 Agent 拿到 0 条 / 很多条时怎么决策，不是 WHERE 拼得对不对。"""
     fail: bool = False
     calls: list[str] = field(default_factory=list)
     permission_denials: list[str] = field(default_factory=list)
+    last_search: dict = field(default_factory=dict)
 
     def _check(self, name: str) -> None:
         self.calls.append(name)
@@ -266,6 +340,15 @@ class StubToolBox:
     def list_on_sale_product_ids(self, limit=60):
         self._check("list_on_sale_product_ids")
         return sorted(self.products)[:limit]
+
+    def search_products(self, *, category=None, price_min=None, price_max=None,
+                        colors=(), sizes=(), in_stock_only=True, limit=20):
+        self._check("search_products")
+        self.last_search = {
+            "category": category, "price_min": price_min, "price_max": price_max,
+            "colors": list(colors), "sizes": list(sizes),
+        }
+        return self.catalog[:limit]
 
     def get_product_detail(self, product_id):
         self._check("get_product_detail")

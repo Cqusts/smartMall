@@ -315,7 +315,7 @@ class TestWebPage:
         """
         text = self._client().get("/").text
         assert "联系客服" in text and "猜你喜欢" in text
-        assert "product_id: current ? current.id : null" in text, (
+        assert "product_id:" in text and "current.id" in text, (
             "客服窗口必须把当前商品带过去"
         )
 
@@ -595,3 +595,125 @@ class TestDepsAssemblyIsShared:
         assert "AgentConfig" not in server, (
             "服务端自己造配置正是漂移的起点：CLI 会覆盖模型名，它不会"
         )
+
+
+# ---------------------------------------------------------------- 导购
+
+
+class TestShoppingStream:
+    """导购走同一条 WebSocket、同一套事件格式。
+
+    **两个 Agent 的事件形状必须一致**，否则前端要长出两套渲染，
+    而两套渲染必然只有一套被维护——执行轨迹面板那种"页面上少一行、
+    没人发现"的退化就是这么来的。
+    """
+
+    def _events(self, message="想买件针织衫", tools=None, need=None):
+        from app.agent.shopping.state import ShoppingState
+        from app.agent.streaming import stream_shopping_turn
+
+        box = StubToolBox()
+        box.catalog = tools if tools is not None else [
+            {"id": 9001, "name": "米白针织衫", "category": "针织衫",
+             "main_image": "9001.jpg", "price_from": 299.0,
+             "skus": [{"sku_no": "S-M", "spec": '{"尺码":"M"}',
+                       "price": 299.0, "stock": 38}]},
+        ]
+        state = ShoppingState()
+        if need:
+            state.need = need
+        return list(stream_shopping_turn(
+            message, state, _deps(tools=box, hits=[])))
+
+    def test_ends_with_exactly_one_done(self):
+        assert _types(self._events()).count("done") == 1
+
+    def test_step_events_use_the_shopping_vocabulary(self):
+        """标签落回英文节点名说明词表没接上——面板还在，但看不出内容。"""
+        steps = [e for e in self._events() if e["type"] == "step"]
+        assert steps
+        labels = {e["label"] for e in steps}
+        assert "筛选商品" in labels and "抽取购买需求" in labels
+        for e in steps:
+            assert e["label"] != e["node"]
+
+    def test_done_shape_matches_the_customer_service_one(self):
+        """前端按同一组字段渲染，缺一个就是一处 undefined。"""
+        done = [e for e in self._events() if e["type"] == "done"][0]
+        for key in ("answer", "session_id", "trace_id", "intent",
+                    "citations", "handover", "debug"):
+            assert key in done, f"done 缺少 {key}"
+
+    def test_debug_block_explains_the_funnel(self):
+        done = [e for e in self._events() if e["type"] == "done"][0]
+        d = done["debug"]
+        assert "need_text" in d and "candidate_count" in d
+        assert "relaxed" in d and "asked" in d
+
+    def test_recommended_cards_come_only_from_candidates(self):
+        """**卡片是最后一道防线。**
+
+        正文是模型写的，万一它编了一件商品，卡片这里也不该多出来——
+        卡片只从 candidates 里过滤，编出来的名字没有对应的 id。
+        """
+        done = [e for e in self._events() if e["type"] == "done"][0]
+        assert {c["id"] for c in done["recommended"]} <= {9001}
+
+    def test_zero_candidates_yields_no_cards(self):
+        done = [e for e in self._events(tools=[]) if e["type"] == "done"][0]
+        assert done["recommended"] == []
+        assert done["outcome"] == "no_match"
+
+
+class TestShoppingWiring:
+    """页面与服务端的接线。"""
+
+    def _text(self) -> str:
+        pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        return TestClient(app).get("/").text
+
+    def test_page_has_an_agent_switch(self):
+        text = self._text()
+        assert "智能导购" in text and "setAgent('shopping')" in text
+
+    def test_page_sends_the_agent_field(self):
+        """不发这个字段的话，服务端一律按客服处理——
+        页签切了、行为没切，是最难查的那种 bug。"""
+        assert "agent: agentMode" in self._text()
+
+    def test_shopping_diagnostics_are_its_own(self):
+        """把客服那套命中率相似度搬过来是没意义的：导购一条都不检索。"""
+        text = self._text()
+        for marker in ("已知需求", "候选商品", "已放宽", "追问"):
+            assert marker in text
+
+    def test_server_routes_the_shopping_agent(self):
+        """服务端真的按字段分流，而不是页签只改了个标题。"""
+        import ast
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parents[1]
+               / "app" / "routers" / "ws.py").read_text(encoding="utf-8")
+        assert "shopping" in src
+        tree = ast.parse(src)
+        names = {n.name for n in ast.walk(tree)
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        assert "_pump_shopping" in names
+
+    def test_shopping_state_lives_in_the_session_store(self):
+        """导购 state 必须比单轮活得久，也必须和会话一起过期。"""
+        from app.routers.chat import SessionStore
+
+        store = SessionStore()
+        ctx = store.get(None)
+        a = store.agent_state(ctx, "shopping", lambda: object())
+        b = store.agent_state(ctx, "shopping", lambda: object())
+        assert a is b, "每轮新建的话，用户说过的条件全丢"
+
+        store.ttl = -1
+        store.get(None)                      # 触发淘汰
+        assert ctx.session_id not in store._agent_state, "会话没了它还占着"

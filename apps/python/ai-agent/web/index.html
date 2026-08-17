@@ -241,6 +241,16 @@ table.size th{background:#fafafa;color:var(--ink-2);font-weight:500}
 .chead .sp{flex:1}
 .chead button{color:#fff;padding:3px 9px;border-radius:3px;font-size:12px;
               background:rgba(255,255,255,.18)}
+/* Agent 切换。做成显式的两个页签而不是让一个 Agent 自动判断该走哪条链路：
+   意图分类会错，错了用户完全看不出发生了什么，只觉得"它答非所问"。
+   页签是用户自己选的，选错了他自己知道怎么改回来。 */
+.atabs{display:flex;background:#fff;border-bottom:1px solid var(--line)}
+.atabs button{flex:1;padding:9px 0;font-size:13px;color:var(--ink-2);
+              border-bottom:2px solid transparent}
+.atabs button.on{color:var(--orange);border-bottom-color:var(--orange);
+                 font-weight:600}
+.atabs .ico{width:14px;height:14px;vertical-align:-2px;margin-right:4px;
+            fill:currentColor}
 .cbody{flex:1;display:flex;min-height:0}
 .cmain{flex:1;display:flex;flex-direction:column;min-width:0}
 .ctx{display:none;align-items:center;gap:9px;padding:9px 12px;background:#fff8f5;
@@ -261,6 +271,15 @@ table.size th{background:#fafafa;color:var(--ink-2);font-weight:500}
         border-radius:3px}
 .handover{margin-top:8px;background:#fff7e6;border:1px solid #ffe0a3;
           border-radius:4px;padding:7px 9px;font-size:12px;color:#8a5b00}
+/* 导购推荐出来的商品卡。点得进详情，不然用户还得回列表自己找 */
+.recs{margin-top:9px;border-top:1px dashed var(--line);padding-top:8px;
+      display:flex;flex-direction:column;gap:7px}
+.rec{display:flex;gap:9px;align-items:center;cursor:pointer;padding:5px;
+     border:1px solid var(--line);border-radius:4px;background:#fff}
+.rec:hover{border-color:var(--orange)}
+.rec img{width:44px;height:44px;object-fit:cover;border-radius:3px;flex:none}
+.rec .n{font-size:12.5px;color:var(--ink);line-height:1.4}
+.rec .p{font-size:13px;color:var(--orange);font-weight:600;margin-top:2px}
 .fb{margin-top:7px;display:flex;align-items:center;gap:6px}
 .fb button{border:1px solid var(--line);border-radius:12px;padding:2px 10px;
            font-size:12px;color:var(--ink-2)}
@@ -470,11 +489,17 @@ footer code{background:#ececec;padding:1px 5px;border-radius:2px}
 <div class="chat" id="chat">
   <div class="chead">
     <span class="dot" id="dot"></span>
-    <b>smartMall 智能客服</b>
+    <b id="chatTitle">smartMall 智能客服</b>
     <span style="font-size:12px;opacity:.85" id="connText">已连接</span>
     <span class="sp"></span>
     <button id="diagBtn" onclick="toggleDiag()">诊断</button>
     <button onclick="closeChat()">收起</button>
+  </div>
+  <div class="atabs">
+    <button id="tabCs" class="on" onclick="setAgent('customer_service')">
+      <svg class="ico"><use href="#i-svc"/></svg>智能客服</button>
+    <button id="tabShop" onclick="setAgent('shopping')">
+      <svg class="ico"><use href="#i-cart"/></svg>智能导购</button>
   </div>
   <div class="cbody">
     <div class="cmain">
@@ -572,7 +597,54 @@ function renderTrace(){
 
 let products = [], current = null, cat = '全部';
 let selectedSku = null, placing = false;
-let ws, connected = false, sessionId = null, draft = null, greeted = false;
+let ws, connected = false, sessionId = null, draft = null;
+
+/* 当前是哪个 Agent 在接待。两个 Agent 共用一条 WebSocket 和一个 session，
+   服务端按这个字段分流（ws.py）——会话历史因此是连续的一份，
+   用户从"这件什么面料"聊到"再帮我挑一件"不会断。 */
+let agentMode = 'customer_service';
+const greeted = {};
+
+const AGENTS = {
+  customer_service: {
+    title: 'smartMall 智能客服',
+    hello: '智能客服为您服务。答不上来会转接人工，并把这个问题记成知识盲点。',
+    placeholder: '说点什么，或发张图…',
+    quick: p => p ? ['这件是什么面料','还有货吗','160cm穿什么码','怎么洗']
+                  : ['我的订单2026080100001到哪了','怎么退货','支持花呗分期吗'],
+  },
+  shopping: {
+    title: 'smartMall 智能导购',
+    hello: '说说想买什么、预算多少，我从在售商品里帮你挑。'
+         + '没有符合条件的我会直说，不会硬推。',
+    placeholder: '想买什么？说说预算和场合…',
+    quick: () => ['想买件通勤穿的外套，预算五百','有没有三百以内的针织衫',
+                  '要藏青色的 M 码','送人的，看着体面一点'],
+  },
+};
+
+function setAgent(mode){
+  if (agentMode === mode) return;
+  agentMode = mode;
+  const cfg = AGENTS[mode];
+  $('#tabCs').classList.toggle('on', mode === 'customer_service');
+  $('#tabShop').classList.toggle('on', mode === 'shopping');
+  $('#chatTitle').textContent = cfg.title;
+  $('#cinput').placeholder = cfg.placeholder;
+  // 导购不看图。留着入口而点了没反应，比没有入口更让人困惑
+  $('.pick').style.display = mode === 'shopping' ? 'none' : '';
+  if (mode === 'shopping') clearImage();
+  $('#diag').innerHTML = '';
+  renderCtx();
+  sayHello();
+  $('#cinput').focus();
+}
+
+function sayHello(){
+  if (greeted[agentMode]) return;
+  greeted[agentMode] = true;
+  bubble('sys', AGENTS[agentMode].hello);
+}
 
 /* ---------------------------------------------------------------- 商品 */
 
@@ -781,10 +853,7 @@ function openChat(){
   $('#chat').classList.add('open');
   $('#fab').classList.add('hide');
   renderCtx();
-  if (!greeted){
-    greeted = true;
-    bubble('sys', '智能客服为您服务。答不上来会转接人工，并把这个问题记成知识盲点。');
-  }
+  sayHello();
   $('#cinput').focus();
 }
 function closeChat(){
@@ -1048,20 +1117,20 @@ function askOrder(orderNo){
 
 function renderCtx(){
   const ctx = $('#ctx'), quick = $('#quick');
-  if (current){
+  // 导购是"还没决定买哪件"的场景，钉住某个商品反而是干扰
+  const pinned = current && agentMode !== 'shopping';
+  if (pinned){
     // 当前商品是客服最重要的上下文：它决定检索过滤范围和查哪个 SKU 的库存
     const src = imgFor(current);
     ctx.style.display = 'flex';
     ctx.innerHTML = (src ? `<img src="${src}" alt="">` : '')
       + `<div>正在咨询：${esc(current.short_name || current.name)}
          <span style="color:var(--orange)">¥${current.price.toFixed(0)}</span></div>`;
-    quick.innerHTML = ['这件是什么面料','还有货吗','160cm穿什么码','怎么洗']
-      .map(q => `<button onclick="askAbout('${q}')">${q}</button>`).join('');
   } else {
     ctx.style.display = 'none';
-    quick.innerHTML = ['我的订单2026080100001到哪了','怎么退货','支持花呗分期吗']
-      .map(q => `<button onclick="askAbout('${q}')">${q}</button>`).join('');
   }
+  quick.innerHTML = AGENTS[agentMode].quick(pinned)
+    .map(q => `<button onclick="askAbout('${q}')">${q}</button>`).join('');
 }
 
 function askAbout(text){
@@ -1123,11 +1192,13 @@ function send(e){
   resetTrace();
   $('#cstatus').innerHTML = '<span class="pill live">思考</span>';
   ws.send(JSON.stringify({
+    agent: agentMode,
     message: text,
     image: pendingImage,
     session_id: sessionId,
     user_id: parseInt($('#user').value) || null,
-    product_id: current ? current.id : null,
+    // 导购不钉商品：它要在整个在售列表里挑，钉住就等于替用户先决定了
+    product_id: (current && agentMode !== 'shopping') ? current.id : null,
   }));
   clearImage();
 }
@@ -1178,6 +1249,22 @@ function handle(ev){
     });
     el.appendChild(box);
   }
+  if (ev.recommended?.length){
+    // 推荐的商品挂成卡片可以直接点开。**卡片只能来自 candidates**——
+    // 服务端就是按这个过滤的，正文里模型万一编了一件，这里也不会多出来
+    const box = document.createElement('div');
+    box.className = 'recs';
+    ev.recommended.forEach(r => {
+      const c = document.createElement('div');
+      c.className = 'rec';
+      c.onclick = () => openDetail(r.id);
+      c.innerHTML = (r.image ? `<img src="/img/${esc(r.image)}" alt="">` : '')
+        + `<div><div class="n">${esc(r.name)}</div>`
+        + `<div class="p">¥${Number(r.price || 0).toFixed(0)}</div></div>`;
+      box.appendChild(c);
+    });
+    el.appendChild(box);
+  }
   if (ev.handover){
     const h = document.createElement('div');
     h.className = 'handover';
@@ -1205,9 +1292,55 @@ function handle(ev){
   $('#clog').scrollTop = $('#clog').scrollHeight;
 }
 
-function renderDiag(ev){
+const kv = (k,v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
+
+function renderShoppingDiag(ev){
+  /* 导购要看的东西和客服完全不同：客服看"这句话有没有依据"，
+     导购看**收敛到哪一步了**。把命中率相似度搬过来是没意义的，
+     它一条都没检索。 */
   const d = ev.debug || {};
-  const kv = (k,v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
+  const n = d.candidate_count ?? 0;
+  let h = '<h3>本轮</h3>'
+    + kv('已知需求', esc(d.need_text || '—'))
+    + kv('候选商品', n === 0
+        ? '<span class="tag no">0 件</span>' : `<span class="tag yes">${n} 件</span>`)
+    + kv('结果', {recommend:'给出推荐', ask:'追问收窄',
+                  no_match:'没有合适的', blocked:'已拦截'}[ev.outcome] || '-')
+    + kv('已追问', (d.asked ?? 0) + ' 轮')
+    + kv('耗时', (d.latency_ms?.total ?? 0) + ' ms');
+  // 放宽过条件必须显眼：用户以为这几件是符合他要求的
+  if (d.relaxed?.length)
+    h += kv('已放宽', `<span class="tag no">${esc(d.relaxed.join('、'))}</span>`);
+  // 工具挂了和"确实没货"在对话里长得一模一样，只有这里分得出来
+  if (d.error) h += kv('工具故障', `<span class="tag no">${esc(d.error)}</span>`);
+
+  const need = d.need || {};
+  const rows = [['品类', need.category], ['颜色', (need.colors||[]).join('/')],
+                ['尺码', (need.sizes||[]).join('/')], ['场景', need.scene],
+                ['预算', need.price_min || need.price_max
+                  ? `${need.price_min ?? ''}~${need.price_max ?? ''}` : '']];
+  if (rows.some(([, v]) => v)){
+    h += '<h3>抽取到的条件</h3>';
+    rows.forEach(([k, v]) => { if (v) h += kv(k, esc(v)); });
+  }
+  if (d.tools_called?.length){
+    h += '<h3>商品检索</h3>';
+    d.tools_called.forEach((t, i) => h += `<div class="hit"><div class="t">
+      <span><svg class="ico"><use href="#i-tool"/></svg> 第 ${i+1} 次</span>
+      <span>${t.latency_ms}ms ${t.hit ? '有结果' : '零条'}</span></div></div>`);
+  }
+  if (ev.recommended?.length){
+    h += '<h3>推荐商品</h3>';
+    ev.recommended.forEach(r => h += `<div class="hit">
+      <div class="t"><span>#${r.id}</span><span>¥${Number(r.price||0).toFixed(0)}</span></div>
+      <div>${esc(r.name)}</div></div>`);
+  }
+  $('#diag').innerHTML = h;
+}
+
+function renderDiag(ev){
+  if (agentMode === 'shopping') return renderShoppingDiag(ev);
+  const d = ev.debug || {};
   let h = '<h3>本轮</h3>' + kv('意图', ev.intent || '-')
         + kv('命中', d.hit_count ?? 0)
         + kv('最高相似度', (d.max_score ?? 0).toFixed(3))

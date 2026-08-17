@@ -57,6 +57,7 @@ def build_deps(
     rag_url: str | None = None,
     with_store: bool = True,
     with_tools: bool = True,
+    with_retriever: bool = True,
     config: AgentConfig | None = None,
     log=print,
 ) -> Deps:
@@ -64,12 +65,22 @@ def build_deps(
 
     可选组件（埋点、工具）起不来时**只警告不中断**：它们是数据管道与
     增强能力，不是对话本身的前提。必需组件（模型、检索）起不来才该报错。
+
+    ``with_retriever=False`` 给导购这类不走 RAG 的链路用。**这不是省事，
+    是别立假门槛**：导购一条检索都不发，却要为了装配去申请 embedding
+    的 key、等它把几千条切片灌进内存，起不来还直接报错退出——
+    用户会以为是导购坏了。
     """
     cfg = config or config_from_env()
 
     llm = FakeLlmClient() if fake_llm else OpenAiCompatClient()
 
-    if rag_url:
+    if not with_retriever:
+        from .retriever import NullRetriever
+
+        retriever = NullRetriever()
+        log("  检索：不装（这条链路只查结构化商品数据）")
+    elif rag_url:
         from .retriever import HttpRetriever
 
         retriever = HttpRetriever(rag_url)

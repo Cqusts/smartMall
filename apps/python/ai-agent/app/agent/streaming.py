@@ -81,14 +81,51 @@ def turn_result(state: AgentState) -> dict[str, Any]:
     }
 
 
-def stream_turn(
-    message: str, state: AgentState, deps: Deps
-) -> Iterator[dict[str, Any]]:
-    """跑一轮对话并逐个产出事件。
+def shopping_result(state: Any) -> dict[str, Any]:
+    """导购一轮的最终结果。
 
-    编排是同步的（节点里有阻塞的 HTTP 调用），所以放进线程跑，
-    事件经队列传出来。这样调用方拿到的是一个普通生成器，
-    在 CLI 和 WebSocket 里都好用。
+    形状和 :func:`turn_result` **刻意保持兼容**（answer / session_id /
+    trace_id / debug 都在），前端那套渲染与执行轨迹面板一行都不用改。
+    不同的只有 debug 里装什么——客服看的是"这句话有没有依据"，
+    导购看的是**收敛到哪一步了**：攒了哪些条件、搜出几件、放宽了什么。
+    """
+    return {
+        "type": "done",
+        "answer": state.answer,
+        "session_id": state.session.session_id,
+        "trace_id": state.trace.trace_id,
+        "intent": "shopping",
+        "citations": [],
+        "handover": False,
+        "handover_reason": "",
+        "handover_ticket_id": None,
+        "postcheck_flags": [],
+        "outcome": state.outcome,
+        "recommended": [
+            {"id": int(c["id"]), "name": c.get("name") or "",
+             "price": c.get("price_from"), "image": c.get("main_image") or ""}
+            for c in state.candidates
+            if int(c.get("id", 0)) in set(state.recommended)
+        ],
+        "debug": {
+            "need": state.need.as_dict(),
+            "need_text": state.need.describe(),
+            "candidate_count": len(state.candidates),
+            "relaxed": state.relaxed,
+            "asked": state.asked,
+            "tools_called": state.trace.tools_called,
+            "latency_ms": state.trace.latency_ms,
+            # 工具挂了和"确实没货"在页面上长得一样，只有这里能分辨
+            "error": state.trace.error,
+        },
+    }
+
+
+def _stream(run: Any, build: Any, deps: Deps) -> Iterator[dict[str, Any]]:
+    """跑一轮并把事件搬出来。**两个 Agent 共用这一份线程与队列。**
+
+    复制一份的话，早晚出现"客服流式修好了、导购还是老样子"——
+    这条链路上真正容易出错的是线程与哨兵，不是业务。
     """
     events: queue.Queue = queue.Queue()
     result: dict[str, Any] = {}
@@ -97,8 +134,7 @@ def stream_turn(
 
     def _run() -> None:
         try:
-            final = safe_run_turn(message, state, streaming_deps)
-            result["state"] = final
+            result["state"] = run(streaming_deps)
         except Exception as exc:  # noqa: BLE001  safe_run_turn 已兜底，这里是双保险
             result["error"] = f"{type(exc).__name__}: {exc}"
         finally:
@@ -116,7 +152,7 @@ def stream_turn(
     worker.join(timeout=1.0)
 
     if "state" in result:
-        yield turn_result(result["state"])
+        yield build(result["state"])
     else:
         # 绝不把 traceback 推给用户，但要留一句人话
         yield {
@@ -124,3 +160,24 @@ def stream_turn(
             "answer": "系统开小差了，正在为您转接人工客服～",
             "detail": result.get("error", ""),
         }
+
+
+def stream_turn(
+    message: str, state: AgentState, deps: Deps
+) -> Iterator[dict[str, Any]]:
+    """跑一轮客服对话并逐个产出事件。
+
+    编排是同步的（节点里有阻塞的 HTTP 调用），所以放进线程跑，
+    事件经队列传出来。这样调用方拿到的是一个普通生成器，
+    在 CLI 和 WebSocket 里都好用。
+    """
+    return _stream(lambda d: safe_run_turn(message, state, d), turn_result, deps)
+
+
+def stream_shopping_turn(
+    message: str, state: Any, deps: Deps
+) -> Iterator[dict[str, Any]]:
+    """跑一轮导购对话。事件格式与客服完全一致，前端不必分两套。"""
+    from .shopping.graph import safe_run_turn as shop_turn
+
+    return _stream(lambda d: shop_turn(message, state, d), shopping_result, deps)

@@ -28,6 +28,7 @@ class SessionStore:
 
     def __init__(self, ttl: float = 86400.0) -> None:
         self._data: dict[str, tuple[float, SessionContext]] = {}
+        self._agent_state: dict[str, dict[str, Any]] = {}
         self.ttl = ttl
 
     def get(self, session_id: str | None, **kw) -> SessionContext:
@@ -41,6 +42,20 @@ class SessionStore:
         self._data[ctx.session_id] = (now, ctx)
         return ctx
 
+    def agent_state(self, ctx: SessionContext, key: str, factory) -> Any:
+        """取这个会话在某个 Agent 下的私有状态，没有就新建。
+
+        导购必须跨轮记住用户说过的条件（见
+        :meth:`~app.agent.shopping.state.ShoppingState.begin_turn`），
+        所以它的 state 得比单轮活得久。挂在会话存储里而不是另开一个
+        全局字典，是为了让它**和会话一起过期**——单独存的话，
+        会话早没了它还占着，就是一处长在演示环境里的内存泄漏。
+        """
+        bag = self._agent_state.setdefault(ctx.session_id, {})
+        if key not in bag:
+            bag[key] = factory()
+        return bag[key]
+
     def touch(self, ctx: SessionContext) -> None:
         self._data[ctx.session_id] = (time.time(), ctx)
 
@@ -48,6 +63,7 @@ class SessionStore:
         dead = [k for k, (ts, _) in self._data.items() if now - ts > self.ttl]
         for k in dead:
             self._data.pop(k, None)
+            self._agent_state.pop(k, None)
 
 
 _sessions = SessionStore()
