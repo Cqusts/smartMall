@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from ..agent.state import AgentState
 from ..agent.streaming import stream_turn
+from ..config import settings
 from .chat import _sessions, get_deps
 
 router = APIRouter(tags=["客服"])
@@ -88,9 +89,126 @@ async def products() -> dict[str, Any]:
             detail["size_chart"] = box.get_size_chart(pid)
             items.append(detail)
         return {"ok": True, "items": items}
-    except Exception as exc:  # noqa: BLE001
-        # 商品挂了不该让整个页面白屏——前端会退化成只有客服入口
+    except BaseException as exc:  # noqa: BLE001
+        # 商品挂了不该让整个页面白屏——前端会退化成只有客服入口。
+        #
+        # 这里必须是 BaseException 而不是 Exception：pymysql 的依赖链上有
+        # cryptography，它的 Rust 扩展装坏时抛的是 pyo3_runtime.PanicException，
+        # 那是 BaseException 的直接子类，`except Exception` 兜不住，
+        # 整个降级保证就在最需要它的时候失效了（实测踩过）
         return {"ok": False, "items": [], "error": type(exc).__name__}
+
+
+#: 订单号白名单。转发时它会被拼进下游 URL，不校验就等于把路径拼接权
+#: 交给调用方（`../../actuator/env` 之类）。合法订单号只有「20 位数字」
+#: 这一种形状——与 OrderService.nextOrderNo 的生成规则对齐
+_SAFE_ORDER_NO = re.compile(r"\d{14,24}")
+
+
+async def _forward(method: str, path: str, *,
+                   json_body: dict[str, Any] | None = None,
+                   params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """把请求原样转给 mall-product。
+
+    **这里只是转发，不是实现。**下单是写操作，而本服务的工具层是刻意全只读的
+    （见 ``agent/tools.py``：AI 误触发的退款、改价是不可逆的资金损失）。
+    在 Python 侧再写一份扣库存逻辑，等于把那道只读边界开个口子，还会出现
+    两份实现漂移——库存到底以谁为准就说不清了。所以扣库存、幂等、事务、
+    超时释放全在 mall-product 一处，这里连参数都不解释。
+
+    转发而不是让浏览器直连 8081，纯粹是因为演示页由本服务托管，跨域调
+    另一个端口要么开 CORS 要么改 host，都比在这里转一次麻烦。
+    """
+    import httpx
+
+    url = f"{settings.order_base_url.rstrip('/')}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.request(method, url, json=json_body, params=params)
+    except Exception as exc:  # noqa: BLE001
+        # 订单服务没起来是演示时最常见的情况，错误要说清楚是哪个服务、
+        # 怎么起——只回一句"失败"，用户会以为是代码坏了
+        return {
+            "code": 9503,
+            "message": f"订单服务不可用（{settings.order_base_url}）："
+                       f"{type(exc).__name__}",
+            "data": None,
+        }
+
+    try:
+        return resp.json()
+    except ValueError:
+        return {
+            "code": 9503,
+            "message": f"订单服务返回了非 JSON 响应（HTTP {resp.status_code}）",
+            "data": None,
+        }
+
+
+@router.post("/api/orders", summary="下单（转发到 mall-product）")
+async def create_order(payload: dict[str, Any]) -> dict[str, Any]:
+    return await _forward("POST", "/api/product/orders", json_body=payload)
+
+
+@router.post("/api/orders/{order_no}/pay", summary="支付（转发到 mall-product）")
+async def pay_order(order_no: str, user_id: int) -> dict[str, Any]:
+    if not _SAFE_ORDER_NO.fullmatch(order_no):
+        raise HTTPException(status_code=400, detail="订单号格式不合法")
+    return await _forward("POST", f"/api/product/orders/{order_no}/pay",
+                          params={"userId": user_id})
+
+
+@router.post("/api/orders/{order_no}/cancel", summary="取消（转发到 mall-product）")
+async def cancel_order(order_no: str, user_id: int) -> dict[str, Any]:
+    if not _SAFE_ORDER_NO.fullmatch(order_no):
+        raise HTTPException(status_code=400, detail="订单号格式不合法")
+    return await _forward("POST", f"/api/product/orders/{order_no}/cancel",
+                          params={"userId": user_id})
+
+
+@router.post("/api/orders/{order_no}/confirm", summary="确认收货（转发）")
+async def confirm_order(order_no: str, user_id: int) -> dict[str, Any]:
+    if not _SAFE_ORDER_NO.fullmatch(order_no):
+        raise HTTPException(status_code=400, detail="订单号格式不合法")
+    return await _forward("POST", f"/api/product/orders/{order_no}/confirm",
+                          params={"userId": user_id})
+
+
+@router.post("/api/orders/{order_no}/refund", summary="申请退款（转发）")
+async def refund_order(order_no: str, user_id: int,
+                       payload: dict[str, Any]) -> dict[str, Any]:
+    if not _SAFE_ORDER_NO.fullmatch(order_no):
+        raise HTTPException(status_code=400, detail="订单号格式不合法")
+    return await _forward("POST", f"/api/product/orders/{order_no}/refund",
+                          params={"userId": user_id}, json_body=payload)
+
+
+#: 商家侧动作。演示页要能把整条链路点完，否则「发货 → 客服答得出物流」
+#: 这个最有说服力的环节没法演。
+#:
+#: ⚠️ 下游那几个接口本身没有鉴权（项目还没有认证体系），这里转发也就同样
+#: 没有。真实部署里 /api/product/admin/** 应该在网关上整片拦掉，只放给
+#: 运营后台——那也正是它被单独放到 admin 前缀下的原因。
+_ADMIN_ACTIONS = {
+    "ship": "ship",
+    "deliver": "deliver",
+    "refund-approve": "refund/approve",
+    "refund-reject": "refund/reject",
+}
+
+
+@router.post("/api/admin/orders/{order_no}/{action}", summary="商家侧动作（演示用转发）")
+async def admin_order_action(order_no: str, action: str,
+                             payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not _SAFE_ORDER_NO.fullmatch(order_no):
+        raise HTTPException(status_code=400, detail="订单号格式不合法")
+    # 白名单映射而不是把 action 直接拼进 URL——否则调用方就能自己指定下游路径
+    downstream = _ADMIN_ACTIONS.get(action)
+    if downstream is None:
+        raise HTTPException(status_code=404, detail=f"未知动作：{action}")
+    return await _forward(
+        "POST", f"/api/product/admin/orders/{order_no}/{downstream}",
+        json_body=payload if payload is not None else {})
 
 
 @router.websocket("/ws/chat")

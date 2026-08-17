@@ -175,11 +175,43 @@ nav .tag{background:var(--tmall);color:#fff;font-size:11px;padding:1px 5px;
 .drow .k{color:var(--ink-3);width:52px;flex:none;padding-top:5px}
 .skus{display:flex;flex-wrap:wrap;gap:8px}
 .sku{border:1px solid var(--line);padding:5px 12px;border-radius:2px;font-size:13px;
-     background:#fff}
-.sku.off{color:#c4c4c4;background:#fafafa;text-decoration:line-through}
+     background:#fff;cursor:pointer;user-select:none}
+.sku:hover:not(.off){border-color:var(--orange)}
+.sku.on{border-color:var(--orange);background:#fff6f2;color:var(--orange);font-weight:500}
+.sku.off{color:#c4c4c4;background:#fafafa;text-decoration:line-through;cursor:not-allowed}
 .sku .n{color:var(--ink-3);font-size:11px;margin-left:5px}
 .sku.low{border-color:#ffb38a}
 .sku.low .n{color:var(--orange)}
+.sku.on .n{color:var(--orange)}
+
+/* 数量选择器 */
+.qty{display:flex;align-items:center;gap:0}
+.qty button{width:28px;height:28px;border:1px solid var(--line);background:#fff;
+            color:var(--ink-2);font-size:15px;line-height:1}
+.qty button:disabled{color:#ddd;cursor:not-allowed}
+.qty input{width:46px;height:28px;border:1px solid var(--line);border-left:0;
+           border-right:0;text-align:center;font-size:13px;outline:none}
+.qty .lim{font-size:11px;color:var(--ink-3);margin-left:10px}
+
+/* 下单结果 */
+.orderbox{margin-top:14px;padding:10px 12px;border-radius:3px;font-size:13px;
+          line-height:1.7}
+.orderbox.ok{background:#f2fbf4;border:1px solid #bde5c8;color:#1e7d38}
+.orderbox.err{background:#fff5f5;border:1px solid #ffcdcd;color:#c0392b}
+.orderbox b{font-family:ui-monospace,Menlo,Consolas,monospace}
+.orderbox .hint{color:var(--ink-3);font-size:12px}
+.orderbox a{color:var(--orange);text-decoration:underline;cursor:pointer}
+/* 物流轨迹：最新的在上面，和快递 App 一致 */
+.tracks{margin:7px 0;padding:7px 10px;background:rgba(255,255,255,.65);
+        border-radius:3px;font-size:12px;color:var(--ink-2);line-height:1.8}
+.tracks b{display:block;color:var(--ink);margin-bottom:2px}
+.tracks i{color:var(--ink-3);font-style:normal;margin-right:8px;
+          font-variant-numeric:tabular-nums}
+.tracks div:first-of-type{color:var(--ink)}
+/* 商家动作在演示页上要一眼看出不属于买家 */
+.adminrow{margin-top:8px;padding-top:7px;border-top:1px dashed rgba(0,0,0,.15);
+          font-size:12px}
+.adminrow span{color:var(--ink-3);margin-right:8px}
 table.size{border-collapse:collapse;width:100%;font-size:12px;margin-top:6px}
 table.size th,table.size td{border:1px solid var(--line);padding:5px 7px;
                             text-align:center}
@@ -539,6 +571,7 @@ function renderTrace(){
 }
 
 let products = [], current = null, cat = '全部';
+let selectedSku = null, placing = false;
 let ws, connected = false, sessionId = null, draft = null, greeted = false;
 
 /* ---------------------------------------------------------------- 商品 */
@@ -611,14 +644,17 @@ function openDetail(id){
   const p = products.find(x => x.id === id);
   if (!p) return;
   current = p;
+  // 换商品必须清掉上一个商品选中的规格，否则会拿着 A 商品的 sku_no 下 B 商品的单
+  selectedSku = null;
   const src = imgFor(p);
   const off = p.origin_price && p.origin_price > p.price;
 
   const skus = (p.skus || []).map(s => {
-    const spec = Object.values(s.spec || {}).join(' ');
     const cls = !s.in_stock ? 'off' : (s.stock <= 5 ? 'low' : '');
     const n = !s.in_stock ? '无货' : (s.stock <= 5 ? `仅剩${s.stock}` : `${s.stock}件`);
-    return `<span class="sku ${cls}">${esc(spec)}<span class="n">${n}</span></span>`;
+    const pick = s.in_stock ? ` onclick="pickSku('${esc(s.sku_no)}')"` : '';
+    return `<span class="sku ${cls}" data-sku="${esc(s.sku_no)}"${pick}>`
+         + `${esc(specText(s))}<span class="n">${n}</span></span>`;
   }).join('');
 
   let size = '';
@@ -648,18 +684,64 @@ function openDetail(id){
         </div>
         <div class="drow"><span class="k">规格</span>
           <div class="skus">${skus || '<span style="color:#bbb">暂无</span>'}</div></div>
+        <div class="drow"><span class="k">数量</span>
+          <div class="qty">
+            <button onclick="bumpQty(-1)">−</button>
+            <input id="qty" value="1" inputmode="numeric" onchange="bumpQty(0)">
+            <button onclick="bumpQty(1)">+</button>
+            <span class="lim">单笔最多 20 件</span>
+          </div></div>
         ${attrs ? `<div class="drow"><span class="k">参数</span>
           <div class="attrs">${attrs}</div></div>` : ''}
         ${size}
         <div class="dcta">
-          <button class="buy">立即购买</button>
+          <button class="buy" id="buybtn" onclick="buyNow()">立即购买</button>
           <button class="svc" onclick="askProduct(${p.id})">
             <svg class="ico"><use href="#i-svc"/></svg>联系客服</button>
         </div>
+        <div id="orderbox"></div>
       </div>
     </div>`;
   $('#detail').classList.add('open');
   $('#mask').classList.add('open');
+
+  // 只有一个可选规格时直接替用户选上——多一次点击没有信息量
+  const only = (p.skus || []).filter(s => s.in_stock);
+  if (only.length === 1) pickSku(only[0].sku_no);
+}
+
+/**
+ * SKU 规格的人话形式。
+ *
+ * spec 从接口回来是 **JSON 字符串**（`get_sku_stock_price` 直接把列值透出，
+ * 没有反序列化），不是对象。之前这里写的是 `Object.values(s.spec || {})`，
+ * 对字符串取 values 会拆成一个个字符，规格标签渲染出来是逐字打散的原始
+ * JSON。两种形状都兜住，将来接口改成回对象也不用动这里。
+ */
+function specText(s){
+  let v = s.spec;
+  if (typeof v === 'string'){
+    try { v = JSON.parse(v); } catch(e){ return v; }
+  }
+  return Object.values(v || {}).join(' ') || s.sku_no;
+}
+
+function pickSku(skuNo){
+  selectedSku = skuNo;
+  document.querySelectorAll('#detail .sku').forEach(el =>
+    el.classList.toggle('on', el.dataset.sku === skuNo));
+  const box = $('#orderbox');
+  if (box) box.innerHTML = '';
+}
+
+function bumpQty(delta){
+  const el = $('#qty');
+  if (!el) return;
+  // 上界与后端 CreateOrderRequest 的 @Max(20) 对齐。前端限制只是省一次
+  // 往返，真正的闸门在服务端——前端校验永远只是体验，不是防线
+  let n = parseInt(el.value, 10);
+  if (!Number.isFinite(n)) n = 1;
+  el.value = Math.min(20, Math.max(1, n + delta));
 }
 
 function closeDetail(){
@@ -712,6 +794,256 @@ function closeChat(){
 function toggleDiag(){
   const on = $('#chat').classList.toggle('wide');
   $('#diagBtn').style.background = on ? 'rgba(255,255,255,.42)' : '';
+}
+
+/* ---------------------------------------------------------------- 下单 */
+
+function uuid(){
+  // crypto.randomUUID 要求安全上下文。127.0.0.1 算安全上下文，
+  // 但如果有人把演示挂到局域网 IP 上用 http 访问就没有了——退化路径
+  // 不能省，否则下单会直接抛异常
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'r-' + Date.now().toString(36) + '-'
+       + Math.random().toString(36).slice(2, 10);
+}
+
+function orderMsg(kind, html){
+  const box = $('#orderbox');
+  if (box) box.innerHTML = `<div class="orderbox ${kind}">${html}</div>`;
+}
+
+async function buyNow(){
+  if (!current) return;
+  // 双击防护的第一道：本地闸门。真正的保证是 requestId 幂等，
+  // 这里只是少发一个请求
+  if (placing) return;
+
+  if (!selectedSku){
+    orderMsg('err', '请先选择规格。');
+    return;
+  }
+  const qty = Math.min(20, Math.max(1, parseInt($('#qty').value, 10) || 1));
+  const userId = parseInt($('#user').value, 10) || 10086;
+
+  placing = true;
+  const btn = $('#buybtn');
+  if (btn){ btn.disabled = true; btn.textContent = '提交中…'; }
+  orderMsg('ok', '<span class="hint">正在提交订单…</span>');
+
+  try{
+    const r = await fetch('/api/orders', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        // 一次下单动作一个 requestId。重试要复用同一个才有幂等意义，
+        // 所以它在这里生成、不在重试里重新生成
+        requestId: uuid(),
+        userId: userId,
+        skuNo: selectedSku,
+        quantity: qty,
+      }),
+    });
+    const d = await r.json();
+
+    if (d.code !== 0){
+      orderMsg('err', `下单失败：${esc(d.message || '未知错误')}`
+        + (d.code === 9503
+            ? '<br><span class="hint">订单服务（mall-product:8081）没起来。'
+            + '先 <code>cd apps/java &amp;&amp; mvn -pl mall-product spring-boot:run</code></span>'
+            : ''));
+      return;
+    }
+
+    renderOrder(d.data, d.data.idempotentHit
+      ? '该订单已创建（幂等命中，未重复下单）' : '下单成功');
+
+    // 库存变了，页面上的数字不能还停在旧值——"页面显示什么客服就得答什么"
+    // 这条规矩对下单后同样成立
+    await loadProducts();
+    const fresh = products.find(x => x.id === current.id);
+    if (fresh) current = fresh;
+  }catch(e){
+    orderMsg('err', `下单失败：${esc(e.message || e)}`
+      + '<br><span class="hint">网络或订单服务异常。</span>');
+  }finally{
+    placing = false;
+    if (btn){ btn.disabled = false; btn.textContent = '立即购买'; }
+  }
+}
+
+function specLabel(spec){
+  try { return Object.values(JSON.parse(spec)).join(' '); }
+  catch(e){ return spec; }
+}
+
+/** "2026-08-16T15:12:34" → "15:12"。服务端回的是本地时间、不带时区。 */
+function hhmm(iso){
+  const m = /T(\d{2}:\d{2})/.exec(String(iso || ''));
+  return m ? m[1] : String(iso || '');
+}
+
+const STATUS_CN = {
+  pending_payment: '待支付', paid: '已支付', shipped: '已发货',
+  delivered: '已送达', completed: '已完成', cancelled: '已取消',
+  refunding: '退款中',
+};
+
+/** 按状态给动作，不给死按钮——一个点不动的按钮比没有按钮更糟。 */
+function userActions(o){
+  const no = esc(o.orderNo);
+  switch (o.status){
+    case 'pending_payment':
+      return `<a onclick="payOrder('${no}')">模拟支付</a>　`
+           + `<a onclick="cancelOrder('${no}')">取消订单</a>　`;
+    case 'shipped': case 'delivered':
+      return `<a onclick="confirmOrder('${no}')">确认收货</a>　`
+           + `<a onclick="refundOrder('${no}')">申请退款</a>　`;
+    case 'paid': case 'completed':
+      return `<a onclick="refundOrder('${no}')">申请退款</a>　`;
+    default:
+      return '';
+  }
+}
+
+/** 商家侧动作。演示环境才有，真实部署里这一片在运营后台。 */
+function adminActions(o){
+  const no = esc(o.orderNo);
+  const act = (a, label, body) =>
+    `<a onclick="adminOrder('${no}','${a}'${body ? `,${body}` : ''})">${label}</a>　`;
+  switch (o.status){
+    case 'paid':      return act('ship', '发货');
+    case 'shipped':   return act('deliver', '标记送达');
+    case 'refunding': return act('refund-approve', '同意退款')
+                           + act('refund-reject', '驳回退款');
+    default:          return '';
+  }
+}
+
+function tracksHtml(o){
+  if (!o.tracks) return '';
+  let nodes;
+  try { nodes = JSON.parse(o.tracks); } catch(e){ return ''; }
+  if (!Array.isArray(nodes) || !nodes.length) return '';
+  const line = [o.expressCompany, o.expressNo].filter(Boolean).map(esc).join(' ');
+  return `<div class="tracks">${line ? `<b>${line}</b>` : ''}`
+       + nodes.slice().reverse().map(n =>
+           `<div><i>${esc(n.ts || '')}</i>${esc(n.desc || '')}</div>`).join('')
+       + `</div>`;
+}
+
+function renderOrder(o, verb){
+  const pending = o.status === 'pending_payment';
+  // 到期时刻由服务端给（expiresAt），不在前端写死「30 分钟」——超时时长是
+  // 配置项，写死的话改了配置页面就开始骗人
+  const note = pending
+    ? `<span class="hint">　（库存已预占${
+         o.expiresAt ? `，${esc(hhmm(o.expiresAt))} 前未支付将自动释放` : '，未支付将自动释放'
+       }）</span>`
+    : ({
+        paid:      '<span class="hint">　（库存已确认扣减）</span>',
+        shipped:   '<span class="hint">　（库存已确认扣减）</span>',
+        delivered: '<span class="hint">　（库存已确认扣减）</span>',
+        completed: '<span class="hint">　（交易完成）</span>',
+        refunding: '<span class="hint">　（审核中，尚未退款、库存未回补）</span>',
+        refunded:  '<span class="hint">　（已退款，库存已回补）</span>',
+        cancelled: '<span class="hint">　（库存已回补）</span>',
+      }[o.status] || '');
+
+  const refundLine = o.status === 'refunding' && o.refundReason
+      ? `<div class="hint">退款原因：${esc(o.refundReason)}</div>` : '';
+  const rejectLine = o.refundRejectReason
+      ? `<div class="hint">上次驳回：${esc(o.refundRejectReason)}</div>` : '';
+  const admin = adminActions(o);
+
+  orderMsg(['cancelled', 'refunding'].includes(o.status) ? 'err' : 'ok',
+    `${verb}　订单号 <b>${esc(o.orderNo)}</b><br>`
+    + `${esc(o.spec ? specLabel(o.spec) : o.skuNo)} × ${o.quantity}　`
+    + `实付 ¥${Number(o.amount).toFixed(2)}　`
+    + `状态：${esc(STATUS_CN[o.status] || o.status)}<br>`
+    + refundLine + rejectLine
+    + tracksHtml(o)
+    + userActions(o)
+    + `<a onclick="askOrder('${esc(o.orderNo)}')">问客服这单到哪了 →</a>`
+    + note
+    + (admin ? `<div class="adminrow"><span>商家侧（演示）</span>${admin}</div>` : ''));
+}
+
+async function orderAction(orderNo, action, verbs, body, isAdmin){
+  if (placing) return;
+  placing = true;
+  const userId = parseInt($('#user').value, 10) || 10086;
+  // 商家侧走 /api/admin/orders，不带 user_id —— 那些动作没有"归属用户"这回事
+  const url = isAdmin
+    ? `/api/admin/orders/${encodeURIComponent(orderNo)}/${action}`
+    : `/api/orders/${encodeURIComponent(orderNo)}/${action}?user_id=${userId}`;
+  try{
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: body ? {'Content-Type': 'application/json'} : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const d = await r.json();
+    if (d.code !== 0){
+      // 失败也要把当前真实状态显示出来，而不是只报一句错——超时被自动取消
+      // 那一刻点支付就会走到这里，用户需要知道单没了、钱没扣
+      orderMsg('err', `${verbs.fail}：${esc(d.message || '未知错误')}`);
+      return;
+    }
+    renderOrder(d.data, d.data.idempotentHit ? verbs.again : verbs.ok);
+    await loadProducts();
+    const fresh = products.find(x => x.id === (current && current.id));
+    if (fresh) current = fresh;
+  }catch(e){
+    orderMsg('err', `${verbs.fail}：${esc(e.message || e)}`);
+  }finally{
+    placing = false;
+  }
+}
+
+const payOrder = no => orderAction(no, 'pay', {
+  ok: '支付成功', again: '该订单已支付（幂等命中）', fail: '支付失败'});
+const cancelOrder = no => orderAction(no, 'cancel', {
+  ok: '订单已取消', again: '订单已取消', fail: '取消失败'});
+const confirmOrder = no => orderAction(no, 'confirm', {
+  ok: '已确认收货', again: '已确认收货', fail: '确认收货失败'});
+
+function refundOrder(no){
+  const reason = prompt('退款原因（会记进订单，商家审核时看得到）', '尺码不合适');
+  if (!reason) return;
+  orderAction(no, 'refund', {
+    ok: '退款申请已提交，等待商家审核', again: '退款申请已提交',
+    fail: '申请退款失败'}, {reason});
+}
+
+/**
+ * 商家侧动作。**演示环境专用**——真实部署里这些在运营后台，
+ * 且 /api/product/admin/** 会在网关上整片拦掉。
+ */
+async function adminOrder(no, action){
+  let body = null;
+  if (action === 'ship'){
+    const expressNo = prompt('运单号（字母数字与连字符）',
+                             'SF' + Date.now().toString().slice(-9));
+    if (!expressNo) return;
+    body = {company: '顺丰', expressNo};
+  } else if (action === 'refund-reject'){
+    const reason = prompt('驳回理由（用户会看到）', '商品已拆封，不符合无理由退货条件');
+    if (!reason) return;
+    body = {reason};
+  }
+  const verbs = {
+    'ship': '已发货', 'deliver': '已标记送达',
+    'refund-approve': '退款已同意，库存已回补', 'refund-reject': '退款已驳回',
+  };
+  await orderAction(no, action, {ok: verbs[action], again: verbs[action],
+                                 fail: '操作失败'}, body, true);
+}
+
+/** 下完单直接去问客服——这条链路闭上，才叫「下单」和「查单」用的是同一份数据。 */
+function askOrder(orderNo){
+  closeDetail();
+  openChat();
+  askAbout(`我的订单${orderNo}到哪了`);
 }
 
 function renderCtx(){

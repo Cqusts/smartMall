@@ -26,6 +26,11 @@ public enum ErrorCode {
 
     PRODUCT_NOT_FOUND(2404, "商品不存在"),
     SKU_NOT_FOUND(2405, "SKU 不存在"),
+    ORDER_NOT_FOUND(2406, "订单不存在"),
+    // 库存不足与「SKU 不存在」必须是两个码：前者用户改个数量就能下单，
+    // 后者改数量没用。合并成一个码，前端就只能给一句含糊的「下单失败」
+    SKU_OUT_OF_STOCK(2409, "库存不足"),
+    ORDER_STATE_ILLEGAL(2410, "订单状态流转不合法"),
 
     ASSET_NOT_FOUND(3404, "素材不存在"),
     ASSET_STATE_ILLEGAL(3409, "素材状态流转不合法"),

@@ -1,0 +1,50 @@
+# 测试用配置。覆盖 main 里的 MySQL / Redis / Kafka —— 单元测试不该依赖任何外部进程。
+#
+# LOCK_TIMEOUT=20000：并发测试里 50 个线程抢同一行，H2 默认 1 秒锁等待会误报失败。
+# 这个值调的是**等待上限**，不影响正确性判定——真超卖了，断言照样会挂。
+spring:
+  datasource:
+    url: jdbc:h2:mem:smartmall;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=20000
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+    hikari:
+      # 并发测试要 50 个线程同时各持一条连接，池子小于线程数就会在拿连接时排队，
+      # 那样测的是连接池而不是行锁
+      maximum-pool-size: 60
+      minimum-idle: 5
+
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema-h2.sql
+
+  # 测试上下文里不起这些
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+smartmall:
+  order:
+    release-expired:
+      # 测试里必须关掉。定时任务在后台自己跑会让测试结果不可复现——
+      # 一笔刚建的订单可能在断言之前就被回收了，而且失败只在特定时序下出现。
+      # 超时逻辑本身由测试直接调 OrderService#releaseExpired 覆盖，
+      # 时间点完全可控
+      enabled: false
+
+logging:
+  level:
+    root: WARN
+    com.smartmall: INFO

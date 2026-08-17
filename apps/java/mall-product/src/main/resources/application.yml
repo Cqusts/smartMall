@@ -76,6 +76,17 @@ springdoc:
 smartmall:
   version: 0.1.0-SNAPSHOT
 
+  order:
+    # 下单即扣库存（预占），所以未支付的单必须有人回收，否则一批放弃支付的
+    # 订单会把热销 SKU 的库存永久锁死。30 分钟是拍的不是算的——真实场景由
+    # 支付渠道超时与大促周转速度决定，通常 15–30 分钟，上生产前按实测重定
+    payment-ttl: PT30M
+    release-expired:
+      enabled: true
+      interval: PT1M          # 上一轮跑完后再等多久（fixedDelay）
+      initial-delay: PT30S    # 启动后先缓一会，别和应用初始化抢资源
+      batch-size: 200         # 单轮上限，给积压时的工作量封顶
+
 logging:
   level:
     root: INFO

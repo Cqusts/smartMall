@@ -276,7 +276,132 @@ pip install -e "apps/python/ai-agent[server]"
 smartmall-agent serve          # → http://127.0.0.1:9002/
 ```
 
-商品列表 → 商品详情（价格 / SKU 库存 / 尺码表）→ 右下角「联系客服」浮窗。
+商品列表 → 商品详情（价格 / SKU 库存 / 尺码表）→ 选规格下单 → 右下角「联系客服」浮窗。
+
+### 下单
+
+下单由 `mall-product` 实现（Java），店铺页通过 ai-agent 的 `/api/orders` 转发过去。
+**需要额外起一个服务**——只跑 `smartmall-agent serve` 的话，页面能逛，点购买会
+明确提示订单服务没起来，其余功能不受影响：
+
+```bash
+mysql -u root -p --default-character-set=utf8mb4 smartmall \
+  < deploy/sql/migrations/007_order_placement.sql     # 幂等键
+mysql -u root -p --default-character-set=utf8mb4 smartmall \
+  < deploy/sql/migrations/008_fulfillment_and_refund.sql   # 履约与退款
+
+cd apps/java && mvn -pl mall-product -am install -DskipTests
+MYSQL_HOST=127.0.0.1 java -jar mall-product/target/mall-product-0.1.0-SNAPSHOT.jar
+```
+
+完整生命周期：
+
+```
+pending_payment ──pay──> paid ──ship──> shipped ──deliver──> delivered ──confirm──> completed
+       │                  │              │                      │             │
+       │                  └──────────────┴──────────────────────┴─────────────┘
+    cancel                                  applyRefund
+       │                                         │
+       ▼                                         ▼
+   cancelled                                 refunding ──approve──> refunded（回补库存）
+  （回补库存）                                     │
+   超时未支付                                      └──reject──> 回到申请前的状态
+   自动走这条
+```
+
+```
+用户侧                                            商家侧（⚠️ 暂无鉴权）
+POST /api/product/orders                          POST /api/product/admin/orders/{no}/ship
+POST /api/product/orders/{no}/pay                 POST /api/product/admin/orders/{no}/deliver
+POST /api/product/orders/{no}/cancel              POST /api/product/admin/orders/{no}/refund/approve
+POST /api/product/orders/{no}/confirm             POST /api/product/admin/orders/{no}/refund/reject
+POST /api/product/orders/{no}/refund
+GET  /api/product/orders/{no}
+```
+
+商家动作单独放在 `/admin` 前缀下，不是为了好看——**项目还没有认证体系，这些接口
+现在谁都能调**。分开之后，接入认证时一条路径前缀规则就能把整片挡住；和用户动作
+混在一起的话，得一个方法一个方法判断该不该拦，漏一个就是一个洞。
+
+**退款不会自动放行。** 申请只把订单挂到 `refunding`，不动钱也不动库存；同意退款
+才回补，而那需要人点头。这与工具层全只读是同一条原则：不可逆的动作不能被自动触发。
+
+驳回后订单回到**申请前**的状态（`status_before_refund`）——已发货的单被驳回后
+必须还是 `shipped`。写死成 `paid` 会让"这单发没发货"凭空改变，而客服正是照着
+这个字段回答"我的货到哪了"。
+
+四条不变式，各自对应代码里一处具体写法：
+
+| 不变式 | 靠什么保证 |
+|---|---|
+| **不超卖** | `UPDATE sku SET stock=stock-? WHERE sku_no=? AND stock>=?` —— 判断与扣减在同一条 UPDATE 里，InnoDB 持行锁求值谓词，并发自动串行 |
+| **不重单** | `request_id` 唯一索引 + 快慢两条回查路径 |
+| **不漏库存** | 扣库存与建单同事务；幂等落败的那笔整体回滚，扣掉的库存跟着吐回来 |
+| **库存至多回补一次** | 三条会回补的路径（手动取消 / 超时回收 / 同意退款）全靠条件更新裁决，谁的 UPDATE 返回 1 谁才有资格回补；前置状态互斥，已取消的单进不了退款流程 |
+
+**下单即扣库存（预占）**，因为"判断有没有货"和"把货占住"必须是同一个动作，
+放到支付时再扣就又出现窗口。代价是没付钱的单占着货，所以有个定时任务回收——
+不回收的话，一批放弃支付的订单能把热销 SKU 永久锁死：页面显示无货而一件没卖出去。
+
+```yaml
+smartmall.order.payment-ttl: PT30M              # 多久算超时
+smartmall.order.release-expired.enabled: true   # 关掉它
+smartmall.order.release-expired.interval: PT1M  # 扫描间隔（fixedDelay）
+```
+
+**30 分钟是拍的不是算的**，真实场景由支付渠道超时与大促周转速度决定（通常 15–30 分钟），
+上生产前按实测重定。页面上的「几点前未支付将自动释放」由服务端按这个配置算出来
+（`OrderView.expiresAt`），不在前端写死——写死的话改了配置页面就开始骗人。
+
+**多实例不需要分布式锁**：两个 mall-product 的定时任务会扫到同一批订单，但都要过
+那句条件 UPDATE，同一笔订单只有一个实例拿得到 1。重复扫描浪费几次查询，
+正确性由数据库的行锁保证。
+
+最危险的一刻是**用户在超时那一秒点支付**：支付与回收必须恰好成功一个。
+支付赢则订单 paid、库存保持扣减；回收赢则订单 cancelled、库存回补，
+而支付**必须报错**——若此时还允许置为 paid，就会出现"付了钱但货已还回库存"，
+超卖从这个口子漏出来。有一条 15 轮的竞态测试盯着它。
+
+**为什么订单放在 mall-product 而不是独立的 mall-order**：扣库存与建单必须原子，
+而库存归 mall-product 管。拆开这个原子性就得靠 Saga / TCC 补偿维持，而整个项目
+跑在一个 MySQL 上，付出分布式事务的复杂度换不来任何东西。真要拆时接缝是
+`OrderService` 的公开方法，不是数据库。
+
+**下单接口在 ai-agent 这边只是转发，不是实现。**工具层是刻意全只读的（AI 误触发的
+退款、改价是不可逆的资金损失），在 Python 侧再写一份扣库存逻辑等于给那道边界开
+口子，还会出现两份实现漂移——库存以谁为准就说不清了。转发只是因为演示页由
+ai-agent 托管，跨域调另一个端口不如在这里转一次省事。
+
+超卖这类问题在手工点击下永远复现不出来，所以有测试盯着：77 个 Java 测试，
+其中并发那组是 50 线程抢 5 件、100 线程抢 3 件，另有 15 轮的支付/回收竞态。
+
+**但单元测试跑在 H2 上，而 H2 与 MySQL 有两处语义不同，都真实咬过人：**
+
+| 差异 | 后果 | H2 表现 |
+|---|---|---|
+| `UPDATE` 的 SET 子句求值顺序 | MySQL 后面的赋值看得见前面写入的新值，`SET status='refunding', status_before_refund=status` 会把 `refunding` 存进去，驳回时"还原"成 refunding，订单永远卡在审核中 | 假绿 |
+| 行锁实现 | 防超卖的全部保证压在条件 UPDATE 的原子性上，而它取决于存储引擎 | 通过不代表 InnoDB 通过 |
+
+所以有两个脚本对**真库**复核，两处坑都是这么发现的：
+
+```bash
+./deploy/scripts/verify-order-lifecycle.sh      # 状态机全链路 + 时区一致性
+./deploy/scripts/verify-order-concurrency.sh    # 50 抢 5，不超卖
+SKU_NO=S9002-WHITE-M STOCK=3 CONCURRENCY=100 ./deploy/scripts/verify-order-concurrency.sh
+```
+
+**时区那条也在里面**：业务代码用 `LocalDateTime.now()` 写的列走 JVM 时区，
+SQL 里 `NOW()` 写的列走 MySQL 时区。两者不一致时，一笔订单会「15:25 下单、
+23:25 发货」——而客服正是照着这些字段回答"我的货什么时候发的"，于是它会
+向用户陈述一段根本没发生过的 8 小时延迟。compose 给容器设了 `TZ`，
+但 README 推荐的本地开发方式（compose 只起 MySQL、应用在 IDE 里直跑）
+不经过 compose。应用启动时调 `AppTimeZone.apply()` 把时区钉死，
+两种部署方式行为一致。
+
+**userId 目前从请求体传，这是已知的临时方案**——项目还没有认证体系，现在任何人
+都能以任意身份下单。代码里显式标了出来而不是假装安全；接入认证时改动只在控制器
+一层。越权口径与客服工具层一致：不属于你的订单，返回的错误与「订单不存在」
+一字不差，不给攻击者存在性预言机。
 
 **做成店铺而不是裸聊天页是有理由的**：当前商品是客服最重要的上下文——
 它决定检索的过滤范围、决定查哪个 SKU 的库存。从商品详情页点「联系客服」
