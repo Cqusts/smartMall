@@ -5,6 +5,7 @@
     smartmall-agent ask "这件是什么面料"      # 单轮
     smartmall-agent trace "会起球吗"          # 单轮 + 打印完整 Trace
     smartmall-agent shop -v                  # 导购 Agent：多轮收敛出商品
+    smartmall-agent kb                       # 知识运维：给盲点起草（默认试跑）
 
 调试台的价值在于**看得见中间过程**：意图分到哪一类、检索命中了什么、
 分数多少、为什么转人工。这些在聊天界面里全是隐形的，而它们恰恰是
@@ -216,6 +217,75 @@ def cmd_shop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_kb(args: argparse.Namespace) -> int:
+    """知识运维：把「答不上来的问题」变成「待审的知识」。
+
+    默认 ``--dry-run``，只起草不落库。**这个默认值是刻意的**——
+    这条链路会往知识库里写东西，而写进去的每一条都会被之后的检索命中。
+    第一次跑先看看机器写成什么样，比先写进去再删干净容易得多。
+    """
+    from .knowledge import graph as kb_graph
+    from .knowledge.store import MySqlKnowledgeStore
+
+    try:
+        store = MySqlKnowledgeStore.from_env()
+    except Exception as exc:  # noqa: BLE001
+        print(f"✗ 连不上知识库（{type(exc).__name__}）：{exc}")
+        print("  建表：deploy/sql/migrations/003_agent_trace_and_handover.sql")
+        return 1
+
+    spots = store.blind_spots(limit=args.scan)
+    if not spots:
+        print("\n  没有待处理的盲点——要么知识库覆盖得好，要么还没人用过。")
+        return 0
+
+    deps = _build_deps(args)
+    deps.kb = None if args.dry_run else store
+
+    print(f"\n==> 扫到 {len(spots)} 个题面"
+          f"{'（试跑，不落库）' if args.dry_run else ''}\n")
+
+    report = kb_graph.run_batch(spots, deps, limit=args.limit)
+
+    mark = {"drafted": "✎", "draft_only": "✎", "already_covered": "=",
+            "needs_human": "!", "skipped": "×"}
+    for s in report.spots:
+        print(f"  {mark.get(s.outcome, '?')} [{s.spot.priority}]"
+              f" ×{s.spot.times}  {truncate(s.question, 40)}")
+        if s.spot.variants:
+            print(f"      其他问法：{truncate('、'.join(s.spot.variants), 46)}")
+        if s.outcome == "already_covered":
+            print(f"      库里已有 #{s.item_id}"
+                  f"（相似度 {s.trace.retrieval_max_score:.3f}）")
+            print("      当时没召回是检索的问题，再补一条知识没用")
+        elif s.outcome == "duplicate":
+            print(f"      内容与 #{s.item_id} 相同，没有重复落库")
+            # 工单不关：内容有了，但**这个问法**能不能检索到它是另一回事
+            # （踩到过：「怎么洗」和「洗涤方式」题面零重合）
+            print("      工单仍是 open——这个问法能否召回到它，"
+                  "要等索引重建后才知道")
+        elif s.draft:
+            print(f"      草稿：{truncate(s.draft, 58)}")
+            print(f"      依据：{'、'.join(e.ref for e in s.evidence)}")
+        if s.flags:
+            print(f"      ⚠ {'、'.join(s.flags)}")
+        if s.outcome == "drafted":
+            print(f"      → knowledge_item #{s.item_id}（待审核）")
+        print()
+
+    d = report.as_dict()
+    written = d["drafted"]
+    ready = d["draft_only"]
+    print(f"  ── 落库 {written} · 起草待落库 {ready}"
+          f" · 库里已有 {d['already_covered']} · 本轮重复 {d['duplicate']}"
+          f" · 需要人写 {d['needs_human']} · 跳过 {d['skipped']}")
+    if args.dry_run:
+        print(f"\n  试跑不写库。去掉 --dry-run 会写入 {ready} 条**待审核**的条目"
+              "（机器起草的永远不自动通过）")
+    print("  审核草稿：smartmall-pipeline annotate export --status pending")
+    return 0
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     from .graph import safe_run_turn
 
@@ -407,6 +477,17 @@ def main(argv: list[str] | None = None) -> int:
                    help="导购 Agent：多轮收敛出具体商品").set_defaults(
         func=cmd_shop
     )
+
+    s = sub.add_parser("kb", parents=[common],
+                       help="知识运维 Agent：给知识盲点起草待审条目")
+    s.add_argument("--scan", type=int, default=50, help="扫多少个题面")
+    s.add_argument("--limit", type=int, default=5,
+                   help="聚类后处理前 N 个盲点")
+    # 默认试跑：这条链路会往知识库写东西，而写进去的每一条都会被之后的
+    # 检索命中。先看看机器写成什么样，比先写进去再删干净容易得多
+    s.add_argument("--write", dest="dry_run", action="store_false",
+                   default=True, help="真的写库（默认只试跑）")
+    s.set_defaults(func=cmd_kb)
     s = sub.add_parser("ask", parents=[common], help="单轮提问")
     s.add_argument("question")
     s.set_defaults(func=cmd_ask)
