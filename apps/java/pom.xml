@@ -29,6 +29,19 @@
         <spring-cloud.version>2023.0.3</spring-cloud.version>
         <mybatis-plus.version>3.5.7</mybatis-plus.version>
         <springdoc.version>2.6.0</springdoc.version>
+
+        <!-- **构建插件的版本必须锁死，不能靠 Maven 超级 POM 的默认值。**
+             不锁的话，构建结果取决于每个人装的 Maven 版本，而且两种失败
+             都很难查（实测踩过）：
+
+             · Maven 3.9 给 compiler 3.13.0，能用；旧版 Maven 给 compiler 3.1，
+               而 3.1 不认识 maven.compiler.release，于是回退到 source/target 1.5，
+               在 JDK 21 上直接报「不再支持源选项 5」。同一份代码，换台机器就编不过。
+             · 更阴的是 surefire：旧版 Maven 默认 2.12.4，那是 JUnit 5 出现之前的
+               版本，跑起来会**一个测试都不执行还报 BUILD SUCCESS**。
+               编译报错至少看得见，测试静默归零看不见。 -->
+        <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
+        <maven-surefire-plugin.version>3.2.5</maven-surefire-plugin.version>
     </properties>
 
     <dependencyManagement>
@@ -66,26 +79,37 @@
     </dependencyManagement>
 
     <build>
-        <plugins>
-            <!-- -parameters 把方法参数名编进 class 文件。
-                 **不开这个，@PathVariable / @RequestParam 不写显式名字就会在
-                 运行时失败**，报「Name for argument of type [java.lang.String]
-                 not specified」——编译期毫无征兆，只有真正调那个接口才炸。
-
-                 spring-boot-starter-parent 默认开了它，而本仓库的父 POM 是
-                 自建的（只 import 了 spring-boot-dependencies 这个 BOM），
-                 所以继承不到，得自己加。 -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <configuration>
-                    <parameters>true</parameters>
-                </configuration>
-            </plugin>
-        </plugins>
-
+        <!-- 编译与测试插件都是默认生命周期绑定的，在 pluginManagement 里
+             给出版本与配置就够了，不必再在 <plugins> 里声明一遍。 -->
         <pluginManagement>
             <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${maven-compiler-plugin.version}</version>
+                    <configuration>
+                        <!-- -parameters 把方法参数名编进 class 文件。
+                             **不开这个，@PathVariable / @RequestParam 不写显式
+                             名字就会在运行时失败**，报「Name for argument of type
+                             [java.lang.String] not specified」——编译期毫无征兆，
+                             只有真正调那个接口才炸。
+
+                             spring-boot-starter-parent 默认开了它，而本仓库的
+                             父 POM 是自建的（只 import 了 spring-boot-dependencies
+                             这个 BOM），所以继承不到，得自己加。
+
+                             注意它依赖上面锁死的插件版本：compiler 3.1 会警告
+                             "Parameter 'parameters' is unknown" 然后**静默忽略**。 -->
+                        <parameters>true</parameters>
+                    </configuration>
+                </plugin>
+
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>${maven-surefire-plugin.version}</version>
+                </plugin>
+
                 <plugin>
                     <groupId>org.springframework.boot</groupId>
                     <artifactId>spring-boot-maven-plugin</artifactId>
