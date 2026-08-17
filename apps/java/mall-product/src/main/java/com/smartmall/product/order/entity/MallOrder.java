@@ -48,9 +48,28 @@ public class MallOrder {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
     private LocalDateTime shippedAt;
+    private LocalDateTime deliveredAt;
+    private LocalDateTime completedAt;
 
     /** 非空即表示库存已回补。与状态机一起构成「只回补一次」的凭据。 */
     private LocalDateTime cancelledAt;
+
+    private LocalDateTime refundAppliedAt;
+
+    /** 非空即表示钱已退、库存已回补。与 cancelledAt 一起是对账时的可查证据。 */
+    private LocalDateTime refundedAt;
+
+    private String refundReason;
+    private String refundRejectReason;
+    private BigDecimal refundAmount;
+
+    /**
+     * 申请退款前的状态。驳回时据此还原。
+     *
+     * <p>不记的话，已发货的单被驳回后只能猜一个状态，而"这单发没发货"是客服
+     * 照着回答"我的货到哪了"的依据——猜错就是对用户说了假话。
+     */
+    private String statusBeforeRefund;
 
     public Long getId() {
         return id;
@@ -186,5 +205,69 @@ public class MallOrder {
 
     public void setCancelledAt(LocalDateTime cancelledAt) {
         this.cancelledAt = cancelledAt;
+    }
+
+    public LocalDateTime getDeliveredAt() {
+        return deliveredAt;
+    }
+
+    public void setDeliveredAt(LocalDateTime deliveredAt) {
+        this.deliveredAt = deliveredAt;
+    }
+
+    public LocalDateTime getCompletedAt() {
+        return completedAt;
+    }
+
+    public void setCompletedAt(LocalDateTime completedAt) {
+        this.completedAt = completedAt;
+    }
+
+    public LocalDateTime getRefundAppliedAt() {
+        return refundAppliedAt;
+    }
+
+    public void setRefundAppliedAt(LocalDateTime refundAppliedAt) {
+        this.refundAppliedAt = refundAppliedAt;
+    }
+
+    public LocalDateTime getRefundedAt() {
+        return refundedAt;
+    }
+
+    public void setRefundedAt(LocalDateTime refundedAt) {
+        this.refundedAt = refundedAt;
+    }
+
+    public String getRefundReason() {
+        return refundReason;
+    }
+
+    public void setRefundReason(String refundReason) {
+        this.refundReason = refundReason;
+    }
+
+    public String getRefundRejectReason() {
+        return refundRejectReason;
+    }
+
+    public void setRefundRejectReason(String refundRejectReason) {
+        this.refundRejectReason = refundRejectReason;
+    }
+
+    public BigDecimal getRefundAmount() {
+        return refundAmount;
+    }
+
+    public void setRefundAmount(BigDecimal refundAmount) {
+        this.refundAmount = refundAmount;
+    }
+
+    public String getStatusBeforeRefund() {
+        return statusBeforeRefund;
+    }
+
+    public void setStatusBeforeRefund(String statusBeforeRefund) {
+        this.statusBeforeRefund = statusBeforeRefund;
     }
 }

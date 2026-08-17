@@ -32,6 +32,16 @@ public record OrderView(
         String status,
         LocalDateTime createdAt,
         LocalDateTime expiresAt,
+        String expressCompany,
+        String expressNo,
+        /**
+         * 物流轨迹，原样透传的 JSON 字符串 {@code [{"ts","desc"}]}。
+         * 与客服工具层 {@code get_order_status} 读的是同一份、同一个形状——
+         * 页面显示什么，客服就得答什么。
+         */
+        String tracks,
+        String refundReason,
+        String refundRejectReason,
         boolean idempotentHit
 ) {
 
@@ -50,6 +60,11 @@ public record OrderView(
                 o.getStatus(),
                 o.getCreatedAt(),
                 expiresAt,
+                o.getExpressCompany(),
+                o.getExpressNo(),
+                o.getTracks(),
+                o.getRefundReason(),
+                o.getRefundRejectReason(),
                 idempotentHit
         );
     }

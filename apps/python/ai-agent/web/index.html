@@ -201,6 +201,17 @@ nav .tag{background:var(--tmall);color:#fff;font-size:11px;padding:1px 5px;
 .orderbox b{font-family:ui-monospace,Menlo,Consolas,monospace}
 .orderbox .hint{color:var(--ink-3);font-size:12px}
 .orderbox a{color:var(--orange);text-decoration:underline;cursor:pointer}
+/* 物流轨迹：最新的在上面，和快递 App 一致 */
+.tracks{margin:7px 0;padding:7px 10px;background:rgba(255,255,255,.65);
+        border-radius:3px;font-size:12px;color:var(--ink-2);line-height:1.8}
+.tracks b{display:block;color:var(--ink);margin-bottom:2px}
+.tracks i{color:var(--ink-3);font-style:normal;margin-right:8px;
+          font-variant-numeric:tabular-nums}
+.tracks div:first-of-type{color:var(--ink)}
+/* 商家动作在演示页上要一眼看出不属于买家 */
+.adminrow{margin-top:8px;padding-top:7px;border-top:1px dashed rgba(0,0,0,.15);
+          font-size:12px}
+.adminrow span{color:var(--ink-3);margin-right:8px}
 table.size{border-collapse:collapse;width:100%;font-size:12px;margin-top:6px}
 table.size th,table.size td{border:1px solid var(--line);padding:5px 7px;
                             text-align:center}
@@ -787,40 +798,100 @@ const STATUS_CN = {
   refunding: '退款中',
 };
 
-/** 渲染订单结果块。待支付才给支付/取消入口——按状态给动作，不给死按钮。 */
+/** 按状态给动作，不给死按钮——一个点不动的按钮比没有按钮更糟。 */
+function userActions(o){
+  const no = esc(o.orderNo);
+  switch (o.status){
+    case 'pending_payment':
+      return `<a onclick="payOrder('${no}')">模拟支付</a>　`
+           + `<a onclick="cancelOrder('${no}')">取消订单</a>　`;
+    case 'shipped': case 'delivered':
+      return `<a onclick="confirmOrder('${no}')">确认收货</a>　`
+           + `<a onclick="refundOrder('${no}')">申请退款</a>　`;
+    case 'paid': case 'completed':
+      return `<a onclick="refundOrder('${no}')">申请退款</a>　`;
+    default:
+      return '';
+  }
+}
+
+/** 商家侧动作。演示环境才有，真实部署里这一片在运营后台。 */
+function adminActions(o){
+  const no = esc(o.orderNo);
+  const act = (a, label, body) =>
+    `<a onclick="adminOrder('${no}','${a}'${body ? `,${body}` : ''})">${label}</a>　`;
+  switch (o.status){
+    case 'paid':      return act('ship', '发货');
+    case 'shipped':   return act('deliver', '标记送达');
+    case 'refunding': return act('refund-approve', '同意退款')
+                           + act('refund-reject', '驳回退款');
+    default:          return '';
+  }
+}
+
+function tracksHtml(o){
+  if (!o.tracks) return '';
+  let nodes;
+  try { nodes = JSON.parse(o.tracks); } catch(e){ return ''; }
+  if (!Array.isArray(nodes) || !nodes.length) return '';
+  const line = [o.expressCompany, o.expressNo].filter(Boolean).map(esc).join(' ');
+  return `<div class="tracks">${line ? `<b>${line}</b>` : ''}`
+       + nodes.slice().reverse().map(n =>
+           `<div><i>${esc(n.ts || '')}</i>${esc(n.desc || '')}</div>`).join('')
+       + `</div>`;
+}
+
 function renderOrder(o, verb){
   const pending = o.status === 'pending_payment';
-  const actions = pending
-    ? `<a onclick="payOrder('${esc(o.orderNo)}')">模拟支付</a>　`
-    + `<a onclick="cancelOrder('${esc(o.orderNo)}')">取消订单</a>　`
-    : '';
   // 到期时刻由服务端给（expiresAt），不在前端写死「30 分钟」——超时时长是
   // 配置项，写死的话改了配置页面就开始骗人
   const note = pending
     ? `<span class="hint">　（库存已预占${
          o.expiresAt ? `，${esc(hhmm(o.expiresAt))} 前未支付将自动释放` : '，未支付将自动释放'
        }）</span>`
-    : (o.status === 'paid'
-        ? '<span class="hint">　（库存已确认扣减）</span>'
-        : '<span class="hint">　（库存已回补）</span>');
+    : ({
+        paid:      '<span class="hint">　（库存已确认扣减）</span>',
+        shipped:   '<span class="hint">　（库存已确认扣减）</span>',
+        delivered: '<span class="hint">　（库存已确认扣减）</span>',
+        completed: '<span class="hint">　（交易完成）</span>',
+        refunding: '<span class="hint">　（审核中，尚未退款、库存未回补）</span>',
+        refunded:  '<span class="hint">　（已退款，库存已回补）</span>',
+        cancelled: '<span class="hint">　（库存已回补）</span>',
+      }[o.status] || '');
 
-  orderMsg(o.status === 'cancelled' ? 'err' : 'ok',
+  const refundLine = o.status === 'refunding' && o.refundReason
+      ? `<div class="hint">退款原因：${esc(o.refundReason)}</div>` : '';
+  const rejectLine = o.refundRejectReason
+      ? `<div class="hint">上次驳回：${esc(o.refundRejectReason)}</div>` : '';
+  const admin = adminActions(o);
+
+  orderMsg(['cancelled', 'refunding'].includes(o.status) ? 'err' : 'ok',
     `${verb}　订单号 <b>${esc(o.orderNo)}</b><br>`
     + `${esc(o.spec ? specLabel(o.spec) : o.skuNo)} × ${o.quantity}　`
     + `实付 ¥${Number(o.amount).toFixed(2)}　`
     + `状态：${esc(STATUS_CN[o.status] || o.status)}<br>`
-    + actions
+    + refundLine + rejectLine
+    + tracksHtml(o)
+    + userActions(o)
     + `<a onclick="askOrder('${esc(o.orderNo)}')">问客服这单到哪了 →</a>`
-    + note);
+    + note
+    + (admin ? `<div class="adminrow"><span>商家侧（演示）</span>${admin}</div>` : ''));
 }
 
-async function orderAction(orderNo, action, verbs){
+async function orderAction(orderNo, action, verbs, body, isAdmin){
   if (placing) return;
   placing = true;
   const userId = parseInt($('#user').value, 10) || 10086;
+  // 商家侧走 /api/admin/orders，不带 user_id —— 那些动作没有"归属用户"这回事
+  const url = isAdmin
+    ? `/api/admin/orders/${encodeURIComponent(orderNo)}/${action}`
+    : `/api/orders/${encodeURIComponent(orderNo)}/${action}?user_id=${userId}`;
   try{
-    const r = await fetch(`/api/orders/${encodeURIComponent(orderNo)}/${action}`
-                          + `?user_id=${userId}`, {method: 'POST'});
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: body ? {'Content-Type': 'application/json'} : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
     const d = await r.json();
     if (d.code !== 0){
       // 失败也要把当前真实状态显示出来，而不是只报一句错——超时被自动取消
@@ -843,6 +914,40 @@ const payOrder = no => orderAction(no, 'pay', {
   ok: '支付成功', again: '该订单已支付（幂等命中）', fail: '支付失败'});
 const cancelOrder = no => orderAction(no, 'cancel', {
   ok: '订单已取消', again: '订单已取消', fail: '取消失败'});
+const confirmOrder = no => orderAction(no, 'confirm', {
+  ok: '已确认收货', again: '已确认收货', fail: '确认收货失败'});
+
+function refundOrder(no){
+  const reason = prompt('退款原因（会记进订单，商家审核时看得到）', '尺码不合适');
+  if (!reason) return;
+  orderAction(no, 'refund', {
+    ok: '退款申请已提交，等待商家审核', again: '退款申请已提交',
+    fail: '申请退款失败'}, {reason});
+}
+
+/**
+ * 商家侧动作。**演示环境专用**——真实部署里这些在运营后台，
+ * 且 /api/product/admin/** 会在网关上整片拦掉。
+ */
+async function adminOrder(no, action){
+  let body = null;
+  if (action === 'ship'){
+    const expressNo = prompt('运单号（字母数字与连字符）',
+                             'SF' + Date.now().toString().slice(-9));
+    if (!expressNo) return;
+    body = {company: '顺丰', expressNo};
+  } else if (action === 'refund-reject'){
+    const reason = prompt('驳回理由（用户会看到）', '商品已拆封，不符合无理由退货条件');
+    if (!reason) return;
+    body = {reason};
+  }
+  const verbs = {
+    'ship': '已发货', 'deliver': '已标记送达',
+    'refund-approve': '退款已同意，库存已回补', 'refund-reject': '退款已驳回',
+  };
+  await orderAction(no, action, {ok: verbs[action], again: verbs[action],
+                                 fail: '操作失败'}, body, true);
+}
 
 /** 下完单直接去问客服——这条链路闭上，才叫「下单」和「查单」用的是同一份数据。 */
 function askOrder(orderNo){

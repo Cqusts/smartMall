@@ -3,6 +3,7 @@ package com.smartmall.product.order;
 import com.smartmall.common.api.ApiResponse;
 import com.smartmall.product.order.dto.CreateOrderRequest;
 import com.smartmall.product.order.dto.OrderView;
+import com.smartmall.product.order.dto.RefundRequest;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -53,6 +54,22 @@ public class OrderController {
     public ApiResponse<OrderView> cancel(@PathVariable("orderNo") String orderNo,
                                          @RequestParam("userId") Long userId) {
         return ApiResponse.ok(orderService.cancel(orderNo, userId));
+    }
+
+    @PostMapping("/{orderNo}/confirm")
+    @Operation(summary = "确认收货", description = "shipped/delivered → completed")
+    public ApiResponse<OrderView> confirm(@PathVariable("orderNo") String orderNo,
+                                          @RequestParam("userId") Long userId) {
+        return ApiResponse.ok(orderService.confirmReceipt(orderNo, userId));
+    }
+
+    @PostMapping("/{orderNo}/refund")
+    @Operation(summary = "申请退款",
+            description = "只挂起等审核，不动钱也不动库存——放款需要人点头")
+    public ApiResponse<OrderView> applyRefund(@PathVariable("orderNo") String orderNo,
+                                              @RequestParam("userId") Long userId,
+                                              @Valid @RequestBody RefundRequest req) {
+        return ApiResponse.ok(orderService.applyRefund(orderNo, userId, req.reason()));
     }
 
     @GetMapping("/{orderNo}")

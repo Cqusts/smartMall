@@ -166,6 +166,51 @@ async def cancel_order(order_no: str, user_id: int) -> dict[str, Any]:
                           params={"userId": user_id})
 
 
+@router.post("/api/orders/{order_no}/confirm", summary="确认收货（转发）")
+async def confirm_order(order_no: str, user_id: int) -> dict[str, Any]:
+    if not _SAFE_ORDER_NO.fullmatch(order_no):
+        raise HTTPException(status_code=400, detail="订单号格式不合法")
+    return await _forward("POST", f"/api/product/orders/{order_no}/confirm",
+                          params={"userId": user_id})
+
+
+@router.post("/api/orders/{order_no}/refund", summary="申请退款（转发）")
+async def refund_order(order_no: str, user_id: int,
+                       payload: dict[str, Any]) -> dict[str, Any]:
+    if not _SAFE_ORDER_NO.fullmatch(order_no):
+        raise HTTPException(status_code=400, detail="订单号格式不合法")
+    return await _forward("POST", f"/api/product/orders/{order_no}/refund",
+                          params={"userId": user_id}, json_body=payload)
+
+
+#: 商家侧动作。演示页要能把整条链路点完，否则「发货 → 客服答得出物流」
+#: 这个最有说服力的环节没法演。
+#:
+#: ⚠️ 下游那几个接口本身没有鉴权（项目还没有认证体系），这里转发也就同样
+#: 没有。真实部署里 /api/product/admin/** 应该在网关上整片拦掉，只放给
+#: 运营后台——那也正是它被单独放到 admin 前缀下的原因。
+_ADMIN_ACTIONS = {
+    "ship": "ship",
+    "deliver": "deliver",
+    "refund-approve": "refund/approve",
+    "refund-reject": "refund/reject",
+}
+
+
+@router.post("/api/admin/orders/{order_no}/{action}", summary="商家侧动作（演示用转发）")
+async def admin_order_action(order_no: str, action: str,
+                             payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not _SAFE_ORDER_NO.fullmatch(order_no):
+        raise HTTPException(status_code=400, detail="订单号格式不合法")
+    # 白名单映射而不是把 action 直接拼进 URL——否则调用方就能自己指定下游路径
+    downstream = _ADMIN_ACTIONS.get(action)
+    if downstream is None:
+        raise HTTPException(status_code=404, detail=f"未知动作：{action}")
+    return await _forward(
+        "POST", f"/api/product/admin/orders/{order_no}/{downstream}",
+        json_body=payload if payload is not None else {})
+
+
 @router.websocket("/ws/chat")
 async def ws_chat(ws: WebSocket) -> None:
     await ws.accept()

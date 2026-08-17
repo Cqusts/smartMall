@@ -434,6 +434,30 @@ class TestOrderProxy:
                 assert r.status_code == 200
                 assert r.json()["code"] == 9503, action
 
+    def test_admin_action_is_whitelisted_not_pasted_into_the_url(self):
+        """商家动作用白名单映射，不能把 action 直接拼进下游路径。
+
+        拼进去的话，调用方就能自己指定 mall-product 上的任意路径。
+        """
+        c = self._client()
+        for bad in ("../../actuator/env", "delete", "ship/../../x", "PAY"):
+            r = c.post(f"/api/admin/orders/20260816142625765414/{bad}", json={})
+            assert r.status_code in (400, 404), f"{bad!r} 应被拒绝"
+
+    def test_admin_actions_are_forwarded(self):
+        """四个商家动作都能转发出去；连不上时错误可排查。"""
+        from app.config import settings
+        import pytest
+
+        c = self._client()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(settings, "order_base_url", "http://127.0.0.1:1")
+            for action in ("ship", "deliver", "refund-approve", "refund-reject"):
+                r = c.post(f"/api/admin/orders/20260816142625765414/{action}",
+                           json={"company": "顺丰", "expressNo": "SF1", "reason": "x"})
+                assert r.status_code == 200, action
+                assert r.json()["code"] == 9503, action
+
     def test_agent_tool_layer_stays_read_only(self):
         """转发口子开在 HTTP 层，工具层必须仍然是全只读的。
 

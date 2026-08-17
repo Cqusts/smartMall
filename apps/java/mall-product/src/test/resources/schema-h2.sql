@@ -40,7 +40,15 @@ CREATE TABLE mall_order (
     created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     shipped_at      TIMESTAMP     DEFAULT NULL,
+    delivered_at    TIMESTAMP     DEFAULT NULL,
+    completed_at    TIMESTAMP     DEFAULT NULL,
     cancelled_at    TIMESTAMP     DEFAULT NULL,
+    refund_applied_at    TIMESTAMP     DEFAULT NULL,
+    refunded_at          TIMESTAMP     DEFAULT NULL,
+    refund_reason        VARCHAR(255)  NOT NULL DEFAULT '',
+    refund_reject_reason VARCHAR(255)  NOT NULL DEFAULT '',
+    refund_amount        DECIMAL(10,2) DEFAULT NULL,
+    status_before_refund VARCHAR(20)   NOT NULL DEFAULT '',
     CONSTRAINT uk_order_no   UNIQUE (order_no),
     CONSTRAINT uk_request_id UNIQUE (request_id)
 );

@@ -1,5 +1,8 @@
 package com.smartmall.product.order;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartmall.common.api.ErrorCode;
 import com.smartmall.common.exception.BizException;
 import com.smartmall.product.order.dto.CreateOrderRequest;
@@ -47,6 +50,12 @@ public class OrderService {
 
     private static final DateTimeFormatter ORDER_NO_TIME =
             DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+
+    /** 物流节点的时间格式。与 004 种子数据一致，客服会照着念给用户听。 */
+    private static final DateTimeFormatter TRACK_TIME =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final MallOrderMapper orderMapper;
     private final SkuMapper skuMapper;
@@ -299,6 +308,202 @@ public class OrderService {
         log.info("超时释放：扫到 {} 笔超期未支付，实际释放 {} 笔（其余已被支付或取消）",
                 expired.size(), released);
         return released;
+    }
+
+    // ================================================================ 履约
+    //
+    // 发货与送达是**商家/物流侧**动作，没有 userId 可校验。
+    // ⚠️ 目前它们也没有任何鉴权 —— 项目还没有认证体系，谁都能调。
+    // 控制器把这几个口子放在 /api/product/admin/orders 下面，就是为了
+    // 将来接入认证时能整个前缀一起拦，而不用一个个找。
+
+    /** 发货。paid → shipped，写运单号与第一条物流轨迹。 */
+    @Transactional(rollbackFor = Exception.class)
+    public OrderView ship(String orderNo, String company, String expressNo) {
+        MallOrder order = mustFind(orderNo);
+        if (!"paid".equals(order.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL,
+                    "订单当前状态为 " + order.getStatus() + "，不可发货");
+        }
+        String tracks = appendTrack(order.getTracks(), "商品已出库，" + company + "揽收");
+        if (orderMapper.markShipped(order.getId(), company, expressNo, tracks) == 0) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL, "订单状态已变更，发货未生效");
+        }
+        log.info("订单已发货 orderNo={} {} {}", orderNo, company, expressNo);
+        return view(orderNo);
+    }
+
+    /** 物流送达。shipped → delivered。真实系统由快递回调驱动。 */
+    @Transactional(rollbackFor = Exception.class)
+    public OrderView deliver(String orderNo) {
+        MallOrder order = mustFind(orderNo);
+        if (!"shipped".equals(order.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL,
+                    "订单当前状态为 " + order.getStatus() + "，不可标记送达");
+        }
+        String tracks = appendTrack(order.getTracks(), "快件已送达，请注意查收");
+        if (orderMapper.markDelivered(order.getId(), tracks) == 0) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL, "订单状态已变更");
+        }
+        return view(orderNo);
+    }
+
+    /**
+     * 确认收货。用户动作，shipped / delivered → completed。
+     *
+     * <p>允许从 shipped 直接确认：用户拿到货就点了，而物流的"已签收"回调
+     * 可能还没到。要求必须先 delivered，会让按钮在用户明明拿到货的时候点不动。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public OrderView confirmReceipt(String orderNo, Long userId) {
+        MallOrder order = mustOwn(orderNo, userId, "确认收货");
+        if (!"shipped".equals(order.getStatus()) && !"delivered".equals(order.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL,
+                    "订单当前状态为 " + order.getStatus() + "，不可确认收货");
+        }
+        if (orderMapper.markCompleted(order.getId()) == 0) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL, "订单状态已变更，请刷新后重试");
+        }
+        return view(orderNo);
+    }
+
+    // ================================================================ 退款
+
+    /**
+     * 申请退款。用户动作，把订单挂到 refunding 等审核。
+     *
+     * <p><b>申请不等于退款。</b>钱出去是不可逆的，所以这里只改状态，
+     * 不动库存、不放款——那是 {@link #approveRefund} 的事，而它需要人点头。
+     * 这与工具层全只读是同一条原则：不可逆的动作不能被自动触发。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public OrderView applyRefund(String orderNo, Long userId, String reason) {
+        MallOrder order = mustOwn(orderNo, userId, "申请退款");
+        if ("refunding".equals(order.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL, "该订单已在退款审核中");
+        }
+        if (!REFUNDABLE.contains(order.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL,
+                    "订单当前状态为 " + order.getStatus() + "，不可申请退款"
+                            + ("pending_payment".equals(order.getStatus())
+                               ? "（尚未支付，直接取消即可）" : ""));
+        }
+        // 金额由服务端取订单实付，不接受客户端传——理由与下单不接受 price 相同
+        if (orderMapper.markRefunding(order.getId(), reason, order.getAmount()) == 0) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL, "订单状态已变更，请刷新后重试");
+        }
+        log.info("退款申请 orderNo={} amount={} reason={}", orderNo, order.getAmount(), reason);
+        return view(orderNo);
+    }
+
+    /**
+     * 同意退款。<b>这一步才回补库存。</b>
+     *
+     * <p>它是第三条会回补库存的路径（另外两条是手动取消与超时回收），
+     * 而"库存至多回补一次"这条不变式必须跨三条路径都成立。这里靠的仍然是
+     * 条件更新：{@code markRefunded} 要求前置状态是 refunding，而 refunding
+     * 只能从已支付系的状态进入——与 cancelled 那条路的前置 pending_payment
+     * 互斥。已取消的单付不了款（有测试），也就永远进不了退款流程。
+     *
+     * <p><b>一个说清楚的简化：</b>已发货的单同意退款就立刻回补库存，
+     * 而现实里货还在路上，得等退货入库才算。真实系统会把"退款完成"与
+     * "退货入库"拆成两步，库存跟着后者走。这里合并了，因为演示没有仓储环节。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public OrderView approveRefund(String orderNo) {
+        MallOrder order = mustFind(orderNo);
+        if ("refunded".equals(order.getStatus())) {
+            return OrderView.of(order, true, paymentTtl);   // 幂等：审核动作会被重复点
+        }
+        if (!"refunding".equals(order.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL,
+                    "订单当前状态为 " + order.getStatus() + "，没有待审的退款申请");
+        }
+        if (orderMapper.markRefunded(order.getId()) == 0) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL, "订单状态已变更，退款未生效");
+        }
+        skuMapper.restoreStock(order.getSkuNo(), order.getQuantity());
+        log.info("退款已同意，库存回补 orderNo={} skuNo={} qty={} amount={}",
+                orderNo, order.getSkuNo(), order.getQuantity(), order.getAmount());
+        return view(orderNo);
+    }
+
+    /** 驳回退款：回到申请前的状态，不动库存也不动钱。 */
+    @Transactional(rollbackFor = Exception.class)
+    public OrderView rejectRefund(String orderNo, String reason) {
+        MallOrder order = mustFind(orderNo);
+        if (!"refunding".equals(order.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL,
+                    "订单当前状态为 " + order.getStatus() + "，没有待审的退款申请");
+        }
+        if (orderMapper.markRefundRejected(order.getId(), reason) == 0) {
+            throw new BizException(ErrorCode.ORDER_STATE_ILLEGAL, "订单状态已变更，驳回未生效");
+        }
+        log.info("退款已驳回 orderNo={} 回到 {} reason={}",
+                orderNo, order.getStatusBeforeRefund(), reason);
+        return view(orderNo);
+    }
+
+    // ---------------------------------------------------------------- 内部
+
+    /** 可申请退款的状态。未支付不在其中——没付钱谈不上退，直接取消即可。 */
+    private static final java.util.Set<String> REFUNDABLE =
+            java.util.Set.of("paid", "shipped", "delivered", "completed");
+
+    private MallOrder mustFind(String orderNo) {
+        MallOrder order = orderMapper.findByOrderNo(orderNo);
+        if (order == null) {
+            throw new BizException(ErrorCode.ORDER_NOT_FOUND);
+        }
+        return order;
+    }
+
+    /** 查单并校验归属。越权与不存在返回完全相同的错误，不给存在性预言机。 */
+    private MallOrder mustOwn(String orderNo, Long userId, String action) {
+        MallOrder order = orderMapper.findByOrderNo(orderNo);
+        if (order == null || !order.getUserId().equals(userId)) {
+            if (order != null) {
+                log.warn("越权{}：用户 {} 试图操作属于 {} 的订单 {}",
+                        action, userId, order.getUserId(), orderNo);
+            }
+            throw new BizException(ErrorCode.ORDER_NOT_FOUND);
+        }
+        return order;
+    }
+
+    private OrderView view(String orderNo) {
+        return OrderView.of(orderMapper.findByOrderNo(orderNo), false, paymentTtl);
+    }
+
+    /**
+     * 往物流轨迹里追加一条。
+     *
+     * <p>形状与 004 种子数据一致：{@code [{"ts":"YYYY-MM-DD HH:mm","desc":"..."}]}，
+     * 因为客服工具层 {@code get_order_status} 直接把它读出来讲给用户听。
+     * 这里改了形状，客服那边就会说出一句语法正确但没有信息的话。
+     */
+    private String appendTrack(String existingJson, String desc) {
+        try {
+            List<java.util.Map<String, String>> nodes = new java.util.ArrayList<>();
+            if (existingJson != null && !existingJson.isBlank()) {
+                nodes.addAll(JSON.readValue(existingJson, new TypeReference<>() {
+                }));
+            }
+            nodes.add(java.util.Map.of(
+                    "ts", LocalDateTime.now().format(TRACK_TIME),
+                    "desc", desc));
+            return JSON.writeValueAsString(nodes);
+        } catch (JsonProcessingException e) {
+            // 轨迹读不出来不该让发货失败——发货是主线，轨迹是附带信息。
+            // 重建一条而不是抛异常，同时留日志说明原来那份坏了
+            log.warn("物流轨迹解析失败，重建：{}", e.getMessage());
+            try {
+                return JSON.writeValueAsString(List.of(java.util.Map.of(
+                        "ts", LocalDateTime.now().format(TRACK_TIME), "desc", desc)));
+            } catch (JsonProcessingException fatal) {
+                throw new IllegalStateException(fatal);
+            }
+        }
     }
 
     /** 查单。同样的越权口径：不属于你的单，就是"不存在"。 */
