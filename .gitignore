@@ -9,8 +9,19 @@ deploy/.env
 target/
 *.jar
 *.class
-.mvn/
-!.mvn/wrapper/maven-wrapper.jar
+# .mvn/ 下只有 wrapper 配置需要提交，其余（jvm.config、IDE 生成物）不要。
+#
+# 不能写成 `.mvn/` 加一行 `!.mvn/wrapper/xxx` —— **父目录被排除时，git 不会
+# 再去看目录里的取消排除规则**，那行否定形同虚设。必须一层层放行：
+# 先只排除 .mvn 下的条目（而非目录本身），放行 wrapper 目录，再排除它里面的
+# 条目，最后放行那个文件。
+#
+# 这条真踩过：wrapper 生成后 mvnw / mvnw.cmd 能进版本库，
+# maven-wrapper.properties 却被悄悄挡住 —— 别人拉下来是一个跑不起来的 wrapper。
+.mvn/*
+!.mvn/wrapper
+.mvn/wrapper/*
+!.mvn/wrapper/maven-wrapper.properties
 
 # ---- Python ----
 __pycache__/

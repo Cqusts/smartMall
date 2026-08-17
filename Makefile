@@ -70,7 +70,7 @@ build: build-java build-python ## 构建全部服务
 
 .PHONY: build-java
 build-java: ## 编译 Java 服务
-	cd apps/java && mvn -B -DskipTests clean package
+	cd apps/java && ./mvnw -B -DskipTests clean package
 
 .PHONY: build-python
 build-python: ## 安装 Python 公共库到当前环境
@@ -78,7 +78,7 @@ build-python: ## 安装 Python 公共库到当前环境
 
 .PHONY: install-java
 install-java: ## 把 parent 与 mall-common 装进本地仓库（其它 Java 模块的前置）
-	cd apps/java && mvn -B -q -DskipTests install
+	cd apps/java && ./mvnw -B -q -DskipTests install
 
 ## ---------------------------------------------------------------- 本地运行
 .PHONY: run-product
@@ -94,8 +94,10 @@ run-product: ## 起订单服务 mall-product（:8081），店铺页下单要它
 	@# "Unable to find a suitable main class"。
 	@#
 	@# 所以先 install 让 mall-common 进本地仓库，再单独 run。
-	cd apps/java && mvn -B -q -DskipTests -pl mall-product -am install
-	cd apps/java && mvn -B -pl mall-product spring-boot:run
+	@# 用 ./mvnw 而不是 mvn：构建用哪版 Maven 不该取决于机器上装了什么。
+	@# wrapper 会自动下载 .mvn/wrapper/maven-wrapper.properties 里锁定的版本。
+	cd apps/java && ./mvnw -B -q -DskipTests -pl mall-product -am install
+	cd apps/java && ./mvnw -B -pl mall-product spring-boot:run
 
 ## ---------------------------------------------------------------- 校验
 .PHONY: check

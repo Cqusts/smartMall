@@ -62,8 +62,8 @@ if ! curl -sf "$ORDER_BASE/health" >/dev/null; then
   # 拉进 reactor，spring-boot:run 在 parent 上跑会报 "Unable to find a suitable
   # main class"。所以是两步，不是一步
   echo "    先启动：make run-product"
-  echo "    或手动：cd apps/java && mvn -pl mall-product -am install -DskipTests \\"
-  echo "                        && mvn -pl mall-product spring-boot:run"
+  echo "    或手动：cd apps/java && ./mvnw -pl mall-product -am install -DskipTests \\"
+  echo "                        && ./mvnw -pl mall-product spring-boot:run"
   exit 1
 fi
 

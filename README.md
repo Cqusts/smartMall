@@ -293,9 +293,20 @@ mysql -u root -p --default-character-set=utf8mb4 smartmall \
 make run-product        # 编译 + 启动，:8081
 ```
 
-**前置：Maven ≥ 3.6.3**（Spring Boot 3.x 的要求）。低于这个版本构建会在第一步
-被 enforcer 拦下并提示怎么升级 —— 不拦的话，老 Maven 报出来的是「不再支持源选项 5」
-这类和 pom 里写的 `release 21` 完全对不上的错，很难查。`mvn -v` 看当前版本。
+**用 `./mvnw` 而不是 `mvn`**（Windows 是 `.\mvnw.cmd`）。仓库自带 Maven Wrapper，
+首次运行自动下载锁定版本的 Maven，**机器上装没装、装的哪版都不影响**。
+
+这不是洁癖。同一份代码在老 Maven（3.3.9，2015 年）上连撞三个错，每个都难查：
+
+| 现象 | 真正的原因 |
+|---|---|
+| `不再支持源选项 5` | 超级 POM 给了 compiler 3.1，它不认识 `maven.compiler.release`，回退到 1.5 —— 而 pom 里明明写着 `release 21`，报错和配置对不上 |
+| `requires Maven version 3.6.3` | 锁了插件版本之后暴露出的下一层：Spring Boot 3.x 本身就要求 3.6.3+ |
+| **测试静默归零** | 老 Maven 默认 surefire 2.12.4，那是 JUnit 5 之前的版本，一个测试都不跑还报 BUILD SUCCESS |
+
+第三个最危险——前两个至少会红，它是绿的。wrapper 把 Maven 版本一并锁进仓库，
+三个一起消失。真要用自己的 `mvn`，得 ≥ 3.6.3，否则 enforcer 会在 `validate`
+阶段（第一步）拦下并告诉你怎么办。
 
 **不能只跑 `mvn -pl mall-product spring-boot:run`，两种写法都会失败：**
 
@@ -309,15 +320,15 @@ make run-product        # 编译 + 启动，:8081
 
 ```bash
 cd apps/java
-mvn -pl mall-product -am install -DskipTests
-mvn -pl mall-product spring-boot:run
+./mvnw -pl mall-product -am install -DskipTests
+./mvnw -pl mall-product spring-boot:run
 ```
 
 或者用打好的 jar（PowerShell 里环境变量要分行写，`&&` 也不支持）：
 
 ```powershell
 cd apps\java
-mvn -pl mall-product -am install -DskipTests
+.\mvnw.cmd -pl mall-product -am install -DskipTests
 $env:MYSQL_HOST="127.0.0.1"
 java -jar mall-product\target\mall-product-0.1.0-SNAPSHOT.jar
 ```

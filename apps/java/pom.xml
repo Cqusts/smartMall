@@ -119,12 +119,18 @@
                                          必须在任何 codepage 下都读得出来。 -->
                                     <message>
 smartMall requires Maven ${minimum.maven.version}+ (Spring Boot 3.x requirement).
-Check yours: mvn -v      Download: https://maven.apache.org/download.cgi
-  Windows  winget install Apache.Maven    or  scoop install maven
-  macOS    brew install maven
-  Linux    sdk install maven
-(smartMall 需要 Maven ${minimum.maven.version} 或更高版本，这是 Spring Boot 3.x 的要求。
- 降低插件版本治标不治本 —— Spring Boot 自身就不支持更老的 Maven。)
+
+  FIX: use the bundled wrapper instead of your own mvn -- no install needed.
+       Windows   .\mvnw.cmd &lt;same args&gt;
+       Linux/mac ./mvnw &lt;same args&gt;
+
+  It downloads a pinned Maven on first run. Nothing else to set up.
+  (Or upgrade yours: https://maven.apache.org/download.cgi)
+
+(smartMall 需要 Maven ${minimum.maven.version}+，这是 Spring Boot 3.x 的要求。
+ 直接用仓库自带的 wrapper 就行，不用装任何东西：把命令里的 mvn 换成
+ .\mvnw.cmd（Windows）或 ./mvnw，首次运行会自动下载锁定版本的 Maven。
+ 别去降插件版本 —— Spring Boot 自身就不支持更老的 Maven，降完只是把失败推后。)
                                     </message>
                                 </requireMavenVersion>
                             </rules>
