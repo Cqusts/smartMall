@@ -116,6 +116,23 @@ def numbers_in(text: str) -> set[str]:
     return out
 
 
+def unsourced_numbers(
+    text: str, evidence: Sequence[Evidence], *, question: str = ""
+) -> list[str]:
+    """草稿里出现、而依据与用户原问题里都没有的数字。
+
+    单独拆出来是给运营 Agent 用的：它有自己那套更严的广告合规检查，
+    **只需要借这一条数值判据**。整个 :func:`check` 借过去的话，
+    客服那套出口检查会跟着跑一遍，同一个「最好」会被报两次
+    （"极限词:最好" + "绝对化用语:最好"），页面上像是出了两个问题。
+    """
+    known: set[str] = set()
+    for e in evidence:
+        known |= numbers_in(e.text)
+    known |= numbers_in(question)
+    return sorted(numbers_in(text) - known, key=lambda x: int(float(x)))
+
+
 @dataclass
 class GroundingResult:
     ok: bool = True
@@ -146,12 +163,7 @@ def check(
         result.flags.append("没有任何依据")
         return result
 
-    known = set()
-    for e in evidence:
-        known |= numbers_in(e.text)
-    known |= numbers_in(question)
-
-    unsourced = sorted(numbers_in(result.text) - known, key=lambda x: int(float(x)))
+    unsourced = unsourced_numbers(result.text, evidence, question=question)
     if unsourced:
         result.ok = False
         result.unsourced_numbers = unsourced

@@ -286,6 +286,74 @@ def cmd_kb(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_copy(args: argparse.Namespace) -> int:
+    """运营 Agent：给商品生成文案。
+
+    默认试跑，不落库。和 ``kb`` 一样的理由：这条链路的产出是要发布的，
+    先看看写成什么样比先写进去容易。
+    """
+    from .marketing import graph as mk_graph
+    from .marketing.state import CopyBrief
+    from .marketing.store import MySqlCopyStore
+
+    if not args.product_id:
+        print("✗ 要指定商品：smartmall-agent copy --product-id 9001")
+        return 1
+
+    deps = _build_deps(args, with_retriever=False)
+    if not args.dry_run:
+        try:
+            deps.copy_store = MySqlCopyStore.from_env()
+        except Exception as exc:  # noqa: BLE001
+            print(f"✗ 连不上数据库（{type(exc).__name__}）：{exc}")
+            print("  建表：deploy/sql/migrations/009_marketing_copy.sql")
+            return 1
+
+    brief = CopyBrief(product_id=args.product_id, audience=args.audience,
+                      style=args.style)
+    state = mk_graph.safe_run_copy(brief, deps)
+
+    print(f"\n==> 商品 #{brief.product_id} {state.product_name}")
+    if state.demand:
+        print("\n  用户实际问得最多的：")
+        for d in state.demand[:5]:
+            tail = f"（{d.unanswered} 次没答上来）" if d.unanswered else ""
+            print(f"    ×{d.times}  {truncate(d.question, 30)}{tail}")
+    else:
+        print("  （这件商品还没有客服对话数据，只能按属性写）")
+
+    if state.points:
+        print("\n  卖点：")
+        for p in state.points:
+            src = {"demand": "用户在问", "attr": "属性表", "sku": "规格"}.get(
+                p.source, p.source)
+            print(f"    · {pad(p.text, 30)} [{src}]")
+
+    d = state.draft
+    if not d.is_empty():
+        print(f"\n  标题：{d.title}")
+        if d.main_images:
+            print(f"  主图：{' / '.join(d.main_images)}")
+        for line in d.points:
+            print(f"    · {line}")
+        if d.detail:
+            print(f"\n  详情：{d.detail}")
+        if d.script:
+            print(f"\n  口播：{d.script}")
+
+    if state.flags:
+        print(f"\n  ⚠ {'、'.join(state.flags)}")
+
+    tail = {
+        "staged": f"→ marketing_copy #{state.copy_id}（待审核，不会自动发布）",
+        "draft_only": "试跑没落库。加 --write 会写入一条**待审**文案",
+        "needs_human": "合规没过，没有落库——上面的问题要人处理",
+        "skipped": "本轮跳过",
+    }
+    print(f"\n  {tail.get(state.outcome, state.outcome)}")
+    return 0 if state.outcome in ("staged", "draft_only") else 1
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     from .graph import safe_run_turn
 
@@ -477,6 +545,15 @@ def main(argv: list[str] | None = None) -> int:
                    help="导购 Agent：多轮收敛出具体商品").set_defaults(
         func=cmd_shop
     )
+
+    s = sub.add_parser("copy", parents=[common],
+                       help="运营 Agent：给商品生成文案（默认试跑）")
+    # --product-id 来自 common，这里不再声明（重复声明 argparse 会直接报错）
+    s.add_argument("--audience", default="", help="目标人群")
+    s.add_argument("--style", default="", help="风格，如「简洁克制」")
+    s.add_argument("--write", dest="dry_run", action="store_false",
+                   default=True, help="真的写库（写入的是待审文案）")
+    s.set_defaults(func=cmd_copy)
 
     s = sub.add_parser("kb", parents=[common],
                        help="知识运维 Agent：给知识盲点起草待审条目")

@@ -134,6 +134,12 @@ class TraceRecord:
     trace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     session_id: str = ""
     user_id: int | None = None
+    product_id: int | None = None
+    """会话当时聚焦的商品。
+
+    **补这一维是为了回答"用户对这件商品最关心什么"**——运营 Agent 靠它
+    提炼卖点。没有它就只能拿转人工工单来猜，而工单只记了**答不上来**的
+    那些问题，是有偏的样本："会起球吗"答得上来就永远不会出现在里面。"""
     ts: float = field(default_factory=time.time)
 
     input_text: str = ""

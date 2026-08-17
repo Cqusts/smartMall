@@ -74,12 +74,14 @@ class MySqlTraceStore:
 
         sql = text(
             "INSERT INTO agent_trace "
-            "(trace_id, session_id, user_id, input_text, rewritten_query, intent,"
+            "(trace_id, session_id, user_id, product_id, input_text,"
+            " rewritten_query, intent,"
             " retrieval_hit_count, retrieval_max_score, retrieval_item_ids,"
             " answer, citations, postcheck_flags, handover, handover_reason,"
             " model, latency_ms, error) "
-            "VALUES (:trace_id, :session_id, :user_id, :input_text,"
-            " :rewritten_query, :intent, :hit_count, :max_score, :item_ids,"
+            "VALUES (:trace_id, :session_id, :user_id, :product_id,"
+            " :input_text, :rewritten_query, :intent,"
+            " :hit_count, :max_score, :item_ids,"
             " :answer, :citations, :flags, :handover, :handover_reason,"
             " :model, :latency, :error)"
             # 刻意不写 upsert：trace_id 每轮新生成，撞车说明别处有 bug，
@@ -91,6 +93,7 @@ class MySqlTraceStore:
             "trace_id": trace.trace_id,
             "session_id": trace.session_id,
             "user_id": trace.user_id,
+            "product_id": trace.product_id,
             "input_text": trace.input_text,
             "rewritten_query": trace.rewritten_query[:512],
             "intent": trace.intent,
@@ -193,6 +196,31 @@ class MySqlTraceStore:
                     "FROM handover_ticket GROUP BY question "
                     "ORDER BY times DESC, ticket_id ASC LIMIT :n"
                 ), {"n": limit}).mappings()
+            ]
+
+    def product_demand(self, product_id: int, limit: int = 12) -> list[dict]:
+        """用户对这件商品实际问得最多的是什么。
+
+        **这是运营 Agent 区别于"套模板写文案"的唯一依据。** 运营拍脑袋
+        想的卖点是"高级感"，而用户反复问的是"会不会起球"——后者才该上
+        主图。这条查询就是数据飞轮在运营侧的那一环：客服数据反哺文案生产。
+
+        按题面聚合，同时带上「答上来了没有」：答不上来的问题**同样是需求
+        信号**，而且更强——用户想知道、我们连答案都没有，那更该在文案里
+        主动讲清楚。
+        """
+        from sqlalchemy import text
+
+        with self.engine.connect() as conn:
+            return [
+                dict(r) for r in conn.execute(text(
+                    "SELECT input_text AS question, COUNT(*) AS times,"
+                    " MAX(intent) AS intent, SUM(handover) AS unanswered "
+                    "FROM agent_trace WHERE product_id = :pid"
+                    " AND input_text <> '' "
+                    "GROUP BY input_text "
+                    "ORDER BY times DESC, question ASC LIMIT :n"
+                ), {"pid": product_id, "n": limit}).mappings()
             ]
 
     # ---------------------------------------------------------------- 内部

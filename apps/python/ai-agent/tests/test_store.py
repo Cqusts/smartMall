@@ -25,7 +25,7 @@ _DDL = [
     """CREATE TABLE agent_trace (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         trace_id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL,
-        user_id INTEGER, input_text TEXT NOT NULL,
+        user_id INTEGER, product_id INTEGER, input_text TEXT NOT NULL,
         rewritten_query TEXT DEFAULT '', intent TEXT DEFAULT '',
         retrieval_hit_count INTEGER DEFAULT 0,
         retrieval_max_score REAL DEFAULT 0, retrieval_item_ids TEXT,
@@ -266,3 +266,49 @@ class TestGraphIntegration:
         deps = self._deps(None)
         deps.store = None
         assert safe_run_turn("这件是什么面料", AgentState(), deps).answer
+
+
+class TestProductDemand:
+    """「用户对这件商品问得最多的是什么」。
+
+    这是运营 Agent 区别于"套模板写文案"的唯一依据。埋点里原先没有
+    product_id，于是这个问题只能靠转人工工单来猜——而工单只记录了
+    **答不上来**的那些，是有偏的样本："会起球吗"答得上来就永远不会
+    出现在里面。
+    """
+
+    def test_product_id_is_persisted(self, store):
+        """不落库的话 product_demand 永远返回空，
+        而且是**静默**的空——运营 Agent 会安静地退化成套模板。"""
+        trace = TraceRecord(trace_id="t-pid", session_id="s1",
+                            product_id=9001, input_text="会起球吗")
+        store.save(trace)
+        rows = _rows(store, "agent_trace")
+        assert rows and rows[0]["product_id"] == 9001
+
+    def test_demand_is_grouped_by_question(self, store):
+        for i, q in enumerate(["会起球吗", "会起球吗", "厚吗"]):
+            store.save(TraceRecord(trace_id=f"d{i}", session_id="s",
+                                   product_id=9001, input_text=q))
+        got = store.product_demand(9001)
+        assert [r["question"] for r in got] == ["会起球吗", "厚吗"]
+        assert got[0]["times"] == 2
+
+    def test_other_products_do_not_leak_in(self, store):
+        store.save(TraceRecord(trace_id="a", session_id="s",
+                               product_id=9001, input_text="会起球吗"))
+        store.save(TraceRecord(trace_id="b", session_id="s",
+                               product_id=9002, input_text="防水吗"))
+        assert [r["question"] for r in store.product_demand(9001)] == ["会起球吗"]
+
+    def test_unanswered_count_comes_through(self, store):
+        """答不上来的问题是**更强**的需求信号——用户想知道、
+        我们连答案都没有，那更该在文案里主动讲清楚。"""
+        t = TraceRecord(trace_id="u1", session_id="s", product_id=9001,
+                        input_text="能机洗吗")
+        t.handover = True
+        store.save(t)
+        store.save(TraceRecord(trace_id="u2", session_id="s", product_id=9001,
+                               input_text="能机洗吗"))
+        got = store.product_demand(9001)
+        assert got[0]["times"] == 2 and int(got[0]["unanswered"]) == 1

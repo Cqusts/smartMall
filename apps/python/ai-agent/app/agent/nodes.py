@@ -84,6 +84,8 @@ class Deps:
     """知识库读写通道（知识运维 Agent 用）。为 None 时只起草不落库——
     **草稿照样产出**：看得见机器能写成什么样，是决定要不要接上这条链路
     的前提，而那不需要先有写权限。"""
+    copy_store: Any = None
+    """营销文案落库通道（运营 Agent 用）。为 None 时只生成不落库。"""
     on_event: Any = None
     """流式事件回调 ``(dict) -> None``。为 None 时整条链路完全同步，
     行为与从前一致——**流式不另起一套编排**，否则两条路径必然分叉。"""
@@ -225,6 +227,7 @@ def ingest(state: AgentState, deps: Deps) -> AgentState:
     state.query = state.message
     state.trace.session_id = state.session.session_id
     state.trace.user_id = state.session.user_id
+    state.trace.product_id = state.session.current_product_id
     state.trace.input_text = state.message
     state.session.append("user", state.message)
     return state
