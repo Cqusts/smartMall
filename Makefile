@@ -76,6 +76,27 @@ build-java: ## 编译 Java 服务
 build-python: ## 安装 Python 公共库到当前环境
 	pip install -e apps/python/ai-common
 
+.PHONY: install-java
+install-java: ## 把 parent 与 mall-common 装进本地仓库（其它 Java 模块的前置）
+	cd apps/java && mvn -B -q -DskipTests install
+
+## ---------------------------------------------------------------- 本地运行
+.PHONY: run-product
+run-product: ## 起订单服务 mall-product（:8081），店铺页下单要它
+	@# **必须分两步，一步走不通。**
+	@#
+	@# `mvn -pl mall-product spring-boot:run` 会失败：-pl 只把 mall-product
+	@# 放进 reactor，它依赖的 mall-common 既不在 reactor 里、本地仓库里也没有，
+	@# 于是报 "Could not find artifact com.smartmall:mall-common"。
+	@#
+	@# 加 -am 也失败，而且换了个错：-am 会把 parent 一起拉进 reactor，
+	@# 而 spring-boot:run 对 reactor 里每个模块都执行一遍，跑到 parent 上就报
+	@# "Unable to find a suitable main class"。
+	@#
+	@# 所以先 install 让 mall-common 进本地仓库，再单独 run。
+	cd apps/java && mvn -B -q -DskipTests -pl mall-product -am install
+	cd apps/java && mvn -B -pl mall-product spring-boot:run
+
 ## ---------------------------------------------------------------- 校验
 .PHONY: check
 check: check-compose check-contracts ## 全部静态校验

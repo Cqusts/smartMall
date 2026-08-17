@@ -917,8 +917,8 @@ async function buyNow(){
     if (d.code !== 0){
       orderMsg('err', `下单失败：${esc(d.message || '未知错误')}`
         + (d.code === 9503
-            ? '<br><span class="hint">订单服务（mall-product:8081）没起来。'
-            + '先 <code>cd apps/java &amp;&amp; mvn -pl mall-product spring-boot:run</code></span>'
+            ? '<br><span class="hint">订单服务（mall-product:8081）没起来，'
+            + '在仓库根跑 <code>make run-product</code></span>'
             : ''));
       return;
     }

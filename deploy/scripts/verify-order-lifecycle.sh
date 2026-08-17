@@ -57,7 +57,13 @@ echo "==> 订单状态机全链路复核（$SKU_NO）"
 
 if ! curl -sf "$ORDER_BASE/health" >/dev/null; then
   echo "  ✗ 订单服务不可用：$ORDER_BASE"
-  echo "    先启动：cd apps/java && mvn -pl mall-product spring-boot:run"
+  # 必须先 install：-pl 只把 mall-product 放进 reactor，mall-common 不在里面，
+  # 本地仓库里也没有，于是依赖解析直接失败。加 -am 也不行 —— 那会把 parent
+  # 拉进 reactor，spring-boot:run 在 parent 上跑会报 "Unable to find a suitable
+  # main class"。所以是两步，不是一步
+  echo "    先启动：make run-product"
+  echo "    或手动：cd apps/java && mvn -pl mall-product -am install -DskipTests \\"
+  echo "                        && mvn -pl mall-product spring-boot:run"
   exit 1
 fi
 

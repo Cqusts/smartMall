@@ -290,8 +290,32 @@ mysql -u root -p --default-character-set=utf8mb4 smartmall \
 mysql -u root -p --default-character-set=utf8mb4 smartmall \
   < deploy/sql/migrations/008_fulfillment_and_refund.sql   # 履约与退款
 
-cd apps/java && mvn -pl mall-product -am install -DskipTests
-MYSQL_HOST=127.0.0.1 java -jar mall-product/target/mall-product-0.1.0-SNAPSHOT.jar
+make run-product        # 编译 + 启动，:8081
+```
+
+**不能只跑 `mvn -pl mall-product spring-boot:run`，两种写法都会失败：**
+
+| 命令 | 报错 | 原因 |
+|---|---|---|
+| `mvn -pl mall-product spring-boot:run` | `Could not find artifact com.smartmall:mall-common` | `-pl` 只把 mall-product 放进 reactor，它依赖的 mall-common 既不在 reactor 里、本地仓库也没有 |
+| `mvn -pl mall-product -am spring-boot:run` | `Unable to find a suitable main class` | `-am` 把 parent 一起拉进 reactor，而 `spring-boot:run` 对每个模块都跑一遍，轮到 parent 就没有 main class |
+
+所以必须先 install 让 mall-common 进本地仓库，再单独 run。`make run-product`
+就是这两步；没有 make（Windows）时手敲：
+
+```bash
+cd apps/java
+mvn -pl mall-product -am install -DskipTests
+mvn -pl mall-product spring-boot:run
+```
+
+或者用打好的 jar（PowerShell 里环境变量要分行写，`&&` 也不支持）：
+
+```powershell
+cd apps\java
+mvn -pl mall-product -am install -DskipTests
+$env:MYSQL_HOST="127.0.0.1"
+java -jar mall-product\target\mall-product-0.1.0-SNAPSHOT.jar
 ```
 
 完整生命周期：
