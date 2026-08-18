@@ -53,6 +53,7 @@ deploy/sql/mysql/*.sql，本机 MySQL 没有这个机制。所以检测到库是
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -144,7 +145,55 @@ def split_statements(sql_text: str) -> list[str]:
     return out
 
 
-class CliBackend:
+#: 「这条语句的效果已经存在」对应的 MySQL 错误码。
+#:
+#: 迁移里的 ALTER TABLE ADD COLUMN 不幂等，而现实中总有库是手工执行过一部分的
+#: （本项目就是：早期让人手敲过 007/008）。逐条语句执行、把这些错误当作
+#: "这部分已经做过" 跳过，整个文件就变成幂等的 —— 缺的补上、有的略过，
+#: 最终收敛到同一个 schema。
+#:
+#: 只容忍"已存在"这一类。语法错误、外键失败等一律照常报错中断。
+ALREADY_APPLIED_ERRNOS = {
+    1050,  # Table already exists
+    1060,  # Duplicate column name
+    1061,  # Duplicate key name
+    1091,  # Can't DROP; check that column/key exists
+    1826,  # Duplicate foreign key constraint name
+}
+
+
+def errno_of(exc: Exception) -> int | None:
+    """从异常里抠出 MySQL 错误码。两个后端的形状不一样。"""
+    args = getattr(exc, "args", ())
+    if args and isinstance(args[0], int):
+        return args[0]                      # PyMySQL: (1060, "Duplicate column ...")
+    m = re.search(r"ERROR (\d+)", str(exc))  # mysql 客户端: "ERROR 1060 (42S21) at line ..."
+    return int(m.group(1)) if m else None
+
+
+class _StatementRunner:
+    """两个后端共用的「逐条执行一个 .sql 文件」实现。
+
+    整份文件一把梭（mysql < file）做不到跳过单条语句 —— 撞上第一个
+    Duplicate column 就整体失败，后面真正缺的东西也补不上了。
+    """
+
+    def run_file(self, path) -> None:
+        text = path.read_text(encoding="utf-8")
+        skipped = 0
+        for stmt in split_statements(text):
+            try:
+                self.exec_statement(stmt)
+            except Exception as exc:
+                if errno_of(exc) in ALREADY_APPLIED_ERRNOS:
+                    skipped += 1
+                    continue
+                raise
+        if skipped:
+            print(f"      （其中 {skipped} 条的效果已存在，跳过）")
+
+
+class CliBackend(_StatementRunner):
     """经 mysql 客户端执行（docker exec 或本机命令行）。"""
 
     def __init__(self, base: list[str], label: str) -> None:
@@ -163,9 +212,8 @@ class CliBackend:
             raise RuntimeError(self._clean(p.stderr) or self._clean(p.stdout))
         return p.stdout.strip()
 
-    def run_file(self, path) -> None:
-        with path.open("rb") as fh:
-            p = _run(self.base + [DATABASE], stdin=fh)
+    def exec_statement(self, stmt: str) -> None:
+        p = _run(self.base + ["-e", stmt, DATABASE])
         err = self._clean(p.stderr)
         if p.returncode != 0 or err.upper().startswith("ERROR"):
             raise RuntimeError(err or self._clean(p.stdout) or f"退出码 {p.returncode}")
@@ -178,7 +226,7 @@ class CliBackend:
             raise RuntimeError(self._clean(p.stderr))
 
 
-class PyMySqlBackend:
+class PyMySqlBackend(_StatementRunner):
     """PyMySQL 直连。不需要 docker，也不需要 mysql 客户端在 PATH 上。"""
 
     label = ""
@@ -202,11 +250,9 @@ class PyMySqlBackend:
         return "\n".join("\t".join("" if c is None else str(c) for c in r)
                          for r in rows)
 
-    def run_file(self, path) -> None:
-        text = path.read_text(encoding="utf-8")
+    def exec_statement(self, stmt: str) -> None:
         with self._connect(DATABASE) as conn, conn.cursor() as cur:
-            for stmt in split_statements(text):
-                cur.execute(stmt)
+            cur.execute(stmt)
 
     def ensure_database(self) -> None:
         with self._connect(None) as conn, conn.cursor() as cur:

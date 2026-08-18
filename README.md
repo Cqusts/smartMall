@@ -341,7 +341,11 @@ cd apps/python/ai-agent && smartmall-agent serve     # 再一个新终端
 另外两个坑也在里面处理了：连接一律带 `--default-character-set=utf8mb4`
 （漏了中文会变成 `Tæ¤`），以及 001 在全新安装上跳过（initdb 已经包含它要补的东西）。
 
-**之前手工执行过迁移的库**，直接跑会撞 Duplicate column。先基线一次：
+**迁移是逐条语句执行的，「已存在」的那条会跳过。**所以之前手工跑过一部分
+迁移的库也能直接 `db-init` —— 已有的略过、缺的补上，收敛到与全新安装完全
+相同的 schema（逐表比对验证过）。只有语法错误、缺表这类真错误才会中断。
+
+极少数情况下想「只登记不执行」（比如结构是从别处导入的），用基线：
 
 ```powershell
 .\smartmall.ps1 db-baseline    # 把现有迁移标记为已应用，但不执行
