@@ -289,11 +289,20 @@ smartmall-agent serve          # → http://127.0.0.1:9002/
 三步，**不需要 docker、也不需要 mysql 命令行在 PATH 上**：
 
 ```powershell
-$env:MYSQL_PASSWORD="你的root密码"     # 与本机 MySQL 一致；默认 user=root, db=smartmall
-.\smartmall.ps1 db-init                # 建库 + 建表 + 迁移，一步到位
-.\smartmall.ps1 run-product            # 订单服务 :8081（前台，单开一个终端）
-.\smartmall.ps1 serve                  # 店铺页 :9002（前台，再开一个终端）
+$env:MYSQL_ADMIN_PASSWORD="你的root密码"   # 只给 db-init 用
+.\smartmall.ps1 db-init                  # 建库 + 建表 + 迁移 + 建应用账号
+.\smartmall.ps1 run-product              # 订单服务 :8081（前台，单开一个终端）
+.\smartmall.ps1 serve                    # 店铺页 :9002（前台，再开一个终端）
 ```
+
+**管理员密码用 `MYSQL_ADMIN_PASSWORD`，不要用 `MYSQL_PASSWORD`。**后者是「应用账号
+的密码」—— 只设它不设 `MYSQL_USER` 的话，应用会拿 `smartmall` + 你给的 root 密码
+去连，报 `Access denied for user 'smartmall'@'localhost'`，而错误指向应用账号，
+看起来像账号没建好。实测卡过一轮，现在 `run-product` / `serve` 起动前会检测
+并警告这种半设状态。
+
+**起不来先跑 `.\smartmall.ps1 doctor`** —— 一次查完环境变量、Python 依赖、
+Maven、数据库连通、应用账号、迁移是否齐全、端口占用。
 
 `db-init` 会顺带**建出应用账号 `smartmall/smartmall`** —— 迁移用的是你给的
 root，而 mall-product 与 ai-agent 连库用的是这个业务账号（默认值写死在

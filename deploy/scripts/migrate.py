@@ -81,9 +81,21 @@ CONTAINER = os.environ.get("MYSQL_CONTAINER", "smdev-mysql")
 DATABASE = os.environ.get("MYSQL_DATABASE", "smartmall")
 HOST = os.environ.get("MYSQL_HOST", "127.0.0.1")
 PORT = os.environ.get("MYSQL_PORT", "3306")
-USER = os.environ.get("MYSQL_USER", "root")
-PASSWORD = os.environ.get(
-    "MYSQL_PASSWORD", os.environ.get("MYSQL_ROOT_PASSWORD", "root")
+# **管理员账号与应用账号必须用不同的环境变量名。**
+#
+# 早先两者都读 MYSQL_USER/MYSQL_PASSWORD，于是出现这样一幕：用户按提示在终端里
+# 设了 $env:MYSQL_PASSWORD="root密码" 用来跑迁移，接着在同一个（或同样设过的）
+# 终端起应用 —— 应用的 MYSQL_USER 没设、取默认值 smartmall，密码却拿到了 root 的，
+# 于是 smartmall/<root密码> → Access denied。报错指向应用账号，人却以为是账号没建好。
+#
+# 现在迁移优先读 MYSQL_ADMIN_*，应用侧的 MYSQL_USER/MYSQL_PASSWORD 只表示
+# 「应用账号」这一个含义。仍然兼容旧写法（没设 ADMIN 时回落），但不再共用语义。
+USER = os.environ.get("MYSQL_ADMIN_USER") or os.environ.get("MYSQL_USER") or "root"
+PASSWORD = (
+    os.environ.get("MYSQL_ADMIN_PASSWORD")
+    or os.environ.get("MYSQL_ROOT_PASSWORD")
+    or os.environ.get("MYSQL_PASSWORD")
+    or "root"
 )
 
 CHARSET = "--default-character-set=utf8mb4"

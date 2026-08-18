@@ -19,7 +19,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('help', 'db-init', 'db-up', 'db-migrate', 'db-status',
+    [ValidateSet('help', 'doctor', 'db-init', 'db-up', 'db-migrate', 'db-status',
                  'db-baseline', 'run-product', 'serve', 'test')]
     [string]$Task = 'help',
 
@@ -41,6 +41,26 @@ function Get-Python {
         if (Get-Command $c -ErrorAction SilentlyContinue) { return $c }
     }
     throw "找不到 Python。装一个 3.11+：https://www.python.org/downloads/"
+}
+
+<#
+ .SYNOPSIS 拦住「只设了 MYSQL_PASSWORD、没设 MYSQL_USER」这个陷阱。
+
+ 应用侧 MYSQL_USER 的默认值是 smartmall。用户为了跑迁移设了 root 的密码，
+ 忘了同时设用户名，起应用时就变成 smartmall/<root密码> —— Access denied，
+ 而报错指向应用账号，看起来像"账号没建好"。这一轮真卡在这里过。
+#>
+function Assert-DbEnvSane {
+    if ($env:MYSQL_PASSWORD -and -not $env:MYSQL_USER) {
+        Write-Host ''
+        Write-Host '⚠ 这个终端只设了 MYSQL_PASSWORD，没设 MYSQL_USER。' -ForegroundColor Yellow
+        Write-Host '  应用默认用 smartmall 这个账号，于是会拿 smartmall + 你设的密码去连，' -ForegroundColor Yellow
+        Write-Host '  多半会 Access denied。两种改法选一个：' -ForegroundColor Yellow
+        Write-Host '    1) 清掉它，用默认账号：  $env:MYSQL_PASSWORD=$null' -ForegroundColor Yellow
+        Write-Host '    2) 用户名也一起设：      $env:MYSQL_USER="root"' -ForegroundColor Yellow
+        Write-Host '  （给 db-init 用的管理员密码请设 MYSQL_ADMIN_PASSWORD，不要用 MYSQL_PASSWORD）' -ForegroundColor Yellow
+        Write-Host ''
+    }
 }
 
 function Invoke-Checked {
@@ -75,6 +95,7 @@ function Task-Migrate { param([string[]]$MigrateArgs)
 }
 
 function Task-RunProduct {
+    Assert-DbEnvSane
     # **必须分两步。**`mvnw -pl mall-product spring-boot:run` 会失败：-pl 只把
     # mall-product 放进 reactor，它依赖的 mall-common 既不在 reactor 里、
     # 本地仓库也没有。加 -am 也不行 —— 那会把 parent 拉进 reactor，而
@@ -87,6 +108,7 @@ function Task-RunProduct {
 }
 
 function Task-Serve {
+    Assert-DbEnvSane
     if (-not $env:MYSQL_HOST)     { $env:MYSQL_HOST = '127.0.0.1' }
     if (-not $env:MYSQL_USER)     { $env:MYSQL_USER = 'smartmall' }
     if (-not $env:MYSQL_PASSWORD) { $env:MYSQL_PASSWORD = 'smartmall' }
@@ -113,7 +135,12 @@ function Task-Test {
     Invoke-Checked (Get-Python) @('-m', 'pytest', '-q', 'apps/python/ai-agent/tests')
 }
 
+function Task-Doctor {
+    Invoke-Checked (Get-Python) @("$Root/deploy/scripts/doctor.py")
+}
+
 switch ($Task) {
+    'doctor'      { Task-Doctor }
     # db-init 是「建库 + 建表 + 迁移」一步到位，本机 MySQL 用这个。
     # 底层就是 migrate.py：它检测到库是空的会先跑基础建表脚本
     # （容器版由 MySQL 镜像的 initdb 自动完成，本机 MySQL 没有这机制）。
@@ -136,11 +163,14 @@ switch ($Task) {
         Write-Host '  .\smartmall.ps1 run-product   起订单服务 :8081（前台）'
         Write-Host '  .\smartmall.ps1 serve         起店铺页 :9002（前台）'
         Write-Host '  .\smartmall.ps1 test          跑 Java 与 ai-agent 测试'
+        Write-Host '  .\smartmall.ps1 doctor        自检：数据库、账号、迁移、端口、依赖'
         Write-Host ''
         Write-Host '本机 MySQL：  db-init → run-product（新终端）→ serve（新终端）'
         Write-Host '用 Docker：   db-up → db-migrate → run-product → serve'
         Write-Host ''
-        Write-Host '连不上数据库时先设密码：$env:MYSQL_PASSWORD="你的root密码"'
+        Write-Host '给 db-init 的管理员密码：  $env:MYSQL_ADMIN_PASSWORD="你的root密码"'
+        Write-Host '（起服务的终端里不要设 MYSQL_PASSWORD —— 应用用的是 smartmall 账号）'
+        Write-Host '排查环境问题：            .\smartmall.ps1 doctor'
         Write-Host '然后打开 http://127.0.0.1:9002/'
     }
 }
