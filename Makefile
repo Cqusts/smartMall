@@ -80,6 +80,29 @@ build-python: ## 安装 Python 公共库到当前环境
 install-java: ## 把 parent 与 mall-common 装进本地仓库（其它 Java 模块的前置）
 	cd apps/java && ./mvnw -B -q -DskipTests install
 
+## ---------------------------------------------------------------- 数据库
+.PHONY: db-up
+db-up: ## 起本地 MySQL（docker-compose.dev.yml），首次会自动建表
+	docker compose -f $(COMPOSE_DEV) up -d mysql
+	@echo "等待 MySQL 就绪…"
+	@# **判据是「能查到业务库」，不是 mysqladmin ping。**
+	@# 首次启动时 MySQL 会先跑一个临时服务器执行 initdb 里的建表脚本，
+	@# 那个临时服务器**对 ping 是有应答的**——于是 ping 通了、库却还不存在，
+	@# 紧接着的 db-migrate 直接「连不上数据库」。实测踩过这个。
+	@for i in $$(seq 1 60); do \
+	  docker exec smdev-mysql mysql -uroot -proot -N -e "SELECT 1" smartmall >/dev/null 2>&1 \
+	    && echo "  ✓ MySQL 就绪（建表已完成）" && exit 0; \
+	  sleep 3; \
+	done; echo "  ✗ MySQL 超时未就绪，看日志：docker logs smdev-mysql"; exit 1
+
+.PHONY: db-migrate
+db-migrate: ## 应用数据库迁移（可反复执行，已应用的会跳过）
+	./deploy/scripts/migrate.sh
+
+.PHONY: db-status
+db-status: ## 看哪些迁移还没应用
+	./deploy/scripts/migrate.sh --status
+
 ## ---------------------------------------------------------------- 本地运行
 .PHONY: run-product
 run-product: ## 起订单服务 mall-product（:8081），店铺页下单要它

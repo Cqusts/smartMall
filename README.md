@@ -284,13 +284,30 @@ smartmall-agent serve          # → http://127.0.0.1:9002/
 **需要额外起一个服务**——只跑 `smartmall-agent serve` 的话，页面能逛，点购买会
 明确提示订单服务没起来，其余功能不受影响：
 
-```bash
-mysql -u root -p --default-character-set=utf8mb4 smartmall \
-  < deploy/sql/migrations/007_order_placement.sql     # 幂等键
-mysql -u root -p --default-character-set=utf8mb4 smartmall \
-  < deploy/sql/migrations/008_fulfillment_and_refund.sql   # 履约与退款
+完整启动四步（每一步都在全新环境上实跑验证过）：
 
-make run-product        # 编译 + 启动，:8081
+```bash
+make db-up              # 起 MySQL，等到「建表已完成」才返回
+make db-migrate         # 应用迁移，可反复执行
+make run-product        # 编译 + 起订单服务 :8081（新开一个终端，它前台运行）
+
+pip install -e "apps/python/ai-agent[server]"
+cd apps/python/ai-agent && smartmall-agent serve    # 店铺页 :9002，再开一个终端
+```
+
+打开 <http://127.0.0.1:9002/> 即可下单。
+
+**`make db-migrate` 是个真的迁移器，不是 `for f in *.sql`。**迁移里有
+`ALTER TABLE ... ADD COLUMN`，那不幂等——第二次跑就是「Duplicate column name」。
+它用一张 `schema_migrations` 表记已应用的文件，所以每次拉完代码跑一遍即可。
+另外两个坑也在里面处理了：连接一律带 `--default-character-set=utf8mb4`
+（漏了中文会变成 `Tæ¤`），以及 001 在全新安装上跳过（initdb 已经包含它要补的东西）。
+
+**之前手工执行过迁移的库**，直接跑会撞 Duplicate column。先基线一次：
+
+```bash
+./deploy/scripts/migrate.sh --baseline   # 把现有迁移标记为已应用，但不执行
+./deploy/scripts/migrate.sh --status     # 看还差哪些
 ```
 
 **用 `./mvnw` 而不是 `mvn`**（Windows 是 `.\mvnw.cmd`）。仓库自带 Maven Wrapper，

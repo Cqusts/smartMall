@@ -11,6 +11,8 @@ RAG 链路 P95 约三秒（意图分类 + 检索 + 生成）。纯等待会让�
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from app.agent.llm import FakeLlmClient, LlmUnavailableError
@@ -359,6 +361,29 @@ class TestWebPage:
         for bad in ("../../../deploy/.env", "..%2f..%2fdeploy%2f.env",
                     "....//deploy/.env", "9001.jpg/../../.env"):
             assert c.get(f"/img/{bad}").status_code in (404, 400), bad
+
+    def test_every_backend_status_has_a_chinese_label(self):
+        """后端状态机里的每个状态，前端 STATUS_CN 都得有中文标签。
+
+        真实缺陷：加退款链路时补了 refunding 却漏了 refunded，于是退款完成后
+        页面显示「状态：refunded」——其余状态全是中文，就它一个露出英文。
+        这类漏项不会报错、测试也不会红，只有真点到那一步才看得见。
+
+        **断言必须限定在 STATUS_CN 这个对象里。**第一版写成全文搜
+        `refunded: '...'`，结果匹配到了另一处状态提示语的映射，
+        标签删掉了测试照样绿——一个抓不到目标缺陷的测试比没有更糟。
+        """
+        text = self._client().get("/").text
+        m = re.search(r"const STATUS_CN\s*=\s*\{(.*?)\}", text, re.S)
+        assert m, "找不到 STATUS_CN 定义"
+        block = m.group(1)
+
+        # 状态全集以 mall_order.status 的 DDL 注释为准（见迁移 008）
+        statuses = ["pending_payment", "paid", "shipped", "delivered",
+                    "completed", "cancelled", "refunding", "refunded"]
+        missing = [st for st in statuses
+                   if not re.search(rf"\b{st}\s*:\s*'[^']+'", block)]
+        assert not missing, f"STATUS_CN 里缺这些状态的标签：{missing}"
 
     def test_buy_button_is_actually_wired(self):
         """「立即购买」必须真的绑了处理函数。
