@@ -97,11 +97,11 @@ db-up: ## 起本地 MySQL（docker-compose.dev.yml），首次会自动建表
 
 .PHONY: db-migrate
 db-migrate: ## 应用数据库迁移（可反复执行，已应用的会跳过）
-	./deploy/scripts/migrate.sh
+	python3 deploy/scripts/migrate.py
 
 .PHONY: db-status
 db-status: ## 看哪些迁移还没应用
-	./deploy/scripts/migrate.sh --status
+	python3 deploy/scripts/migrate.py --status
 
 ## ---------------------------------------------------------------- 本地运行
 .PHONY: run-product

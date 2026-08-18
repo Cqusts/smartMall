@@ -284,18 +284,29 @@ smartmall-agent serve          # → http://127.0.0.1:9002/
 **需要额外起一个服务**——只跑 `smartmall-agent serve` 的话，页面能逛，点购买会
 明确提示订单服务没起来，其余功能不受影响：
 
-完整启动四步（每一步都在全新环境上实跑验证过）：
+完整启动四步。**Windows 没有 make，用同名的 PowerShell 任务：**
 
-```bash
-make db-up              # 起 MySQL，等到「建表已完成」才返回
-make db-migrate         # 应用迁移，可反复执行
-make run-product        # 编译 + 起订单服务 :8081（新开一个终端，它前台运行）
-
-pip install -e "apps/python/ai-agent[server]"
-cd apps/python/ai-agent && smartmall-agent serve    # 店铺页 :9002，再开一个终端
+```powershell
+.\smartmall.ps1 db-up          # 起 MySQL，等到「建表已完成」才返回
+.\smartmall.ps1 db-migrate     # 应用迁移，可反复执行
+.\smartmall.ps1 run-product    # 编译 + 起订单服务 :8081（前台，单开一个终端）
+.\smartmall.ps1 serve          # 店铺页 :9002（前台，再开一个终端）
 ```
 
-打开 <http://127.0.0.1:9002/> 即可下单。
+Linux / macOS 用 make，动作完全一样：
+
+```bash
+make db-up
+make db-migrate
+make run-product                                   # 新终端
+pip install -e "apps/python/ai-agent[server]" && \
+  cd apps/python/ai-agent && smartmall-agent serve  # 再一个新终端
+```
+
+然后打开 <http://127.0.0.1:9002/> 下单。
+
+`smartmall.ps1` 里没有第二份业务逻辑，它只是转发到 `docker compose` /
+`migrate.py` / `mvnw.cmd` —— 两个平台共用同一份实现，不会各自漂移。
 
 **`make db-migrate` 是个真的迁移器，不是 `for f in *.sql`。**迁移里有
 `ALTER TABLE ... ADD COLUMN`，那不幂等——第二次跑就是「Duplicate column name」。
@@ -305,9 +316,14 @@ cd apps/python/ai-agent && smartmall-agent serve    # 店铺页 :9002，再开�
 
 **之前手工执行过迁移的库**，直接跑会撞 Duplicate column。先基线一次：
 
+```powershell
+.\smartmall.ps1 db-baseline    # 把现有迁移标记为已应用，但不执行
+.\smartmall.ps1 db-status      # 看还差哪些
+```
+
 ```bash
-./deploy/scripts/migrate.sh --baseline   # 把现有迁移标记为已应用，但不执行
-./deploy/scripts/migrate.sh --status     # 看还差哪些
+python3 deploy/scripts/migrate.py --baseline    # Linux / macOS
+python3 deploy/scripts/migrate.py --status
 ```
 
 **用 `./mvnw` 而不是 `mvn`**（Windows 是 `.\mvnw.cmd`）。仓库自带 Maven Wrapper，
