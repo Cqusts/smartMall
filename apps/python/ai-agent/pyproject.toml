@@ -17,8 +17,18 @@ dependencies = [
 graph = ["langgraph>=0.2"]
 # 本地检索：直连 MySQL 复用数据中台已建好的索引，不需要 Milvus
 local = ["smartmall-pipeline"]
-# HTTP 服务形态
-server = ["fastapi>=0.115", "uvicorn[standard]>=0.32", "ai-common"]
+# HTTP 服务形态。**带上 local 是必须的，不是顺手。**
+# `serve` 起的是店铺页，而它的 /api/products 与 LocalRetriever 都要连 MySQL，
+# 那条链路走 smartmall-pipeline（它再带来 SQLAlchemy 与 PyMySQL）。
+# 不声明的话，页面能打开、商品是空的、点购买没反应 —— 只在 /api/products
+# 的响应体里留一句 "error": "ModuleNotFoundError"，而它是被降级分支吞掉的，
+# 日志里连异常都看不到。装的时候少一个 extra，症状却像代码坏了。
+server = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "ai-common",
+    "smartmall-pipeline",
+]
 dev = ["pytest>=8.3"]
 
 [project.scripts]

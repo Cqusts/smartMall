@@ -295,6 +295,17 @@ $env:MYSQL_PASSWORD="你的root密码"     # 与本机 MySQL 一致；默认 use
 .\smartmall.ps1 serve                  # 店铺页 :9002（前台，再开一个终端）
 ```
 
+首次还要装 Python 侧的三个本地包（`serve` 会自动装，手动装的话顺序不能变）：
+
+```powershell
+pip install -e pipelines -e apps/python/ai-common -e "apps/python/ai-agent[server]"
+```
+
+**PyMySQL 不用单独装** —— 它是 Python 连 MySQL 的驱动（不是数据库），
+`pipelines` 已经依赖它了。少装 `pipelines` 的症状很隐蔽：页面照常打开、
+商品列表是空的、点购买没反应，只有 `/api/products` 的响应体里留一句
+`"error":"ModuleNotFoundError"`，日志里连异常都看不到（被降级分支吞了）。
+
 `db-init` 底层是 `migrate.py`，它按可用性自动选连接方式：docker → mysql 客户端
 → **PyMySQL 直连**。第三条不需要任何外部命令，Windows 上常常只有这一条能走。
 检测到库是空的会先跑 `deploy/sql/mysql/*.sql` 建基础表——容器版由 MySQL 镜像的
@@ -315,8 +326,8 @@ initdb 自动做这件事，本机 MySQL 没有这个机制，不补上的话迁
 ```bash
 make db-up && make db-migrate                       # 或 python3 deploy/scripts/migrate.py
 make run-product                                    # 新终端
-pip install -e "apps/python/ai-agent[server]" && \
-  cd apps/python/ai-agent && smartmall-agent serve   # 再一个新终端
+make build-python                                   # 装三个本地包
+cd apps/python/ai-agent && smartmall-agent serve     # 再一个新终端
 ```
 
 起完打开 <http://127.0.0.1:9002/> 下单。

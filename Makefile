@@ -73,8 +73,8 @@ build-java: ## 编译 Java 服务
 	cd apps/java && ./mvnw -B -DskipTests clean package
 
 .PHONY: build-python
-build-python: ## 安装 Python 公共库到当前环境
-	pip install -e apps/python/ai-common
+build-python: ## 安装 Python 包到当前环境（顺序不能变，本地包先）
+	pip install -e pipelines -e apps/python/ai-common -e "apps/python/ai-agent[server]"
 
 .PHONY: install-java
 install-java: ## 把 parent 与 mall-common 装进本地仓库（其它 Java 模块的前置）

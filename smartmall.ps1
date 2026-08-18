@@ -93,7 +93,15 @@ function Task-Serve {
     if (-not $env:MYSQL_DATABASE) { $env:MYSQL_DATABASE = 'smartmall' }
     Push-Location (Join-Path $Root 'apps/python/ai-agent')
     try {
-        Invoke-Checked (Get-Python) @('-m', 'pip', 'install', '-q', '-e', '.[server]')
+        # **三个本地包要按这个顺序装。**smartmall-pipeline 与 ai-common 都不在
+        # PyPI 上，只能按路径装；ai-agent[server] 声明依赖它们，先装好才解析得了。
+        # 少装 pipelines 的后果很隐蔽：页面照常打开，商品列表是空的，点购买没反应，
+        # 只有 /api/products 的响应体里留一句 "error":"ModuleNotFoundError" ——
+        # 那是被降级分支吞掉的，日志里连异常都看不到。
+        Invoke-Checked (Get-Python) @('-m', 'pip', 'install', '-q',
+            '-e', "$Root/pipelines",
+            '-e', "$Root/apps/python/ai-common",
+            '-e', "$Root/apps/python/ai-agent[server]")
         Write-Host '店铺页 → http://127.0.0.1:9002/'
         Invoke-Checked 'smartmall-agent' @('serve')
     } finally { Pop-Location }
