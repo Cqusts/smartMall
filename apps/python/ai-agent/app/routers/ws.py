@@ -9,6 +9,7 @@ async，是因为那要连带改掉 httpx、SQLAlchemy 两层的调用方式，
 from __future__ import annotations
 
 import asyncio
+import os
 import base64
 import binascii
 import re
@@ -96,7 +97,26 @@ async def products() -> dict[str, Any]:
         # cryptography，它的 Rust 扩展装坏时抛的是 pyo3_runtime.PanicException，
         # 那是 BaseException 的直接子类，`except Exception` 兜不住，
         # 整个降级保证就在最需要它的时候失效了（实测踩过）
-        return {"ok": False, "items": [], "error": type(exc).__name__}
+        #
+        # **但降级不等于把原因藏起来。**只回一个异常类名（"ToolError"）时，
+        # 页面显示"商品数据读取失败"，日志里一片干净 —— 而真实原因往往是
+        # 「应用账号连不上库」这种一句话就能说清的事。实测踩过：用户的库里
+        # 没有 smartmall 账号（那是 Docker 镜像自动建的），迁移走 root 成功、
+        # 应用走 smartmall 失败，从现象完全看不出来。所以原因要落日志，
+        # 也要放进响应体给前端显示。
+        import logging
+
+        detail = f"{type(exc).__name__}: {exc}"
+        logging.getLogger(__name__).warning(
+            "读取商品失败，页面将退化为仅客服入口。连库参数："
+            "host=%s user=%s db=%s —— %s",
+            os.environ.get("MYSQL_HOST", "localhost"),
+            os.environ.get("MYSQL_USER", "smartmall"),
+            os.environ.get("MYSQL_DATABASE", "smartmall"),
+            detail,
+        )
+        return {"ok": False, "items": [], "error": type(exc).__name__,
+                "detail": detail[:400]}
 
 
 #: 订单号白名单。转发时它会被拼进下游 URL，不校验就等于把路径拼接权

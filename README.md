@@ -295,6 +295,13 @@ $env:MYSQL_PASSWORD="你的root密码"     # 与本机 MySQL 一致；默认 use
 .\smartmall.ps1 serve                  # 店铺页 :9002（前台，再开一个终端）
 ```
 
+`db-init` 会顺带**建出应用账号 `smartmall/smartmall`** —— 迁移用的是你给的
+root，而 mall-product 与 ai-agent 连库用的是这个业务账号（默认值写死在
+`application.yml` 与 `repository.py` 里）。Docker 版由 MySQL 镜像自动创建，
+本机 MySQL 没有这机制；不建的话迁移成功、应用却连不上，表现为页面能开、
+「商品数据读取失败」。要用别的账号：`$env:SMARTMALL_APP_USER` /
+`$env:SMARTMALL_APP_PASSWORD`。
+
 首次还要装 Python 侧的三个本地包（`serve` 会自动装，手动装的话顺序不能变）：
 
 ```powershell

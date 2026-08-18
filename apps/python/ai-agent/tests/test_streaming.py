@@ -385,6 +385,34 @@ class TestWebPage:
                    if not re.search(rf"\b{st}\s*:\s*'[^']+'", block)]
         assert not missing, f"STATUS_CN 里缺这些状态的标签：{missing}"
 
+    def test_products_failure_says_why_not_just_that_it_failed(self, monkeypatch):
+        """降级不等于把原因藏起来。
+
+        真实事故：用户本机 MySQL 里没有 smartmall 账号（那是 Docker 镜像
+        按 compose 变量自动建的）。迁移走 root 成功、应用走 smartmall 失败，
+        页面只显示「商品数据读取失败」，日志里一片干净 —— 从现象完全看不出
+        是账号问题。所以失败响应里必须带上真实异常。
+
+        **这里强制把库指到一个连不上的地址，而不是"数据库恰好没起来时才断言"。**
+        第一版写成后者：本机数据库通着就提前 return，把 detail 删掉测试照样绿，
+        等于没测。要断言失败路径，就得自己造出失败。
+        """
+        monkeypatch.setenv("MYSQL_HOST", "127.0.0.1")
+        monkeypatch.setenv("MYSQL_PORT", "1")     # 没人监听，必然连不上
+
+        body = self._client().get("/api/products").json()
+
+        assert body["ok"] is False, "指到死地址却说成功了？"
+        assert body["items"] == [], "失败时不能给出半截数据"
+        assert body.get("detail"), "失败了却没说为什么，等于让人从零排查"
+        assert ":" in body["detail"], "detail 里要有异常类型与消息"
+
+    def test_page_tells_user_how_to_fix_a_products_failure(self):
+        """页面上的错误提示要指向具体动作，不能只说「检查 MySQL 连接」。"""
+        text = self._client().get("/").text
+        assert "lastProductsError" in text, "前端没有把后端给的原因显示出来"
+        assert "db-init" in text, "没告诉用户跑什么命令能修"
+
     def test_buy_button_is_actually_wired(self):
         """「立即购买」必须真的绑了处理函数。
 

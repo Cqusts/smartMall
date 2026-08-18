@@ -88,6 +88,20 @@ PASSWORD = os.environ.get(
 
 CHARSET = "--default-character-set=utf8mb4"
 
+#: 应用连库用的账号。**与 migrate.py 自己用的账号是两回事。**
+#:
+#: 迁移要建库建表，得用有权限的账号（通常 root）；而 mall-product 与 ai-agent
+#: 连库用的是这个业务账号 —— 它们的默认值写死在 application.yml 与
+#: repository.py 里，都是 smartmall/smartmall。
+#:
+#: Docker 版里这个账号由 MySQL 镜像按 compose 的 MYSQL_USER/MYSQL_PASSWORD
+#: 自动创建，所以从来没人操心过。本机装的 MySQL 只有 root，不建这个账号的话：
+#: 迁移能成功（走 root），应用却连不上（走 smartmall）—— 页面打开、商品空白、
+#: 而且报错被 /api/products 的降级分支吞掉，看起来像"数据没导进去"。
+#: 实测就是这么撞上的，所以 bootstrap 里把它一并建了。
+APP_USER = os.environ.get("SMARTMALL_APP_USER", "smartmall")
+APP_PASSWORD = os.environ.get("SMARTMALL_APP_PASSWORD", "smartmall")
+
 
 def _run(cmd: list[str], stdin=None) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, stdin=stdin, capture_output=True, text=True)
@@ -298,6 +312,33 @@ def sql_file(path) -> None:
     BACKEND.run_file(path)
 
 
+def ensure_app_user() -> None:
+    """建应用账号并授权，等价于 MySQL 镜像按 compose 变量做的那件事。
+
+    连库的账号（root）与应用账号（smartmall）不是一个，这一步不做，
+    迁移会成功而应用连不上 —— 而那个失败被降级分支吞掉，只表现为
+    "商品数据读取失败"，很难联想到是缺账号。
+    """
+    if APP_USER == USER:
+        return                      # 应用就用当前这个账号，不用另建
+    try:
+        for host in ("%", "localhost"):
+            # 两个 host 都要建：MySQL 把 'u'@'%' 和 'u'@'localhost' 当成两个账号，
+            # 而本机连接常常匹配到后者，只建 % 会在本地连接时报拒绝访问
+            sql(f"CREATE USER IF NOT EXISTS '{APP_USER}'@'{host}' "
+                f"IDENTIFIED BY '{APP_PASSWORD}'")
+            sql(f"GRANT ALL PRIVILEGES ON `{DATABASE}`.* "
+                f"TO '{APP_USER}'@'{host}'")
+        sql("FLUSH PRIVILEGES")
+        print(f"  ✓ 应用账号 {APP_USER} 已就绪（应用连库用它，不是 {USER}）")
+    except Exception as exc:
+        # 当前账号没有建用户的权限时不该中断迁移 —— 表建好了仍然有价值，
+        # 只是要把「应用可能连不上」这件事讲清楚
+        print(f"  ⚠ 没能创建应用账号 {APP_USER}：{exc}")
+        print(f"    应用默认用 {APP_USER}/{APP_PASSWORD} 连库。要么手动建它，")
+        print(f"    要么让应用改用现在这个账号：$env:MYSQL_USER=\"{USER}\"")
+
+
 def bootstrap_base_schema() -> None:
     """建库 + 跑基础建表脚本。
 
@@ -306,6 +347,7 @@ def bootstrap_base_schema() -> None:
     直接跑 migrations 会在第一条 ALTER TABLE 上找不到表。
     """
     BACKEND.ensure_database()
+    ensure_app_user()
     have = sql(
         "SELECT COUNT(*) FROM information_schema.tables "
         f"WHERE table_schema='{DATABASE}' AND table_name='knowledge_item'"
