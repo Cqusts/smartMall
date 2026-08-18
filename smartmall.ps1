@@ -19,8 +19,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('help', 'db-up', 'db-migrate', 'db-status', 'db-baseline',
-                 'run-product', 'serve', 'test')]
+    [ValidateSet('help', 'db-init', 'db-up', 'db-migrate', 'db-status',
+                 'db-baseline', 'run-product', 'serve', 'test')]
     [string]$Task = 'help',
 
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -50,6 +50,10 @@ function Invoke-Checked {
 }
 
 function Task-DbUp {
+    # 只在用 Docker 跑 MySQL 时需要。本机装了 MySQL 服务的直接用 db-init。
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        throw "没有 docker。本机已装 MySQL 的话跳过这步，直接跑：.\smartmall.ps1 db-init"
+    }
     Invoke-Checked 'docker' @('compose', '-f', 'deploy/docker-compose.dev.yml', 'up', '-d', 'mysql')
     Write-Host '等待 MySQL 就绪…'
     # 判据是「能查到业务库」，不是 mysqladmin ping —— 首次启动时 MySQL 会先跑
@@ -102,6 +106,10 @@ function Task-Test {
 }
 
 switch ($Task) {
+    # db-init 是「建库 + 建表 + 迁移」一步到位，本机 MySQL 用这个。
+    # 底层就是 migrate.py：它检测到库是空的会先跑基础建表脚本
+    # （容器版由 MySQL 镜像的 initdb 自动完成，本机 MySQL 没有这机制）。
+    'db-init'     { Task-Migrate @() }
     'db-up'       { Task-DbUp }
     'db-migrate'  { Task-Migrate @() }
     'db-status'   { Task-Migrate @('--status') }
@@ -112,15 +120,19 @@ switch ($Task) {
     default {
         Write-Host 'smartMall —— Windows 任务入口（Makefile 的等价物）'
         Write-Host ''
-        Write-Host '  .\smartmall.ps1 db-up         起 MySQL，等到建表完成'
-        Write-Host '  .\smartmall.ps1 db-migrate    应用数据库迁移（可反复执行）'
+        Write-Host '  .\smartmall.ps1 db-init       建库 + 建表 + 迁移，一步到位（本机 MySQL 用这个）'
+        Write-Host '  .\smartmall.ps1 db-up         用 Docker 起 MySQL（没有 Docker 就跳过）'
+        Write-Host '  .\smartmall.ps1 db-migrate    只跑迁移（可反复执行）'
         Write-Host '  .\smartmall.ps1 db-status     看哪些迁移还没应用'
         Write-Host '  .\smartmall.ps1 db-baseline   已手工迁移过的库：登记现状，不执行'
         Write-Host '  .\smartmall.ps1 run-product   起订单服务 :8081（前台）'
         Write-Host '  .\smartmall.ps1 serve         起店铺页 :9002（前台）'
         Write-Host '  .\smartmall.ps1 test          跑 Java 与 ai-agent 测试'
         Write-Host ''
-        Write-Host '完整启动：db-up → db-migrate → run-product（新终端）→ serve（新终端）'
+        Write-Host '本机 MySQL：  db-init → run-product（新终端）→ serve（新终端）'
+        Write-Host '用 Docker：   db-up → db-migrate → run-product → serve'
+        Write-Host ''
+        Write-Host '连不上数据库时先设密码：$env:MYSQL_PASSWORD="你的root密码"'
         Write-Host '然后打开 http://127.0.0.1:9002/'
     }
 }

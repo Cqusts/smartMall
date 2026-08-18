@@ -284,26 +284,42 @@ smartmall-agent serve          # → http://127.0.0.1:9002/
 **需要额外起一个服务**——只跑 `smartmall-agent serve` 的话，页面能逛，点购买会
 明确提示订单服务没起来，其余功能不受影响：
 
-完整启动四步。**Windows 没有 make，用同名的 PowerShell 任务：**
+### 没有 Docker（本机装了 MySQL）
+
+三步，**不需要 docker、也不需要 mysql 命令行在 PATH 上**：
 
 ```powershell
-.\smartmall.ps1 db-up          # 起 MySQL，等到「建表已完成」才返回
-.\smartmall.ps1 db-migrate     # 应用迁移，可反复执行
-.\smartmall.ps1 run-product    # 编译 + 起订单服务 :8081（前台，单开一个终端）
-.\smartmall.ps1 serve          # 店铺页 :9002（前台，再开一个终端）
+$env:MYSQL_PASSWORD="你的root密码"     # 与本机 MySQL 一致；默认 user=root, db=smartmall
+.\smartmall.ps1 db-init                # 建库 + 建表 + 迁移，一步到位
+.\smartmall.ps1 run-product            # 订单服务 :8081（前台，单开一个终端）
+.\smartmall.ps1 serve                  # 店铺页 :9002（前台，再开一个终端）
 ```
 
-Linux / macOS 用 make，动作完全一样：
+`db-init` 底层是 `migrate.py`，它按可用性自动选连接方式：docker → mysql 客户端
+→ **PyMySQL 直连**。第三条不需要任何外部命令，Windows 上常常只有这一条能走。
+检测到库是空的会先跑 `deploy/sql/mysql/*.sql` 建基础表——容器版由 MySQL 镜像的
+initdb 自动做这件事，本机 MySQL 没有这个机制，不补上的话迁移会在第一条
+`ALTER TABLE` 上找不到表。
+
+### 有 Docker
+
+```powershell
+.\smartmall.ps1 db-up          # 起 MySQL 容器，等到「建表已完成」才返回
+.\smartmall.ps1 db-migrate     # 应用迁移
+.\smartmall.ps1 run-product
+.\smartmall.ps1 serve
+```
+
+### Linux / macOS
 
 ```bash
-make db-up
-make db-migrate
-make run-product                                   # 新终端
+make db-up && make db-migrate                       # 或 python3 deploy/scripts/migrate.py
+make run-product                                    # 新终端
 pip install -e "apps/python/ai-agent[server]" && \
-  cd apps/python/ai-agent && smartmall-agent serve  # 再一个新终端
+  cd apps/python/ai-agent && smartmall-agent serve   # 再一个新终端
 ```
 
-然后打开 <http://127.0.0.1:9002/> 下单。
+起完打开 <http://127.0.0.1:9002/> 下单。
 
 `smartmall.ps1` 里没有第二份业务逻辑，它只是转发到 `docker compose` /
 `migrate.py` / `mvnw.cmd` —— 两个平台共用同一份实现，不会各自漂移。
