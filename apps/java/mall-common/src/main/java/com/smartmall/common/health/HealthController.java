@@ -15,8 +15,9 @@ import java.util.Map;
  * <p>刻意与 Actuator 的 {@code /actuator/health} 区分职责：
  * <ul>
  *   <li>{@code /health} —— 只回答"进程活着吗"，不探测下游依赖，永远快速返回。
- *       用于容器存活探针，避免 MySQL 抖动时容器被反复重启。</li>
- *   <li>{@code /actuator/health} —— 深度检查，探测 DB / Redis / Kafka，用于就绪探针与监控。</li>
+ *       存活探针用它，MySQL 抖一下不会被判定为进程死亡。</li>
+ *   <li>{@code /actuator/health} —— 深度检查，探测 MySQL，用于就绪判定与监控。
+ *       本地编排器 {@code deploy/scripts/run-java.py} 等的就是它变 UP。</li>
  * </ul>
  *
  * <p>使用 {@code @GetMapping} 注解式控制器，Servlet 与 WebFlux 栈均可加载，

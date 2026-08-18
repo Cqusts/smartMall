@@ -15,7 +15,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>这段代码的价值在于**它防的那个 bug 单元测试看不见**：JVM 与 MySQL 时区
  * 不一致时，Java 写的 created_at 与 SQL 里 NOW() 写的 shipped_at 会差几小时，
  * 客服照着这些字段就会讲出一段没发生过的发货延迟。真实一致性由
- * deploy/scripts/verify-order-lifecycle.sh 对真库验证。
+ * deploy/scripts/verify-orders.py lifecycle 对真库验证。
  *
  * <p>这里只测能测的部分：取值优先级，以及配错时不能悄悄放过。
  */

@@ -1,3 +1,11 @@
+# mall-kpi —— 考核域（骨架）。**只依赖 MySQL 一个外部组件。**
+#
+# 曾经这里还配着 spring.data.redis 与 spring.kafka，两个 starter 也在 pom 里。
+# 但代码里对它们是零引用 —— 没有 RedisTemplate、没有 @KafkaListener。结果是：
+# 本机没起 Redis/Kafka 时，服务照样能起来，只是日志被连接重试刷屏，
+# /actuator/health 长期 DOWN，而人会以为是自己环境没装齐。
+# 配置只描述真实依赖，缺什么一眼看得出。将来哪个模块真要用，再连同代码一起加回来。
+
 server:
   port: 8084
 
@@ -14,37 +22,23 @@ spring:
       maximum-pool-size: 10
       minimum-idle: 2
       connection-timeout: 5000
-      # -1 = 启动时不校验连接。让服务在 MySQL 未就绪时仍能起来并暴露 /health，
-      # 由 /actuator/health 报告 db DOWN，而不是让容器反复重启。
+      # -1 = 启动时不校验连接。MySQL 还没起来时服务照样能启动并暴露 /health，
+      # 由 /actuator/health 报告 db DOWN —— 好过启动直接失败、只留一行栈。
       initialization-fail-timeout: -1
-
-  data:
-    redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
-      password: ${REDIS_PASSWORD:}
-      timeout: 2s
-
-  kafka:
-    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
-    producer:
-      acks: all
-      retries: 3
-      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
-    consumer:
-      group-id: mall-kpi
-      auto-offset-reset: earliest
-      enable-auto-commit: false
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
-      properties:
-        spring.json.trusted.packages: com.smartmall.*
-    listener:
-      ack-mode: manual_immediate
-      # 长耗时任务不在监听器里同步处理：消费后立即 ack，状态入库轮询。
-      # 详见 docs/11-agent-cluster.md「长耗时任务」。
-      missing-topics-fatal: false
+      # **把连接的会话时区钉死，让 SQL 里的 NOW() 与 Java 的 LocalDateTime.now()
+      # 说同一个时间。**
+      #
+      # AppTimeZone 只管得了 JVM 这一侧；NOW() 是在服务器上求值的，用的是
+      # MySQL 的会话时区。两边不一致时，同一行订单里会出现「15:25 下单、
+      # 23:25 发货」—— 而客服 Agent 正是照着这些字段回答"我的货什么时候发的"，
+      # 于是它会讲出一段根本没发生过的 8 小时延迟。存进库里的脏数据，不是显示问题。
+      #
+      # 实测：MySQL 跑在 UTC 时，created_at 与 shipped_at 差整 480 分钟。
+      #
+      # 用数字偏移而不是 'Asia/Shanghai'：后者要求 MySQL 装过时区表
+      # （mysql_tzinfo_to_sql），Windows 上默认没装，会直接报
+      # "Unknown or incorrect time zone"，连都连不上。
+      connection-init-sql: SET time_zone = '${DB_SESSION_TIME_ZONE:+08:00}'
 
 mybatis-plus:
   configuration:

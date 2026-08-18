@@ -1,16 +1,17 @@
+# mall-gateway —— 反向代理，把 /api/** 分发到各服务。**不依赖任何外部组件。**
+#
+# 曾经这里还配着 spring.data.redis 与 spring.kafka，两个 starter 也在 pom 里。
+# 但代码里对它们是零引用 —— 没有 RedisTemplate、没有 @KafkaListener。结果是：
+# 本机没起 Redis/Kafka 时，服务照样能起来，只是日志被连接重试刷屏，
+# /actuator/health 长期 DOWN，而人会以为是自己环境没装齐。
+# 配置只描述真实依赖，缺什么一眼看得出。将来哪个模块真要用，再连同代码一起加回来。
+
 server:
   port: 8080
 
 spring:
   application:
     name: mall-gateway
-
-  data:
-    redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
-      password: ${REDIS_PASSWORD:}
-      timeout: 2s
 
   cloud:
     gateway:

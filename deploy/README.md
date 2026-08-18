@@ -1,6 +1,15 @@
-# 部署与本地运行
+# 整套 Docker 部署
 
-M0 基建已就位。本文是把整套系统跑起来的操作手册。
+**本地开发不需要这一套。**跑通商品页与下单只要 JDK 21 + 一台本机 MySQL，
+命令见仓库根 [README 的「启动」一节](../README.md#启动)：
+
+```powershell
+.\smartmall.ps1 db-init && .\smartmall.ps1 build && .\smartmall.ps1 up
+```
+
+本文讲的是另一条路：把中间件全家桶（Kafka / Redis / Milvus / MinIO / ClickHouse…）
+与全部 11 个服务一起用 Docker Compose 拉起来。机器要求高得多，做集成演示或
+部署到服务器时才用。
 
 ---
 
@@ -8,14 +17,17 @@ M0 基建已就位。本文是把整套系统跑起来的操作手册。
 
 ```bash
 # 1. 准备环境变量（填入 DASHSCOPE_API_KEY / DEEPSEEK_API_KEY）
-make env
+make docker-env
 vim deploy/.env
 
 # 2. 一键启动全栈
-make up
+make docker-up
 ```
 
-`make up` 依次完成：中间件启动 → 建表 → 创建 Kafka topic → 应用构建启动 → 健康检查。
+`make docker-up` 依次完成：中间件启动 → 建表 → 创建 Kafka topic → 应用构建启动 → 健康检查。
+
+**目标名都带 `docker-` 前缀**，是为了不和本地目标撞名 —— `make up` 现在指的是
+「本地起 5 个 Java 服务」，同一条命令在两个人手里做的不该是完全不同的事。
 
 ---
 
@@ -25,13 +37,14 @@ make up
 
 | 文件 | 内容 | 命令 |
 |---|---|---|
-| `docker-compose.base.yml` | MySQL / Redis / Kafka / ClickHouse / Milvus / SeaweedFS | `make up-base` |
-| `docker-compose.app.yml` | 11 个应用服务 + Langfuse / Label Studio / Airflow / SRS | `make up-app` |
-| `docker-compose.gpu.yml` | ComfyUI（+ M7 起的 vLLM） | `make up-gpu` |
-| `docker-compose.dev.yml` | 最小开发依赖，约 12G 内存 | `make up-dev` |
+| `docker-compose.base.yml` | MySQL / Redis / Kafka / ClickHouse / Milvus / SeaweedFS | `make docker-up-base` |
+| `docker-compose.app.yml` | 11 个应用服务 + Langfuse / Label Studio / Airflow / SRS | `make docker-up-app` |
+| `docker-compose.gpu.yml` | ComfyUI（+ M7 起的 vLLM） | `make docker-up-gpu` |
+| `docker-compose.dev.yml` | 最小开发依赖，约 12G 内存 | `docker compose -f deploy/docker-compose.dev.yml up -d` |
 
-**本地开发推荐 `make up-dev`**：只起 MySQL + Redis + Milvus，应用在 IDE 里直接跑
-（所有服务的默认配置都指向 `localhost`，无需改配置）。
+`docker-compose.dev.yml` 是给「想用容器版 MySQL 而不是本机装的」准备的。
+起完之后本地流程完全一样 —— `migrate.py` 走 TCP 直连，连的是容器还是本机服务
+它并不关心，把 `MYSQL_PORT` 指对就行。
 
 ---
 
@@ -64,12 +77,15 @@ SeaweedFS 的 volume 端口不映射到宿主机以避开 mall-gateway 的 8080�
 | 端点 | 语义 | 用途 |
 |---|---|---|
 | `/health` | **存活**。只回答"进程活着吗"，不探测任何下游，永远快速返回 | 容器 healthcheck。避免 MySQL 抖动导致容器被反复重启 |
-| `/ready`（Python）<br>`/actuator/health`（Java） | **就绪**。探测 MySQL / Redis / Kafka / Milvus 等全部依赖 | 流量接入判断与监控告警 |
+| `/ready`（Python）<br>`/actuator/health`（Java） | **就绪**。探测下游依赖 —— Java 侧只有 MySQL（Redis / Kafka 已从 mall-* 摘掉，代码里零引用），Python 侧还含 Milvus 等 | 流量接入判断与监控告警 |
 
 ```bash
-make health   # 存活检查（快）
-make ready    # 就绪检查（含依赖探测）
+make docker-health                      # 容器版存活检查
+./deploy/scripts/health-check.sh --ready  # 就绪检查（含依赖探测）
 ```
+
+本地跑的话用 `make status`，它会逐个报每个 Java 服务的 `/actuator/health`
+以及与 MySQL 的连通性。
 
 `/ready` 区分 required 与可降级依赖——例如 Langfuse 挂了不该阻断客服服务，
 所以它注册为 `required=False`，失败只标记 degraded 而不让整体 DOWN。

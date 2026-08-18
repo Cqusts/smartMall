@@ -1,4 +1,4 @@
-# 测试用配置。覆盖 main 里的 MySQL / Redis / Kafka —— 单元测试不该依赖任何外部进程。
+# 测试用配置。把 main 里的 MySQL 换成内存 H2 —— 单元测试不该依赖任何外部进程。
 #
 # LOCK_TIMEOUT=20000：并发测试里 50 个线程抢同一行，H2 默认 1 秒锁等待会误报失败。
 # 这个值调的是**等待上限**，不影响正确性判定——真超卖了，断言照样会挂。
@@ -18,13 +18,6 @@ spring:
     init:
       mode: always
       schema-locations: classpath:schema-h2.sql
-
-  # 测试上下文里不起这些
-  autoconfigure:
-    exclude:
-      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
-      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
-      - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
 
 mybatis-plus:
   configuration:

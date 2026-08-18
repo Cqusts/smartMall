@@ -554,7 +554,12 @@ class TestOrderProxy:
         import re
         from pathlib import Path
 
-        src = Path("app/agent/tools.py").read_text(encoding="utf-8")
+        # 相对 **测试文件** 定位，不是相对 cwd。写成 Path("app/agent/tools.py")
+        # 的话只有在 apps/python/ai-agent/ 里跑 pytest 才通过；而 `make test`
+        # 是在仓库根跑的，那里直接 FileNotFoundError —— 一条守边界的测试
+        # 因为找不到文件而挂，等于这条边界没人看着。
+        src = (Path(__file__).resolve().parents[1]
+               / "app" / "agent" / "tools.py").read_text(encoding="utf-8")
         # 只看 SQL 字符串里的动词，注释与文档里提到这些词是允许的
         sql_writes = re.findall(
             r'"\s*(INSERT|UPDATE|DELETE|REPLACE)\s', src, re.IGNORECASE)

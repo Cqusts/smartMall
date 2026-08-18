@@ -33,7 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p><b>关于 H2 与 InnoDB 的差异，需要说清楚：</b>这些测试跑在 H2 的 MySQL
  * 兼容模式上，H2 的行锁实现与 InnoDB 不是一回事。H2 通过不代表 InnoDB 通过。
  * 因此同一个场景另外对真实 MySQL 8.0 复核过一遍（50 并发抢 5 件，成功 5 单、
- * 终态库存 0、无负库存），复核脚本见 {@code deploy/scripts/verify-order-concurrency.sh}。
+ * 终态库存 0、无负库存），复核脚本见 {@code deploy/scripts/verify-orders.py concurrency}。
  * 这里保留 H2 版本，是因为它能在任何机器上无条件执行——要起容器才能跑的
  * 测试，在没装 Docker 的机器上会被静默跳过，而被跳过的测试等于不存在。
  */

@@ -116,7 +116,7 @@ flowchart TB
 
 | 层 | 选型 |
 |---|---|
-| 业务后端 | Java 21 / Spring Boot 3 / MyBatis-Plus / MySQL 8 / Redis / Kafka |
+| 业务后端 | Java 21 / Spring Boot 3 / MyBatis-Plus / MySQL 8<br><sub>本地跑只要 MySQL 一个外部组件；Redis / Kafka 属于整套 Docker 部署，mall-* 目前不依赖它们</sub> |
 | AI 后端 | Python 3.11 / FastAPI / LangGraph / LiteLLM |
 | 向量检索 | Milvus 2.5（内置 BM25 混合检索）+ bge-m3 + bge-reranker-v2-m3 |
 | 数据处理 | Data-Juicer（自动清洗）+ Label Studio（人工标注）+ Airflow 3（调度）+ ClickHouse（分析） |
@@ -133,14 +133,32 @@ flowchart TB
 
 ## 快速开始
 
-```bash
-make env          # 从模板创建 deploy/.env，填入 API 密钥
-make up           # 中间件 → 建表 → Kafka topic → 应用 → 健康检查
-make health       # 存活检查
+**只要两样东西：JDK 21 和一个本机 MySQL 8。不需要 Docker。**
+
+```powershell
+$env:MYSQL_ADMIN_PASSWORD="你的 root 密码"   # 只给 db-init 用，见下方说明
+.\smartmall.ps1 db-init      # 建库 + 建应用账号 + 建表 + 跑迁移
+.\smartmall.ps1 build        # 构建 5 个 Java 服务的 jar
+.\smartmall.ps1 up           # 后台起全部 Java 服务，等到就绪才返回
+.\smartmall.ps1 serve        # 店铺页 :9002（前台，另开一个终端）
 ```
 
-本地开发用 `make up-dev`（只起 MySQL + Redis + Milvus，约 12G 内存，应用在 IDE 里跑）。
-完整操作手册见 [deploy/README.md](deploy/README.md)。
+```bash
+export MYSQL_ADMIN_PASSWORD="你的 root 密码"     # Linux / macOS
+make db-init && make build && make up
+make serve                                       # 另开一个终端
+```
+
+打开 <http://127.0.0.1:9002/> 就能下单。起不来先跑 `doctor`：
+
+```powershell
+.\smartmall.ps1 doctor       # 一次查完 JDK、依赖、数据库、账号、迁移、端口
+.\smartmall.ps1 status       # 5 个服务各自的状态与 MySQL 连通性
+```
+
+细节见下面的[启动](#启动)一节。整套 Docker 部署（Kafka / Milvus / MinIO /
+ClickHouse 全家桶）是另一条路，本地开发用不到，见
+[deploy/README.md](deploy/README.md) 与 `make docker-up`。
 
 ---
 
@@ -278,105 +296,97 @@ smartmall-agent serve          # → http://127.0.0.1:9002/
 
 商品列表 → 商品详情（价格 / SKU 库存 / 尺码表）→ 选规格下单 → 右下角「联系客服」浮窗。
 
-### 下单
+### 启动
 
-下单由 `mall-product` 实现（Java），店铺页通过 ai-agent 的 `/api/orders` 转发过去。
-**需要额外起一个服务**——只跑 `smartmall-agent serve` 的话，页面能逛，点购买会
-明确提示订单服务没起来，其余功能不受影响：
+**这个项目本地跑起来只需要两样东西：JDK 21，和一台本机 MySQL 8。**
+Redis、Kafka、Milvus 那些都不需要 —— 曾经 pom 里挂着 Redis / Kafka 的 starter，
+但代码对它们是零引用，只会在没起这些中间件时刷一屏连接重试日志、把
+`/actuator/health` 长期钉在 DOWN，让人以为自己环境没装齐。现在已经摘掉了。
 
-### 没有 Docker（本机装了 MySQL）
+五个 Java 服务：
 
-三步，**不需要 docker、也不需要 mysql 命令行在 PATH 上**：
+| 服务 | 端口 | 作用 |
+|---|---|---|
+| `mall-product` | 8081 | **商品 / SKU / 订单全链路 —— 店铺页下单只要它** |
+| `mall-asset` | 8082 | 素材中心（骨架） |
+| `mall-dataplat` | 8083 | 数据平台（骨架） |
+| `mall-kpi` | 8084 | 考核域（骨架） |
+| `mall-gateway` | 8080 | 反向代理，把 `/api/**` 分发到上面几个与 Python 服务 |
 
-```powershell
-$env:MYSQL_ADMIN_PASSWORD="你的root密码"   # 只给 db-init 用
-.\smartmall.ps1 db-init                  # 建库 + 建表 + 迁移 + 建应用账号
-.\smartmall.ps1 run-product              # 订单服务 :8081（前台，单开一个终端）
-.\smartmall.ps1 serve                    # 店铺页 :9002（前台，再开一个终端）
-```
-
-**管理员密码用 `MYSQL_ADMIN_PASSWORD`，不要用 `MYSQL_PASSWORD`。**后者是「应用账号
-的密码」—— 只设它不设 `MYSQL_USER` 的话，应用会拿 `smartmall` + 你给的 root 密码
-去连，报 `Access denied for user 'smartmall'@'localhost'`，而错误指向应用账号，
-看起来像账号没建好。实测卡过一轮，现在 `run-product` / `serve` 起动前会检测
-并警告这种半设状态。
-
-**起不来先跑 `.\smartmall.ps1 doctor`** —— 一次查完环境变量、Python 依赖、
-Maven、数据库连通、应用账号、迁移是否齐全、端口占用。
-
-`db-init` 会顺带**建出应用账号 `smartmall/smartmall`** —— 迁移用的是你给的
-root，而 mall-product 与 ai-agent 连库用的是这个业务账号（默认值写死在
-`application.yml` 与 `repository.py` 里）。Docker 版由 MySQL 镜像自动创建，
-本机 MySQL 没有这机制；不建的话迁移成功、应用却连不上，表现为页面能开、
-「商品数据读取失败」。要用别的账号：`$env:SMARTMALL_APP_USER` /
-`$env:SMARTMALL_APP_PASSWORD`。
-
-首次还要装 Python 侧的三个本地包（`serve` 会自动装，手动装的话顺序不能变）：
+只想让购买按钮能用的话，起 `mall-product` 一个就够：
 
 ```powershell
-pip install -e pipelines -e apps/python/ai-common -e "apps/python/ai-agent[server]"
+.\smartmall.ps1 up mall-product
 ```
 
-**PyMySQL 不用单独装** —— 它是 Python 连 MySQL 的驱动（不是数据库），
-`pipelines` 已经依赖它了。少装 `pipelines` 的症状很隐蔽：页面照常打开、
-商品列表是空的、点购买没反应，只有 `/api/products` 的响应体里留一句
-`"error":"ModuleNotFoundError"`，日志里连异常都看不到（被降级分支吞了）。
-
-`db-init` 底层是 `migrate.py`，它按可用性自动选连接方式：docker → mysql 客户端
-→ **PyMySQL 直连**。第三条不需要任何外部命令，Windows 上常常只有这一条能走。
-检测到库是空的会先跑 `deploy/sql/mysql/*.sql` 建基础表——容器版由 MySQL 镜像的
-initdb 自动做这件事，本机 MySQL 没有这个机制，不补上的话迁移会在第一条
-`ALTER TABLE` 上找不到表。
-
-### 有 Docker
+#### 第一次
 
 ```powershell
-.\smartmall.ps1 db-up          # 起 MySQL 容器，等到「建表已完成」才返回
-.\smartmall.ps1 db-migrate     # 应用迁移
-.\smartmall.ps1 run-product
-.\smartmall.ps1 serve
+$env:MYSQL_ADMIN_PASSWORD="你的 root 密码"
+.\smartmall.ps1 db-init      # 建库 + 建应用账号 + 建表 + 跑迁移（可反复执行）
+.\smartmall.ps1 build        # 构建 jar，第一次要下 Maven 依赖，几分钟
+.\smartmall.ps1 up           # 后台起全部服务，等到 /health 有应答才返回
+.\smartmall.ps1 serve        # 店铺页 :9002（前台，另开一个终端）
 ```
 
-### Linux / macOS
-
-```bash
-make db-up && make db-migrate                       # 或 python3 deploy/scripts/migrate.py
-make run-product                                    # 新终端
-make build-python                                   # 装三个本地包
-cd apps/python/ai-agent && smartmall-agent serve     # 再一个新终端
-```
-
-起完打开 <http://127.0.0.1:9002/> 下单。
-
-`smartmall.ps1` 里没有第二份业务逻辑，它只是转发到 `docker compose` /
-`migrate.py` / `mvnw.cmd` —— 两个平台共用同一份实现，不会各自漂移。
-
-**`make db-migrate` 是个真的迁移器，不是 `for f in *.sql`。**迁移里有
-`ALTER TABLE ... ADD COLUMN`，那不幂等——第二次跑就是「Duplicate column name」。
-它用一张 `schema_migrations` 表记已应用的文件，所以每次拉完代码跑一遍即可。
-另外两个坑也在里面处理了：连接一律带 `--default-character-set=utf8mb4`
-（漏了中文会变成 `Tæ¤`），以及 001 在全新安装上跳过（initdb 已经包含它要补的东西）。
-
-**迁移是逐条语句执行的，「已存在」的那条会跳过。**所以之前手工跑过一部分
-迁移的库也能直接 `db-init` —— 已有的略过、缺的补上，收敛到与全新安装完全
-相同的 schema（逐表比对验证过）。只有语法错误、缺表这类真错误才会中断。
-
-极少数情况下想「只登记不执行」（比如结构是从别处导入的），用基线：
+之后每天只要 `up` + `serve`。改了 Java 代码就 `build` 再 `restart`。
 
 ```powershell
-.\smartmall.ps1 db-baseline    # 把现有迁移标记为已应用，但不执行
-.\smartmall.ps1 db-status      # 看还差哪些
+.\smartmall.ps1 status              # 谁在跑、连没连上 MySQL
+.\smartmall.ps1 logs mall-product   # 看日志尾部（完整日志在 logs/ 下）
+.\smartmall.ps1 run  mall-product   # 前台起一个，日志直接打在终端上，Ctrl-C 停
+.\smartmall.ps1 down                # 全停
 ```
 
-```bash
-python3 deploy/scripts/migrate.py --baseline    # Linux / macOS
-python3 deploy/scripts/migrate.py --status
+Linux / macOS 用 `make`，目标名一一对应：`make db-init` / `build` / `up` /
+`status` / `logs S=mall-product` / `down` / `serve`。
+
+#### 两套数据库凭据，别混用
+
+| 变量 | 谁用 | 默认值 |
+|---|---|---|
+| `MYSQL_ADMIN_USER` / `MYSQL_ADMIN_PASSWORD` | **只有 `db-init`**：建库、建表、建账号 | `root` / 空 |
+| `MYSQL_USER` / `MYSQL_PASSWORD` | **应用**（mall-* 与店铺页）连库 | `smartmall` / `smartmall` |
+
+`db-init` 会顺带建出应用账号 `smartmall/smartmall` 并**真的试连一次**确认可用 ——
+迁移走的是 root，而 `application.yml` 与 `repository.py` 里写死的默认账号是
+`smartmall`。不建它的话迁移成功、应用却连不上，页面表现为「商品数据读取失败」。
+想用别的账号：`$env:MYSQL_USER` / `$env:MYSQL_PASSWORD`（两个要一起设）。
+
+**别把 root 密码设进 `MYSQL_PASSWORD`。**这是实测卡过一整轮的坑：只设它、不设
+`MYSQL_USER`，应用就会拿 `smartmall` + 你给的 root 密码去连，报
+`Access denied for user 'smartmall'@'localhost'` —— 错误指向应用账号，看起来
+像账号没建好，其实是密码张冠李戴。`up` / `serve` 起动前会检测这种半设状态并警告，
+`doctor` 也会单独列一项。
+
+#### 数据库怎么初始化的
+
+`db-init` 就是 `python deploy/scripts/migrate.py`，**PyMySQL 直连本机 MySQL**，
+不需要 `mysql.exe` 在 PATH 上（Windows 上常常不在），也不需要 Docker。它做四件事：
+
+1. `CREATE DATABASE IF NOT EXISTS smartmall`（utf8mb4）
+2. 建应用账号，用 `ALTER USER` 把密码校准，`@%` 与 `@localhost` 两个都建，然后试连确认
+3. 库是空的就先跑 `deploy/sql/mysql/*.sql` 建基础表 —— 容器版由 MySQL 镜像的
+   initdb 自动做，本机 MySQL 没有这机制，不补的话迁移会在第一条 `ALTER TABLE`
+   上找不到表
+4. 按序应用 `deploy/sql/migrations/*.sql`，用 `schema_migrations` 表记账
+
+**它是个真的迁移器，不是 `for f in *.sql`。**迁移里有 `ALTER TABLE ... ADD COLUMN`，
+那不幂等 —— 第二次跑就是 `Duplicate column name`。而且是**逐条语句执行**的，
+「已存在」的那条跳过：之前手工跑过一部分迁移的库也能直接 `db-init`，已有的略过、
+缺的补上，收敛到与全新安装完全相同的 schema（逐表比对验证过）。只有语法错误、
+缺表这类真错误才会中断。
+
+```powershell
+.\smartmall.ps1 db-status     # 看还差哪些迁移
 ```
+
+#### 构建为什么用 `./mvnw` 和 `java -jar`
 
 **用 `./mvnw` 而不是 `mvn`**（Windows 是 `.\mvnw.cmd`）。仓库自带 Maven Wrapper，
 首次运行自动下载锁定版本的 Maven，**机器上装没装、装的哪版都不影响**。
 
-这不是洁癖。同一份代码在老 Maven（3.3.9，2015 年）上连撞三个错，每个都难查：
+这不是洁癖。同一份代码在老 Maven（3.3.9，2015 年）上连撞三个错：
 
 | 现象 | 真正的原因 |
 |---|---|
@@ -384,34 +394,46 @@ python3 deploy/scripts/migrate.py --status
 | `requires Maven version 3.6.3` | 锁了插件版本之后暴露出的下一层：Spring Boot 3.x 本身就要求 3.6.3+ |
 | **测试静默归零** | 老 Maven 默认 surefire 2.12.4，那是 JUnit 5 之前的版本，一个测试都不跑还报 BUILD SUCCESS |
 
-第三个最危险——前两个至少会红，它是绿的。wrapper 把 Maven 版本一并锁进仓库，
-三个一起消失。真要用自己的 `mvn`，得 ≥ 3.6.3，否则 enforcer 会在 `validate`
-阶段（第一步）拦下并告诉你怎么办。
+第三个最危险 —— 前两个至少会红，它是绿的。真要用自己的 `mvn`，得 ≥ 3.6.3，
+否则 enforcer 会在 `validate` 阶段（第一步）拦下并告诉你怎么办。
 
-**不能只跑 `mvn -pl mall-product spring-boot:run`，两种写法都会失败：**
+**起服务用 `java -jar`，不用 `mvn spring-boot:run`。**后者对多模块项目走不通，
+两种写法都会失败：
 
 | 命令 | 报错 | 原因 |
 |---|---|---|
 | `mvn -pl mall-product spring-boot:run` | `Could not find artifact com.smartmall:mall-common` | `-pl` 只把 mall-product 放进 reactor，它依赖的 mall-common 既不在 reactor 里、本地仓库也没有 |
 | `mvn -pl mall-product -am spring-boot:run` | `Unable to find a suitable main class` | `-am` 把 parent 一起拉进 reactor，而 `spring-boot:run` 对每个模块都跑一遍，轮到 parent 就没有 main class |
 
-所以必须先 install 让 mall-common 进本地仓库，再单独 run。`make run-product`
-就是这两步；没有 make（Windows）时手敲：
+绕过去要「先 install 再 run」两步，而五个服务就是五次 Maven 启动 + 五次依赖解析。
+`build` 一次打出全部 fat jar，`up` 之后只剩 JVM 本身的启动时间。
+
+#### 店铺页
+
+`serve` 会先装三个本地包（顺序不能变，都不在 PyPI 上）：
 
 ```bash
-cd apps/java
-./mvnw -pl mall-product -am install -DskipTests
-./mvnw -pl mall-product spring-boot:run
+pip install -e pipelines -e apps/python/ai-common -e "apps/python/ai-agent[server]"
 ```
 
-或者用打好的 jar（PowerShell 里环境变量要分行写，`&&` 也不支持）：
+**PyMySQL 不用单独装** —— 它是 Python 连 MySQL 的驱动（不是数据库），
+`pipelines` 已经依赖它了。少装 `pipelines` 的症状很隐蔽：页面照常打开、
+商品列表是空的、点购买没反应，只有 `/api/products` 的响应体里留一句
+`"error":"ModuleNotFoundError"`。
+
+下单由 `mall-product` 实现（Java），店铺页通过 ai-agent 的 `/api/orders` 转发过去。
+只跑 `serve` 不起 `mall-product` 的话，页面能逛，点购买会明确提示订单服务没起来。
+
+#### 对着真库复核一遍
 
 ```powershell
-cd apps\java
-.\mvnw.cmd -pl mall-product -am install -DskipTests
-$env:MYSQL_HOST="127.0.0.1"
-java -jar mall-product\target\mall-product-0.1.0-SNAPSHOT.jar
+.\smartmall.ps1 verify        # 需要先 up
 ```
+
+跑两项：整条状态机（下单→支付→发货→送达→收货→退款申请/驳回/同意）和
+50 并发抢 5 件的防超卖。**73 个单元测试之外还要这个，因为单元测试跑在 H2 上，
+而 H2 不是 MySQL** —— `UPDATE` 的 SET 子句求值顺序、InnoDB 的行锁语义，两处
+都真实咬过人，详见 `deploy/scripts/verify-orders.py` 的文件头注释。
 
 完整生命周期：
 
@@ -501,21 +523,28 @@ ai-agent 托管，跨域调另一个端口不如在这里转一次省事。
 | `UPDATE` 的 SET 子句求值顺序 | MySQL 后面的赋值看得见前面写入的新值，`SET status='refunding', status_before_refund=status` 会把 `refunding` 存进去，驳回时"还原"成 refunding，订单永远卡在审核中 | 假绿 |
 | 行锁实现 | 防超卖的全部保证压在条件 UPDATE 的原子性上，而它取决于存储引擎 | 通过不代表 InnoDB 通过 |
 
-所以有两个脚本对**真库**复核，两处坑都是这么发现的：
+所以有一个脚本对**真库**复核，两处坑都是这么发现的（先 `up` 起 mall-product）：
 
-```bash
-./deploy/scripts/verify-order-lifecycle.sh      # 状态机全链路 + 时区一致性
-./deploy/scripts/verify-order-concurrency.sh    # 50 抢 5，不超卖
-SKU_NO=S9002-WHITE-M STOCK=3 CONCURRENCY=100 ./deploy/scripts/verify-order-concurrency.sh
+```powershell
+.\smartmall.ps1 verify                                  # 两项都跑
+python deploy/scripts/verify-orders.py lifecycle        # 只跑状态机
+python deploy/scripts/verify-orders.py concurrency      # 只跑防超卖
 ```
 
 **时区那条也在里面**：业务代码用 `LocalDateTime.now()` 写的列走 JVM 时区，
-SQL 里 `NOW()` 写的列走 MySQL 时区。两者不一致时，一笔订单会「15:25 下单、
-23:25 发货」——而客服正是照着这些字段回答"我的货什么时候发的"，于是它会
-向用户陈述一段根本没发生过的 8 小时延迟。compose 给容器设了 `TZ`，
-但 README 推荐的本地开发方式（compose 只起 MySQL、应用在 IDE 里直跑）
-不经过 compose。应用启动时调 `AppTimeZone.apply()` 把时区钉死，
-两种部署方式行为一致。
+SQL 里 `NOW()` 写的列走 MySQL 会话时区。两者不一致时，一笔订单会「15:25 下单、
+23:25 发货」—— 而客服正是照着这些字段回答"我的货什么时候发的"，于是它会
+向用户陈述一段根本没发生过的 8 小时延迟。这是存进库里的脏数据，不是显示问题。
+
+两侧都要钉死，钉一侧不够：
+
+- JVM 侧 —— 应用启动时 `AppTimeZone.apply()`，五个服务都调，在 `run()` 之前。
+- MySQL 侧 —— Hikari 的 `connection-init-sql` 每条连接执行
+  `SET time_zone = '+08:00'`。**只钉 JVM 这一侧是不够的**：`NOW()` 在服务器上
+  求值，用的是会话时区。实测本机 MySQL 跑在 UTC 时，`created_at` 与
+  `shipped_at` 相差整 480 分钟，而复核脚本正是这么抓到的。用数字偏移不用
+  `'Asia/Shanghai'`，因为后者要求 MySQL 装过时区表（`mysql_tzinfo_to_sql`），
+  Windows 上默认没装，会直接报 `Unknown or incorrect time zone` 连不上。
 
 **userId 目前从请求体传，这是已知的临时方案**——项目还没有认证体系，现在任何人
 都能以任意身份下单。代码里显式标了出来而不是假装安全；接入认证时改动只在控制器

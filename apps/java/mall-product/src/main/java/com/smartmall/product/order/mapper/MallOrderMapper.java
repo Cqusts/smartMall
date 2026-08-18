@@ -83,7 +83,7 @@ public interface MallOrderMapper extends BaseMapper<MallOrder> {
      * <p>这个坑单元测试抓不到：H2 用的是标准 SQL 语义（整行读旧值），
      * 两种写法在 H2 上都对，只有真 MySQL 会炸。实际就是这么发现的——
      * H2 全绿，真机一跑驳回没反应。所以有
-     * {@code deploy/scripts/verify-order-lifecycle.sh} 对真库跑一遍状态机。
+     * {@code deploy/scripts/verify-orders.py lifecycle} 对真库跑一遍状态机。
      */
     @Update("UPDATE mall_order SET status_before_refund = status, "
             + "status = 'refunding', refund_applied_at = NOW(), "
