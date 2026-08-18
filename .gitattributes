@@ -1,0 +1,14 @@
+# .ps1 必须保持 CRLF 与 UTF-8 BOM。
+#
+# Windows 自带的 PowerShell 5.1 读脚本时，**没有 BOM 就按系统 ANSI 代码页解码**
+# （中文机器是 GBK）——文件里的中文全部错码，字符串的结束引号被吃掉，直接
+# 「字符串缺少终止符」，脚本一行都跑不了。pwsh 7 默认 UTF-8，所以在 Linux 上
+# 验证不出这个问题（实测踩过：在 pwsh 7 里全绿，用户的 PS 5.1 上解析失败）。
+#
+# 标成 -text 是让 git 按二进制原样存取，任何换行/编码规范化都不碰它，
+# BOM 不会在某次提交里被悄悄抹掉。
+*.ps1 -text
+
+# mvnw 是 shell 脚本，在 Windows 上被转成 CRLF 会让 Git Bash / WSL 起不来
+mvnw    text eol=lf
+*.sh    text eol=lf

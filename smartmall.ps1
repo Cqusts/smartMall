@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     smartMall 的 Windows 任务入口，等价于 Makefile 里那几个目标。
 
@@ -26,6 +26,10 @@ param(
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
+
+# 控制台输出编码设成 UTF-8。中文机器上 PowerShell 5.1 的控制台默认是 GBK(936)，
+# 脚本里的中文提示会打成乱码。这一句只影响本进程的输出，不改系统设置。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
