@@ -232,6 +232,15 @@ class CliBackend(_StatementRunner):
         if p.returncode != 0 or err.upper().startswith("ERROR"):
             raise RuntimeError(err or self._clean(p.stdout) or f"退出码 {p.returncode}")
 
+    def can_connect_as(self, user: str, password: str) -> tuple[bool, str]:
+        # 不带 -h：走 socket，命中的是 'u'@'localhost' —— 那正是上一版漏掉、
+        # 而应用实际会撞上的那条路
+        cmd = ["docker", "exec", "-i", CONTAINER, "mysql"] if "docker" in self.base[0] \
+            else ["mysql"]
+        p = _run(cmd + [f"-u{user}", f"-p{password}", CHARSET,
+                        "-N", "-B", "-e", "SELECT 1", DATABASE])
+        return (p.returncode == 0), self._clean(p.stderr) or "退出码 %d" % p.returncode
+
     def ensure_database(self) -> None:
         p = _run(self.base + ["-e",
                  f"CREATE DATABASE IF NOT EXISTS `{DATABASE}` "
@@ -267,6 +276,17 @@ class PyMySqlBackend(_StatementRunner):
     def exec_statement(self, stmt: str) -> None:
         with self._connect(DATABASE) as conn, conn.cursor() as cur:
             cur.execute(stmt)
+
+    def can_connect_as(self, user: str, password: str) -> tuple[bool, str]:
+        try:
+            conn = self._pymysql.connect(
+                host=HOST, port=int(PORT), user=user, password=password,
+                database=DATABASE, charset="utf8mb4",
+            )
+            conn.close()
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
 
     def ensure_database(self) -> None:
         with self._connect(None) as conn, conn.cursor() as cur:
@@ -313,30 +333,51 @@ def sql_file(path) -> None:
 
 
 def ensure_app_user() -> None:
-    """建应用账号并授权，等价于 MySQL 镜像按 compose 变量做的那件事。
+    """建应用账号、把密码校准到期望值，并**真的连一次**确认可用。
 
     连库的账号（root）与应用账号（smartmall）不是一个，这一步不做，
     迁移会成功而应用连不上 —— 而那个失败被降级分支吞掉，只表现为
     "商品数据读取失败"，很难联想到是缺账号。
+
+    <b>两个坑都实测踩过：</b>
+
+    · **CREATE USER IF NOT EXISTS 不会改已存在账号的密码。**机器上早就有一个
+      同名账号（别的项目留下的、或手工建过）时，它静默跳过，密码还是旧的，
+      应用照样 Access denied。所以后面必须跟一句 ALTER USER 把密码校准。
+
+    · **'u'@'%' 与 'u'@'localhost' 是两个独立账号。**只修好其中一个时，
+      走 TCP 可能匹配 %（通）、走 socket 匹配 localhost（不通），
+      于是"我明明连得上"和"应用连不上"同时成立。两个都要处理。
+
+    最后那次试连是关键：SQL 没报错不等于账号能用 —— 上一版就是只看
+    "CREATE 没抛异常"就打了 ✓，而实际密码是错的。
     """
     if APP_USER == USER:
         return                      # 应用就用当前这个账号，不用另建
     try:
         for host in ("%", "localhost"):
-            # 两个 host 都要建：MySQL 把 'u'@'%' 和 'u'@'localhost' 当成两个账号，
-            # 而本机连接常常匹配到后者，只建 % 会在本地连接时报拒绝访问
             sql(f"CREATE USER IF NOT EXISTS '{APP_USER}'@'{host}' "
+                f"IDENTIFIED BY '{APP_PASSWORD}'")
+            # 账号已存在时上一句什么都不做，靠这句把密码校准
+            sql(f"ALTER USER '{APP_USER}'@'{host}' "
                 f"IDENTIFIED BY '{APP_PASSWORD}'")
             sql(f"GRANT ALL PRIVILEGES ON `{DATABASE}`.* "
                 f"TO '{APP_USER}'@'{host}'")
         sql("FLUSH PRIVILEGES")
-        print(f"  ✓ 应用账号 {APP_USER} 已就绪（应用连库用它，不是 {USER}）")
     except Exception as exc:
         # 当前账号没有建用户的权限时不该中断迁移 —— 表建好了仍然有价值，
         # 只是要把「应用可能连不上」这件事讲清楚
-        print(f"  ⚠ 没能创建应用账号 {APP_USER}：{exc}")
+        print(f"  ⚠ 没能创建/校准应用账号 {APP_USER}：{exc}")
         print(f"    应用默认用 {APP_USER}/{APP_PASSWORD} 连库。要么手动建它，")
         print(f"    要么让应用改用现在这个账号：$env:MYSQL_USER=\"{USER}\"")
+        return
+
+    ok, why = BACKEND.can_connect_as(APP_USER, APP_PASSWORD)
+    if ok:
+        print(f"  ✓ 应用账号 {APP_USER} 可用（已试连确认；应用用它，不是 {USER}）")
+    else:
+        print(f"  ⚠ 应用账号 {APP_USER} 建好了，但试连失败：{why}")
+        print("    应用会连不上库，页面表现为「商品数据读取失败」。")
 
 
 def bootstrap_base_schema() -> None:
