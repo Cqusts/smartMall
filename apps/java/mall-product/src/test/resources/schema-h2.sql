@@ -68,3 +68,36 @@ CREATE TABLE IF NOT EXISTS mall_user (
     updated_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uk_username UNIQUE (username)
 );
+
+-- 商品与结构化属性。与 deploy/sql/mysql/01_product.sql 对齐。
+--
+-- 此前测试库里没有这两张表：订单链路只碰 sku，碰不到它们。补商品维护时
+-- 表现是 16 条错误全报「Table not found」——**测试库的 schema 是一份会
+-- 悄悄落后于真库的副本**，加领域时得记着同步。
+CREATE TABLE IF NOT EXISTS product (
+    id          BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    product_no  VARCHAR(64)  NOT NULL,
+    name        VARCHAR(256) NOT NULL,
+    short_name  VARCHAR(64),
+    alias       VARCHAR(1024),
+    category_id BIGINT       NOT NULL,
+    brand       VARCHAR(128),
+    subtitle    VARCHAR(512),
+    description CLOB,
+    main_image  VARCHAR(512),
+    status      VARCHAR(16)  NOT NULL DEFAULT 'draft',
+    created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted     TINYINT      NOT NULL DEFAULT 0,
+    CONSTRAINT uk_product_no UNIQUE (product_no)
+);
+
+CREATE TABLE IF NOT EXISTS product_attr (
+    id          BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    product_id  BIGINT       NOT NULL,
+    attr_key    VARCHAR(64)  NOT NULL,
+    attr_value  VARCHAR(512) NOT NULL,
+    is_core     TINYINT      NOT NULL DEFAULT 0,
+    sort_order  INT          NOT NULL DEFAULT 0,
+    CONSTRAINT uk_product_key UNIQUE (product_id, attr_key)
+);

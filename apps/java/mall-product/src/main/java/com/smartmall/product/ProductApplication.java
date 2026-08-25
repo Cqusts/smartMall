@@ -13,7 +13,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 // 按领域分包，每个领域自带 mapper 子包。@MapperScan 不支持 ant 通配，
 // 所以新增领域时要在这里补一行——显式列出比一个匹配不上的通配符好排查
 @MapperScan({"com.smartmall.product.mapper", "com.smartmall.product.order.mapper",
-             "com.smartmall.product.auth.mapper"})
+             "com.smartmall.product.auth.mapper",
+             "com.smartmall.product.catalog.mapper"})
 // 超时未支付订单的库存释放任务需要它。任务本身可以用
 // smartmall.order.release-expired.enabled=false 关掉
 @EnableScheduling

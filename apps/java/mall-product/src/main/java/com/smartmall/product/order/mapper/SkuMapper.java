@@ -13,6 +13,10 @@ public interface SkuMapper extends BaseMapper<Sku> {
     @Select("SELECT * FROM sku WHERE sku_no = #{skuNo} AND deleted = 0")
     Sku findBySkuNo(@Param("skuNo") String skuNo);
 
+    /** 一个商品下的全部 SKU。**含缺货与下架的**——商家要管的正是这些。 */
+    @Select("SELECT * FROM sku WHERE product_id = #{pid} AND deleted = 0 ORDER BY sku_no")
+    java.util.List<Sku> listByProduct(@Param("pid") Long pid);
+
     /**
      * 扣库存。<b>整个下单链路的防超卖就是这一条 SQL。</b>
      *
