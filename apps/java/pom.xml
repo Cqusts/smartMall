@@ -29,6 +29,8 @@
         <spring-cloud.version>2023.0.3</spring-cloud.version>
         <mybatis-plus.version>3.5.7</mybatis-plus.version>
         <springdoc.version>2.6.0</springdoc.version>
+        <!-- JWT。spring-boot-dependencies 不管这个坐标，版本必须自己锁 -->
+        <jjwt.version>0.12.6</jjwt.version>
 
         <!-- **构建插件的版本必须锁死，不能靠 Maven 超级 POM 的默认值。**
              不锁的话，构建结果取决于每个人装的 Maven 版本，而且两种失败

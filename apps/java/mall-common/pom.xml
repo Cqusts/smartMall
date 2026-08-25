@@ -28,6 +28,34 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
         </dependency>
+        <!-- JWT 签发与校验。放在 mall-common 是因为网关（WebFlux）与业务服务
+             （Servlet）都要校验同一个 token——**这个项目里下游是可以被直连的**
+             （Python 店铺页直接调 localhost:8081），所以校验不能只放网关一处。
+             jjwt 是纯 Java，不绑任何 web 栈，正好符合本模块的约束。 -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <!-- 只要 BCryptPasswordEncoder，**不要 spring-boot-starter-security**：
+             那个 starter 会给所有端点套上默认的过滤器链，把现有接口全锁成 401，
+             77 个测试会连带全红。这个坐标是独立的加密工具包，没有自动配置。 -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
