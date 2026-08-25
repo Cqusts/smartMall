@@ -316,10 +316,32 @@ class TestWebPage:
         「联系客服」自然带上 product_id；裸聊天页只能靠一个下拉框假装。
         """
         text = self._client().get("/").text
-        assert "联系客服" in text and "猜你喜欢" in text
+        assert "联系客服" in text and "新品上架" in text
         assert "product_id:" in text and "current.id" in text, (
             "客服窗口必须把当前商品带过去"
         )
+
+    def test_page_defines_what_it_calls(self):
+        """页面里调到的全局函数必须真的定义了。
+
+        **这条是被一个真的事故逼出来的**：改版前的页面调了
+        ``loadAuth`` / ``switchIdentity`` / ``authFetch``，三个一个都没定义——
+        启动那行 ``loadAuth()`` 抛 ReferenceError，把它后面的
+        ``loadProducts()`` 和 ``connect()`` 一起带走，于是整页既没有商品
+        也连不上客服，而**报错只在控制台里**。页面看着像"接口挂了"，
+        症状离病因隔了三层，光看页面永远查不到。
+        """
+        import re
+
+        text = self._client().get("/").text
+        script = text[text.index("<script>"):]
+        defined = set(re.findall(r"function\s+([A-Za-z_]\w*)", script))
+        defined |= set(re.findall(r"(?:const|let|var)\s+([A-Za-z_]\w*)\s*=", script))
+        called = set(re.findall(r'on\w+="([A-Za-z_]\w*)\(', text))
+        called |= {"loadAuth", "switchIdentity", "authFetch", "loadProducts",
+                   "connect", "renderGrid", "buildHero"}
+        missing = sorted(called - defined - {"scrollTo"})
+        assert not missing, f"页面调了但没定义：{missing}"
 
     def test_page_uses_no_emoji_icons(self):
         """图标走内联 SVG，不用 emoji。

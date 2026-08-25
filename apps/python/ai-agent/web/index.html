@@ -10,355 +10,432 @@
   「联系客服」自然带上 product_id；裸聊天页只能靠一个下拉框假装。
 
   三条硬约束：
-  · 零外部请求。图片走本机 /img/，字体用系统栈。演示环境常常没有外网，
-    "打不开"比"不好看"严重得多（test_page_has_no_external_dependencies）。
+  · 零外部请求。图片走本机 /img/，字体用系统栈——**不引 Google Fonts**。
+    演示环境常常没有外网，"打不开"比"不好看"严重得多
+    （test_page_has_no_external_dependencies 会把外链整片挡下）。
   · 不用 emoji 当图标。跨平台字形差异大，Windows 上一堆方框；改用内联 SVG。
   · 商品数据全部来自 /api/products，也就是客服工具层读的同一张表。
     分成两条路的话，页面显示"有货"而客服说"缺货"，用户会以为系统在骗人。
+
+  ---------------------------------------------------------------- 页面上没有装饰件
+
+  轮播的圆点、商品卡上的爱心、右上角的角标——这些在参考稿里是静态的图。
+  照着画一遍就会得到一堆点了没反应的控件，而**一个点不动的按钮比没有按钮更糟**：
+  用户会以为是坏了，演示时还得解释"这个是假的"。
+
+  所以这一版里它们都接着真东西：轮播的后三屏是真商品（点进去就是详情页），
+  爱心写进 localStorage 并驱动右上角的收藏数，色块来自 SKU 规格里的真实颜色。
+  认不出的颜色**不画**——画错一个色块就是对商品撒了个小谎。
 -->
 <style>
 :root{
-  --orange:#ff5000; --orange-d:#e64600; --red:#e4393c; --tmall:#f40268;
-  --ink:#3c3c3c; --ink-2:#666; --ink-3:#999;
-  --line:#e8e8e8; --bg:#f5f5f5; --card:#fff;
+  --ink:#1a1a1a; --ink-2:#5c5c5c; --ink-3:#9a9a9a;
+  --line:#e9e5e0; --line-2:#f0ece7;
+  --cream:#ede6dd;        /* 首屏底色 */
+  --cream-2:#f2efea;      /* 商品图底色 */
+  --sand:#b08d6f;         /* 点缀色，只用在小面积上 */
+  --sand-soft:#f7f1e9;
+  --ok:#2f7d5b; --warn:#9a6b1f; --err:#b4413c;
+  /* 标题用衬线。**中西文分开挑，不能只写 Georgia**：Georgia 没有汉字，
+     浏览器会按字逐个回退，回退到哪个字体完全看系统装了什么——
+     在只有黑体的机器上，整句标题就变成了黑体，衬线的意思一点没剩。
+     所以后面把三大平台的中文衬线依次列全：思源宋体 / 宋体-简 / 宋体。 */
+  --serif:Georgia,"Times New Roman","Noto Serif SC","Source Han Serif SC",
+          "Songti SC",STSong,"SimSun",serif;
 }
 *{box-sizing:border-box}
 body{
-  margin:0; background:var(--bg); color:var(--ink);
-  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+  margin:0; background:#fff; color:var(--ink);
+  font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
        "Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
 }
 a{color:inherit;text-decoration:none}
 button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
 .ico{width:1em;height:1em;fill:currentColor;vertical-align:-.14em}
-.wrap{max-width:1200px;margin:0 auto;padding:0 12px}
+.wrap{max-width:1240px;margin:0 auto;padding:0 28px}
+.serif{font-family:var(--serif)}
 
-/* ---------------------------------------------------------- 顶部工具条 */
-.topbar{background:#f7f7f7;border-bottom:1px solid var(--line);font-size:12px;
-        color:var(--ink-2)}
-.topbar .wrap{display:flex;gap:18px;align-items:center;height:32px}
-.topbar .sp{flex:1}
-.topbar a:hover{color:var(--orange)}
-.topbar .hi{color:var(--orange)}
+/* ---------------------------------------------------------- 顶栏 */
+.hd{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid var(--line-2)}
+.hd .wrap{display:flex;align-items:center;gap:34px;height:76px}
+.logo{font-size:23px;font-weight:800;letter-spacing:-.6px;white-space:nowrap}
+.logo b{font-weight:800}
+.logo span{color:var(--sand)}
+.nav{display:flex;gap:30px;font-size:14.5px;color:var(--ink-2)}
+.nav a{position:relative;padding:4px 0}
+.nav a:hover{color:var(--ink)}
+.nav a.on{color:var(--ink);font-weight:600}
+.nav a.on::after{content:"";position:absolute;left:0;right:0;bottom:-26px;
+                 height:2px;background:var(--ink)}
+.sp{flex:1}
+.sbox{display:flex;align-items:center;background:#f5f4f2;border-radius:26px;
+      padding:0 6px 0 20px;height:44px;width:min(380px,34vw)}
+.sbox input{flex:1;border:0;background:transparent;outline:none;font-size:14px;
+            color:var(--ink);min-width:0}
+.sbox input::placeholder{color:var(--ink-3)}
+.sbox button{width:34px;height:34px;border-radius:50%;color:var(--ink-2);
+             display:flex;align-items:center;justify-content:center}
+.sbox button:hover{background:#e9e7e4;color:var(--ink)}
+.tools{display:flex;align-items:center;gap:6px}
+.iconbtn{position:relative;width:42px;height:42px;border-radius:50%;
+         display:flex;align-items:center;justify-content:center;color:var(--ink);
+         font-size:20px}
+.iconbtn:hover{background:#f5f4f2}
+.iconbtn .n{position:absolute;top:2px;right:2px;min-width:17px;height:17px;
+            border-radius:9px;background:var(--ink);color:#fff;font-size:10.5px;
+            line-height:17px;text-align:center;padding:0 4px;font-weight:600}
+.iconbtn.on{background:var(--sand-soft);color:var(--sand)}
 
-/* ---------------------------------------------------------- 促销条 */
-.promo{background:linear-gradient(90deg,#ff2d55,#ff5000);color:#fff}
-.promo .wrap{display:flex;align-items:center;justify-content:center;gap:16px;
-             height:44px;font-size:15px;font-weight:600;letter-spacing:.5px}
-.promo .go{background:#fff;color:var(--red);font-size:13px;font-weight:500;
-           padding:4px 14px;border-radius:12px}
-.promo .cd{display:flex;align-items:center;gap:4px;font-size:13px;font-weight:400}
-.promo .cd b{background:rgba(0,0,0,.28);border-radius:3px;padding:2px 6px;
-             font-family:monospace;font-weight:600}
-
-/* ---------------------------------------------------------- 头部 */
-header{background:#fff}
-header .wrap{display:flex;align-items:center;gap:28px;padding:18px 12px}
-.logo{font-size:30px;font-weight:800;color:var(--orange);letter-spacing:-1px;
-      line-height:1;white-space:nowrap}
-.logo small{display:block;font-size:11px;font-weight:400;color:var(--ink-3);
-            letter-spacing:2px;margin-top:3px}
-.search{flex:1;max-width:640px}
-.sbox{display:flex;border:2px solid var(--orange);border-radius:2px;background:#fff}
-.sbox .cat{display:flex;align-items:center;gap:4px;padding:0 10px;font-size:13px;
-           color:var(--ink-2);border-right:1px solid var(--line);white-space:nowrap}
-.sbox input{flex:1;border:0;outline:none;padding:9px 12px;font-size:14px;
-            background:transparent;color:var(--ink);min-width:0}
-.sbox button{background:var(--orange);color:#fff;padding:0 30px;font-size:16px;
-             font-weight:500}
-.sbox button:hover{background:var(--orange-d)}
-.hot{margin-top:7px;font-size:12px;color:var(--ink-3);display:flex;
-     flex-wrap:wrap;gap:12px}
-.hot a:hover{color:var(--orange)}
-.hot .em{color:var(--red)}
-.cartbtn{display:flex;align-items:center;gap:6px;border:1px solid var(--line);
-         padding:8px 16px;color:var(--orange);font-size:13px;border-radius:2px}
-
-/* ---------------------------------------------------------- 导航 */
-nav{background:#fff;border-bottom:2px solid var(--orange)}
-nav .wrap{display:flex;gap:26px;align-items:center;height:38px;font-size:14px}
-nav a{color:var(--ink);white-space:nowrap}
-nav a:hover{color:var(--orange)}
-nav .tag{background:var(--tmall);color:#fff;font-size:11px;padding:1px 5px;
-         border-radius:2px;margin-left:4px;vertical-align:1px}
+/* 账号切换。做成点头像弹出的面板而不是一个下拉框：下拉框读起来像
+   「筛选条件」，而这里发生的事是**重新登录换一枚令牌** */
+.acctwrap{position:relative}
+.acct{position:absolute;right:0;top:52px;width:290px;background:#fff;
+      border:1px solid var(--line);border-radius:10px;padding:14px;
+      box-shadow:0 12px 34px rgba(0,0,0,.13);display:none;z-index:30}
+.acct.open{display:block}
+.acct .hh{font-size:11.5px;color:var(--ink-3);letter-spacing:1px;margin-bottom:8px}
+.acct .me{display:flex;align-items:center;gap:11px;padding-bottom:12px;
+          border-bottom:1px solid var(--line-2);margin-bottom:11px}
+.avatar{width:40px;height:40px;border-radius:50%;background:var(--cream);
+        color:var(--sand);display:flex;align-items:center;justify-content:center;
+        font-size:18px;flex:none}
+.acct .me b{display:block;font-size:14px}
+.acct .me em{font-style:normal;font-size:12px;color:var(--ink-3)}
+.idn{display:flex;align-items:center;gap:10px;width:100%;padding:8px 9px;
+     border-radius:7px;text-align:left;font-size:13px}
+.idn:hover{background:#f7f6f4}
+.idn.on{background:var(--sand-soft)}
+.idn .t{flex:1}
+.idn .t em{display:block;font-style:normal;font-size:11.5px;color:var(--ink-3)}
+.idn .ck{color:var(--sand);font-size:13px;visibility:hidden}
+.idn.on .ck{visibility:visible}
+.idn:disabled{opacity:.55;cursor:progress}
+.acct .note{margin-top:11px;padding-top:10px;border-top:1px solid var(--line-2);
+            font-size:11.5px;color:var(--ink-3);line-height:1.75}
 
 /* ---------------------------------------------------------- 首屏 */
-.hero{display:grid;grid-template-columns:190px 1fr 240px;gap:10px;margin:12px 0}
-.side{background:#fff;padding:8px 0}
-.side a{display:flex;align-items:center;gap:8px;padding:7px 14px;font-size:13px;
-        color:#555}
-.side a:hover{background:#fff4ee;color:var(--orange)}
-.side .arrow{margin-left:auto;color:#ccc}
-/* banner 用实拍店铺照压暗，不用色块渐变——渐变一眼就是占位符 */
-.banner{position:relative;border-radius:4px;overflow:hidden;min-height:280px;
-        display:flex;flex-direction:column;justify-content:center;
-        padding:34px 40px;color:#fff;background:#2b2b2b}
-.banner .bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
-            opacity:.5}
-.banner .in{position:relative}
-.banner h1{margin:0 0 10px;font-size:34px;letter-spacing:1px;
-           text-shadow:0 2px 12px rgba(0,0,0,.5)}
-.banner p{margin:0 0 6px;font-size:15px;text-shadow:0 1px 8px rgba(0,0,0,.6)}
-.banner .kbd{display:inline-block;background:rgba(255,255,255,.26);
-             padding:2px 8px;border-radius:3px;font-size:13px}
-.panel{background:#fff;padding:16px 14px;display:flex;flex-direction:column;gap:12px}
-.panel h4{margin:0;font-size:14px;color:var(--ink)}
-.panel .who{display:flex;align-items:center;gap:10px}
-.avatar{width:44px;height:44px;border-radius:50%;background:#ffece3;color:var(--orange);
-        display:flex;align-items:center;justify-content:center;font-size:22px}
-.panel .note{font-size:12px;color:var(--ink-3);line-height:1.7}
-.btn-primary{background:var(--orange);color:#fff;padding:9px;border-radius:2px;
-             text-align:center;font-size:14px;width:100%}
-.btn-primary:hover{background:var(--orange-d)}
-.btn-ghost{border:1px solid var(--orange);color:var(--orange);padding:8px;
-           border-radius:2px;text-align:center;font-size:13px;width:100%}
-.btn-ghost:hover{background:#fff4ee}
+.hero{position:relative;margin:18px 0 0;border-radius:10px;overflow:hidden;
+      background:var(--cream);height:474px}
+.slide{position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr;
+       opacity:0;transition:opacity .5s;pointer-events:none}
+.slide.on{opacity:1;pointer-events:auto}
+.slide .txt{padding:0 0 0 64px;display:flex;flex-direction:column;
+            justify-content:center}
+.eyebrow{font-size:12.5px;letter-spacing:5px;color:var(--sand);margin-bottom:16px}
+.slide h1{font-family:var(--serif);font-size:58px;line-height:1.14;margin:0 0 22px;
+          font-weight:400;letter-spacing:-1px}
+.slide p{margin:0 0 32px;font-size:16px;color:var(--ink-2);line-height:1.7;
+         max-width:340px}
+.cta{align-self:flex-start;display:flex;align-items:center;gap:12px;
+     background:var(--ink);color:#fff;border-radius:26px;padding:14px 30px;
+     font-size:15px}
+.cta:hover{background:#000}
+.cta .ico{width:15px;height:15px}
+.slide .pic{position:relative;overflow:hidden}
+.slide .pic img{width:100%;height:100%;object-fit:cover;display:block}
+.dots{position:absolute;left:64px;bottom:38px;display:flex;gap:9px;z-index:3}
+.dots button{width:8px;height:8px;border-radius:50%;background:rgba(0,0,0,.2)}
+.dots button.on{background:var(--ink)}
+/* 首单券。倒计时是真的走到当天 24 点——写死一个"还剩 22 小时"的静态数字，
+   演示里被看出来很尴尬 */
+.coupon{position:absolute;right:38px;bottom:56px;background:#fff;border-radius:9px;
+        padding:18px 22px;box-shadow:0 10px 30px rgba(0,0,0,.11);z-index:3;
+        display:flex;gap:14px;align-items:flex-start;max-width:275px}
+.coupon .gift{width:34px;height:34px;color:var(--sand);flex:none}
+.coupon b{display:block;font-size:15px;margin-bottom:2px}
+.coupon em{font-style:normal;font-size:12.5px;color:var(--ink-3)}
+.coupon .cd{font-size:12px;color:var(--ink-2);margin-top:9px;
+            font-variant-numeric:tabular-nums}
+.coupon .cd i{font-style:normal;background:#f2efea;border-radius:3px;
+              padding:1px 5px;font-weight:600}
+.coupon .go{margin-top:11px;font-size:13.5px;border-bottom:1px solid var(--ink);
+            padding-bottom:2px;display:inline-block}
 
-/* ---------------------------------------------------------- 商品 */
-.secthead{display:flex;align-items:center;gap:14px;margin:22px 0 12px}
-.secthead h2{margin:0;font-size:20px;font-weight:600}
-.secthead .line{flex:1;height:1px;background:var(--line)}
-.secthead .tabs{display:flex;gap:6px}
-.secthead .tabs button{font-size:13px;padding:4px 12px;border-radius:14px;
-                       background:#fff;color:var(--ink-2)}
-.secthead .tabs button.on{background:var(--orange);color:#fff}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(206px,1fr));gap:10px}
-.card{background:#fff;border:1px solid transparent;transition:.15s;
-      display:flex;flex-direction:column}
-.card:hover{border-color:var(--orange);box-shadow:0 4px 14px rgba(0,0,0,.1)}
-.card .ph{position:relative;aspect-ratio:1;overflow:hidden;background:#fafafa}
-.card img{width:100%;height:100%;object-fit:cover;display:block}
-.card:hover img{transform:scale(1.04)}
-.card img{transition:transform .3s}
-.card .oos{position:absolute;inset:0;background:rgba(0,0,0,.4);
+/* ---------------------------------------------------------- 服务条 */
+.feats{display:grid;grid-template-columns:repeat(4,1fr);margin:34px 0 6px}
+.feat{display:flex;align-items:center;gap:14px;padding:14px 22px;
+      border-left:1px solid var(--line-2)}
+.feat:first-child{border-left:0;padding-left:0}
+.feat svg{width:27px;height:27px;color:var(--sand);flex:none}
+.feat b{display:block;font-size:14px;font-weight:600}
+.feat em{font-style:normal;font-size:12.5px;color:var(--ink-3)}
+
+/* ---------------------------------------------------------- 商品区 */
+.shop{display:grid;grid-template-columns:230px 1fr;gap:44px;margin-top:38px}
+.cats h3{font-size:16px;margin:0 0 14px;font-weight:600}
+.cats button{display:flex;align-items:center;width:100%;padding:11px 16px;
+             border-radius:7px;font-size:14px;color:var(--ink-2);text-align:left}
+.cats button:hover{background:#faf9f8;color:var(--ink)}
+.cats button.on{background:var(--sand-soft);color:var(--ink);font-weight:600}
+.cats button .ico{margin-left:auto;width:14px;height:14px;visibility:hidden}
+.cats button.on .ico{visibility:visible}
+.sechead{display:flex;align-items:center;margin-bottom:20px}
+.sechead h2{font-size:17px;margin:0;font-weight:600}
+.sechead .c{font-size:13px;color:var(--ink-3);margin-left:10px}
+.viewall{margin-left:auto;border:1px solid var(--line);border-radius:6px;
+         padding:9px 20px;font-size:13.5px;color:var(--ink-2)}
+.viewall:hover{border-color:var(--ink);color:var(--ink)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(218px,1fr));
+      gap:26px 22px}
+.card{cursor:pointer}
+.card .ph{position:relative;aspect-ratio:4/5;background:var(--cream-2);
+          border-radius:7px;overflow:hidden}
+.card img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .45s}
+.card:hover img{transform:scale(1.045)}
+.fav{position:absolute;top:11px;right:11px;width:33px;height:33px;border-radius:50%;
+     background:rgba(255,255,255,.94);display:flex;align-items:center;
+     justify-content:center;color:var(--ink-2);box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.fav:hover{color:var(--ink)}
+.fav.on{color:#c8564f}
+.fav .ico{width:15px;height:15px}
+.card .oos{position:absolute;inset:0;background:rgba(255,255,255,.72);
            display:flex;align-items:center;justify-content:center}
-.card .oos b{background:rgba(0,0,0,.62);color:#fff;font-weight:500;
-             border:1px solid rgba(255,255,255,.6);border-radius:50%;
-             width:78px;height:78px;display:flex;align-items:center;
-             justify-content:center;font-size:15px;letter-spacing:1px}
-.card .body{padding:10px;display:flex;flex-direction:column;gap:7px;flex:1}
-.price{color:var(--red);font-size:21px;font-weight:600;line-height:1}
-.price i{font-size:13px;font-style:normal;margin-right:1px}
-.price del{color:var(--ink-3);font-size:12px;font-weight:400;margin-left:6px}
-.title{font-size:13px;color:var(--ink);line-height:1.45;display:-webkit-box;
-       -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
-       min-height:37px}
-.title .mark{color:#fff;background:var(--tmall);font-size:11px;padding:0 4px;
-             border-radius:2px;margin-right:4px;vertical-align:1px}
-.badges{display:flex;flex-wrap:wrap;gap:4px}
-.badges span{font-size:11px;color:var(--orange);border:1px solid #ffd2bd;
-             padding:0 4px;border-radius:2px}
-.cardfoot{display:flex;align-items:center;justify-content:space-between;
-          padding-top:6px;border-top:1px dashed var(--line);margin-top:auto}
-.cardfoot .shop{font-size:12px;color:var(--ink-3)}
-.cardfoot .ask{color:var(--orange);font-size:12px;display:flex;align-items:center;
-               gap:3px}
-.cardfoot .ask:hover{text-decoration:underline}
+.card .oos b{font-size:13px;letter-spacing:2px;color:var(--ink-2);font-weight:500;
+             border:1px solid var(--ink-3);border-radius:20px;padding:7px 20px;
+             background:#fff}
+.card .nm{margin-top:13px;font-size:14px;line-height:1.45;
+          display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;
+          overflow:hidden}
+.card .pr{margin-top:5px;font-size:15px;font-weight:600}
+.card .pr del{font-weight:400;font-size:12.5px;color:var(--ink-3);margin-left:7px}
+.sw{display:flex;gap:6px;margin-top:10px;min-height:15px}
+.sw i{width:15px;height:15px;border-radius:50%;display:block;
+      border:1px solid rgba(0,0,0,.14)}
+.card .ask{margin-top:9px;font-size:12.5px;color:var(--ink-3);display:inline-flex;
+           align-items:center;gap:4px}
+.card .ask:hover{color:var(--sand)}
+.empty{grid-column:1/-1;background:#faf9f8;border-radius:9px;padding:48px 30px;
+       text-align:center;color:var(--ink-3);line-height:1.9}
+.empty code{background:#efece8;padding:1px 6px;border-radius:3px;color:var(--ink-2)}
 
 /* ---------------------------------------------------------- 详情 */
-.mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;z-index:40}
+.mask{position:fixed;inset:0;background:rgba(26,26,26,.42);display:none;z-index:40}
 .mask.open{display:block}
 .detail{position:fixed;inset:50% auto auto 50%;transform:translate(-50%,-50%);
-        width:min(940px,94vw);max-height:88vh;overflow:auto;background:#fff;
-        border-radius:4px;z-index:41;display:none}
+        width:min(960px,94vw);max-height:88vh;overflow:auto;background:#fff;
+        border-radius:12px;z-index:41;display:none}
 .detail.open{display:block}
-.detail .x{position:absolute;top:10px;right:14px;font-size:22px;color:#bbb}
-.dtop{display:grid;grid-template-columns:340px 1fr;gap:24px;padding:24px}
-.dtop img{width:100%;border-radius:3px;display:block}
-.dtop h3{margin:0 0 12px;font-size:19px;line-height:1.5;font-weight:500}
-.pricebar{background:linear-gradient(#fff6f3,#fff);padding:14px 16px;
-          border:1px solid #ffe3d6;border-radius:3px;margin-bottom:16px}
-.pricebar .now{color:var(--red);font-size:30px;font-weight:600}
-.pricebar .now i{font-size:15px;font-style:normal}
-.pricebar del{color:var(--ink-3);margin-left:10px}
-.drow{display:flex;gap:12px;margin-bottom:12px;font-size:13px}
-.drow .k{color:var(--ink-3);width:52px;flex:none;padding-top:5px}
+.detail .x{position:absolute;top:14px;right:18px;font-size:24px;color:var(--ink-3);
+           line-height:1}
+.detail .x:hover{color:var(--ink)}
+.dtop{display:grid;grid-template-columns:380px 1fr;gap:34px;padding:30px}
+.dtop .dpic{background:var(--cream-2);border-radius:9px;overflow:hidden;
+            aspect-ratio:4/5}
+.dtop .dpic img{width:100%;height:100%;object-fit:cover;display:block}
+.dtop h3{margin:0 0 6px;font-size:23px;line-height:1.4;font-weight:500;
+         font-family:var(--serif)}
+.dtop .sub{color:var(--ink-3);font-size:13px;margin-bottom:18px}
+.pricebar{padding:16px 0;border-top:1px solid var(--line-2);
+          border-bottom:1px solid var(--line-2);margin-bottom:20px}
+.pricebar .now{font-size:29px;font-weight:600}
+.pricebar del{color:var(--ink-3);margin-left:11px;font-size:15px;font-weight:400}
+.pricebar .hint{font-size:12px;color:var(--ink-3);margin-top:6px}
+.drow{display:flex;gap:14px;margin-bottom:16px;font-size:13.5px}
+.drow .k{color:var(--ink-3);width:52px;flex:none;padding-top:6px}
 .skus{display:flex;flex-wrap:wrap;gap:8px}
-.sku{border:1px solid var(--line);padding:5px 12px;border-radius:2px;font-size:13px;
+.sku{border:1px solid var(--line);padding:7px 15px;border-radius:6px;font-size:13px;
      background:#fff;cursor:pointer;user-select:none}
-.sku:hover:not(.off){border-color:var(--orange)}
-.sku.on{border-color:var(--orange);background:#fff6f2;color:var(--orange);font-weight:500}
-.sku.off{color:#c4c4c4;background:#fafafa;text-decoration:line-through;cursor:not-allowed}
-.sku .n{color:var(--ink-3);font-size:11px;margin-left:5px}
-.sku.low{border-color:#ffb38a}
-.sku.low .n{color:var(--orange)}
-.sku.on .n{color:var(--orange)}
-
-/* 数量选择器 */
-.qty{display:flex;align-items:center;gap:0}
-.qty button{width:28px;height:28px;border:1px solid var(--line);background:#fff;
+.sku:hover:not(.off){border-color:var(--ink)}
+.sku.on{border-color:var(--ink);background:var(--ink);color:#fff}
+.sku.off{color:#cdcdcd;background:#fafafa;text-decoration:line-through;
+         cursor:not-allowed}
+.sku .n{color:var(--ink-3);font-size:11px;margin-left:6px}
+.sku.low{border-color:var(--sand)}
+.sku.low .n{color:var(--sand)}
+.sku.on .n{color:rgba(255,255,255,.72)}
+.qty{display:flex;align-items:center}
+.qty button{width:32px;height:32px;border:1px solid var(--line);background:#fff;
             color:var(--ink-2);font-size:15px;line-height:1}
+.qty button:first-child{border-radius:6px 0 0 6px}
+.qty button:last-of-type{border-radius:0 6px 6px 0}
 .qty button:disabled{color:#ddd;cursor:not-allowed}
-.qty input{width:46px;height:28px;border:1px solid var(--line);border-left:0;
+.qty input{width:50px;height:32px;border:1px solid var(--line);border-left:0;
            border-right:0;text-align:center;font-size:13px;outline:none}
-.qty .lim{font-size:11px;color:var(--ink-3);margin-left:10px}
-
-/* 下单结果 */
-.orderbox{margin-top:14px;padding:10px 12px;border-radius:3px;font-size:13px;
-          line-height:1.7}
-.orderbox.ok{background:#f2fbf4;border:1px solid #bde5c8;color:#1e7d38}
-.orderbox.err{background:#fff5f5;border:1px solid #ffcdcd;color:#c0392b}
+.qty .lim{font-size:11.5px;color:var(--ink-3);margin-left:12px}
+.attrs{font-size:13px;color:var(--ink-2);line-height:1.95}
+table.size{border-collapse:collapse;width:100%;font-size:12px;margin-top:4px}
+table.size th,table.size td{border:1px solid var(--line);padding:6px 8px;
+                            text-align:center}
+table.size th{background:#faf9f8;color:var(--ink-2);font-weight:500}
+.dcta{display:flex;gap:11px;margin-top:24px}
+.dcta button{padding:14px 36px;border-radius:26px;font-size:15px}
+.buy{background:var(--ink);color:#fff}
+.buy:hover{background:#000}
+.buy:disabled{opacity:.5;cursor:progress}
+.svc{background:#fff;border:1px solid var(--line);display:flex;align-items:center;
+     gap:7px}
+.svc:hover{border-color:var(--ink)}
+.orderbox{margin-top:18px;padding:13px 15px;border-radius:8px;font-size:13px;
+          line-height:1.8}
+.orderbox.ok{background:#f4faf6;border:1px solid #cfe7d8;color:#256647}
+.orderbox.err{background:#fdf5f4;border:1px solid #f0d2d0;color:#9c3a35}
 .orderbox b{font-family:ui-monospace,Menlo,Consolas,monospace}
 .orderbox .hint{color:var(--ink-3);font-size:12px}
-.orderbox a{color:var(--orange);text-decoration:underline;cursor:pointer}
-/* 物流轨迹：最新的在上面，和快递 App 一致 */
-.tracks{margin:7px 0;padding:7px 10px;background:rgba(255,255,255,.65);
-        border-radius:3px;font-size:12px;color:var(--ink-2);line-height:1.8}
+.orderbox a{text-decoration:underline;cursor:pointer}
+.tracks{margin:8px 0;padding:8px 11px;background:rgba(255,255,255,.7);
+        border-radius:6px;font-size:12px;color:var(--ink-2);line-height:1.85}
 .tracks b{display:block;color:var(--ink);margin-bottom:2px}
-.tracks i{color:var(--ink-3);font-style:normal;margin-right:8px;
+.tracks i{color:var(--ink-3);font-style:normal;margin-right:9px;
           font-variant-numeric:tabular-nums}
 .tracks div:first-of-type{color:var(--ink)}
-/* 商家动作在演示页上要一眼看出不属于买家 */
-.adminrow{margin-top:8px;padding-top:7px;border-top:1px dashed rgba(0,0,0,.15);
+.adminrow{margin-top:9px;padding-top:8px;border-top:1px dashed rgba(0,0,0,.13);
           font-size:12px}
-.adminrow span{color:var(--ink-3);margin-right:8px}
-table.size{border-collapse:collapse;width:100%;font-size:12px;margin-top:6px}
-table.size th,table.size td{border:1px solid var(--line);padding:5px 7px;
-                            text-align:center}
-table.size th{background:#fafafa;color:var(--ink-2);font-weight:500}
-.attrs{font-size:13px;color:var(--ink-2);line-height:1.9}
-.dcta{display:flex;gap:10px;margin-top:18px}
-.dcta button{padding:11px 30px;border-radius:2px;font-size:15px}
-.buy{background:var(--orange);color:#fff}
-.svc{background:#fff;border:1px solid var(--orange);color:var(--orange);
-     display:flex;align-items:center;gap:6px}
+.adminrow span{color:var(--ink-3);margin-right:9px}
+
+footer{margin:60px 0 34px;padding-top:24px;border-top:1px solid var(--line-2);
+       text-align:center;color:var(--ink-3);font-size:12.5px;line-height:2}
+footer code{background:#f2efec;padding:1px 6px;border-radius:3px}
 
 /* ---------------------------------------------------------- 客服 */
-.fab{position:fixed;right:20px;bottom:76px;z-index:30;background:var(--orange);
-     color:#fff;border-radius:4px;width:56px;padding:10px 0;text-align:center;
-     box-shadow:0 4px 16px rgba(255,80,0,.4);font-size:12px;line-height:1.4}
-.fab svg{width:22px;height:22px;fill:#fff;display:block;margin:0 auto 3px}
+.fab{position:fixed;right:24px;bottom:24px;z-index:30;background:var(--ink);
+     color:#fff;border-radius:28px;padding:13px 22px;display:flex;
+     align-items:center;gap:8px;font-size:14px;
+     box-shadow:0 8px 26px rgba(0,0,0,.24)}
+.fab svg{width:18px;height:18px;fill:#fff}
 .fab.hide{display:none}
-.chat{position:fixed;right:0;top:0;bottom:0;width:400px;background:#fff;
-      box-shadow:-4px 0 24px rgba(0,0,0,.16);z-index:50;display:none;
+.chat{position:fixed;right:0;top:0;bottom:0;width:410px;background:#fff;
+      box-shadow:-6px 0 32px rgba(0,0,0,.15);z-index:50;display:none;
       flex-direction:column}
 .chat.open{display:flex}
-.chat.wide{width:760px}
-.chead{background:var(--orange);color:#fff;padding:11px 14px;display:flex;
-       align-items:center;gap:9px;font-size:15px}
-.chead .dot{width:7px;height:7px;border-radius:50%;background:#7bed9f}
-.chead .dot.off{background:#ffd43b}
+.chat.wide{width:790px}
+.chead{background:var(--ink);color:#fff;padding:14px 16px;display:flex;
+       align-items:center;gap:10px;font-size:15px}
+.chead .dot{width:7px;height:7px;border-radius:50%;background:#6fcf97}
+.chead .dot.off{background:#e0b23c}
 .chead .sp{flex:1}
-.chead button{color:#fff;padding:3px 9px;border-radius:3px;font-size:12px;
-              background:rgba(255,255,255,.18)}
+.chead button{color:#fff;padding:4px 11px;border-radius:5px;font-size:12px;
+              background:rgba(255,255,255,.16)}
+.chead button:hover{background:rgba(255,255,255,.28)}
 /* Agent 切换。做成显式的两个页签而不是让一个 Agent 自动判断该走哪条链路：
    意图分类会错，错了用户完全看不出发生了什么，只觉得"它答非所问"。
    页签是用户自己选的，选错了他自己知道怎么改回来。 */
 .atabs{display:flex;background:#fff;border-bottom:1px solid var(--line)}
-.atabs button{flex:1;padding:9px 0;font-size:13px;color:var(--ink-2);
+.atabs button{flex:1;padding:11px 0;font-size:13.5px;color:var(--ink-3);
               border-bottom:2px solid transparent}
-.atabs button.on{color:var(--orange);border-bottom-color:var(--orange);
-                 font-weight:600}
-.atabs .ico{width:14px;height:14px;vertical-align:-2px;margin-right:4px;
+.atabs button.on{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+.atabs .ico{width:14px;height:14px;vertical-align:-2px;margin-right:5px;
             fill:currentColor}
 .cbody{flex:1;display:flex;min-height:0}
 .cmain{flex:1;display:flex;flex-direction:column;min-width:0}
-.ctx{display:none;align-items:center;gap:9px;padding:9px 12px;background:#fff8f5;
-     border-bottom:1px solid #ffe3d6;font-size:12px}
-.ctx img{width:38px;height:38px;object-fit:cover;border-radius:3px}
-.clog{flex:1;overflow-y:auto;padding:14px;background:#f6f7f9}
-.msg{max-width:86%;padding:9px 12px;border-radius:9px;margin-bottom:10px;
-     font-size:14px;line-height:1.65;white-space:pre-wrap;word-break:break-word;
-     background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)}
-.msg.me{margin-left:auto;background:var(--orange);color:#fff}
-.msg.sys{max-width:100%;background:#eef2f7;color:var(--ink-2);font-size:12.5px;
+.ctx{display:none;align-items:center;gap:10px;padding:10px 14px;
+     background:var(--sand-soft);border-bottom:1px solid var(--line);font-size:12.5px}
+.ctx img{width:40px;height:40px;object-fit:cover;border-radius:5px}
+.clog{flex:1;overflow-y:auto;padding:16px;background:#faf9f8}
+.msg{max-width:86%;padding:10px 13px;border-radius:11px;margin-bottom:11px;
+     font-size:14px;line-height:1.68;white-space:pre-wrap;word-break:break-word;
+     background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.msg.me{margin-left:auto;background:var(--ink);color:#fff}
+.msg.sys{max-width:100%;background:#f0eeeb;color:var(--ink-2);font-size:12.5px;
          box-shadow:none}
-.msg.draft{opacity:.62}
-.cite{margin-top:8px;border-top:1px dashed var(--line);padding-top:6px}
+.msg.draft{opacity:.6}
+.cite{margin-top:9px;border-top:1px dashed var(--line);padding-top:7px}
 .cite details{font-size:12px;color:var(--ink-2);margin-top:4px}
-.cite summary{cursor:pointer;color:var(--orange)}
-.cite p{margin:5px 0 0;color:var(--ink-2);background:#fafafa;padding:6px;
-        border-radius:3px}
-.handover{margin-top:8px;background:#fff7e6;border:1px solid #ffe0a3;
-          border-radius:4px;padding:7px 9px;font-size:12px;color:#8a5b00}
+.cite summary{cursor:pointer;color:var(--sand)}
+.cite p{margin:5px 0 0;color:var(--ink-2);background:#faf9f8;padding:7px;
+        border-radius:5px}
+.handover{margin-top:9px;background:#fdf7ea;border:1px solid #eedcb4;
+          border-radius:7px;padding:8px 10px;font-size:12px;color:var(--warn)}
 /* 导购推荐出来的商品卡。点得进详情，不然用户还得回列表自己找 */
-.recs{margin-top:9px;border-top:1px dashed var(--line);padding-top:8px;
+.recs{margin-top:10px;border-top:1px dashed var(--line);padding-top:9px;
       display:flex;flex-direction:column;gap:7px}
-.rec{display:flex;gap:9px;align-items:center;cursor:pointer;padding:5px;
-     border:1px solid var(--line);border-radius:4px;background:#fff}
-.rec:hover{border-color:var(--orange)}
-.rec img{width:44px;height:44px;object-fit:cover;border-radius:3px;flex:none}
+.rec{display:flex;gap:10px;align-items:center;cursor:pointer;padding:6px;
+     border:1px solid var(--line);border-radius:7px;background:#fff}
+.rec:hover{border-color:var(--ink)}
+.rec img{width:46px;height:46px;object-fit:cover;border-radius:5px;flex:none}
 .rec .n{font-size:12.5px;color:var(--ink);line-height:1.4}
-.rec .p{font-size:13px;color:var(--orange);font-weight:600;margin-top:2px}
-.fb{margin-top:7px;display:flex;align-items:center;gap:6px}
-.fb button{border:1px solid var(--line);border-radius:12px;padding:2px 10px;
-           font-size:12px;color:var(--ink-2)}
-.fb button:hover{border-color:var(--orange);color:var(--orange)}
-.fb button.done{background:#fff4ee;border-color:var(--orange);color:var(--orange)}
-.fb .tid{font-size:11px;color:#c4c4c4;margin-left:auto;font-family:monospace}
-.cstatus{padding:0 14px;min-height:22px;display:flex;gap:5px;flex-wrap:wrap}
-
+.rec .p{font-size:13px;font-weight:600;margin-top:2px}
+.fb{margin-top:8px;display:flex;align-items:center;gap:6px}
+.fb button{border:1px solid var(--line);border-radius:13px;padding:3px 11px;
+           font-size:12px;color:var(--ink-3)}
+.fb button:hover{border-color:var(--ink);color:var(--ink)}
+.fb button.done{background:var(--sand-soft);border-color:var(--sand);color:var(--sand)}
+.fb .tid{font-size:11px;color:#c9c9c9;margin-left:auto;font-family:monospace}
+.cstatus{padding:0 16px;min-height:22px;display:flex;gap:5px;flex-wrap:wrap}
 /* 执行轨迹：Agent 每走一个节点留一行，跑完不清空。
    原先只有一个会被下一个状态覆盖的胶囊——看得见"正在检索"，
    看不见它检索完命中了几条，更看不见整轮到底走了哪条路径 */
-.trace{margin:0 14px 8px;border:1px solid var(--line);border-radius:6px;
-       background:#fbfbfc;overflow:hidden;display:none}
+.trace{margin:0 16px 8px;border:1px solid var(--line);border-radius:8px;
+       background:#fbfaf9;overflow:hidden;display:none}
 .trace.on{display:block}
-.trace .th{display:flex;align-items:center;gap:7px;padding:7px 10px;
+.trace .th{display:flex;align-items:center;gap:8px;padding:8px 11px;
            font-size:12px;color:var(--ink-2);cursor:pointer;user-select:none;
-           background:#f6f7f9;border-bottom:1px solid var(--line)}
+           background:#f5f3f1;border-bottom:1px solid var(--line)}
 .trace .th b{font-weight:600;color:var(--ink)}
 .trace .th .sp{flex:1}
 .trace .th .tot{font-family:monospace;color:var(--ink-3)}
 .trace .tb{max-height:210px;overflow-y:auto;padding:4px 0}
 .trace.folded .tb{display:none}
-.stp{display:flex;align-items:flex-start;gap:8px;padding:4px 11px;font-size:12px}
+.stp{display:flex;align-items:flex-start;gap:9px;padding:4px 12px;font-size:12px}
 .stp .dot{width:6px;height:6px;border-radius:50%;background:var(--line);
           margin-top:6px;flex:none}
-.stp.run .dot{background:var(--orange);animation:pulse 1s infinite}
-.stp.ok .dot{background:#1a7f37}
+.stp.run .dot{background:var(--sand);animation:pulse 1s infinite}
+.stp.ok .dot{background:var(--ok)}
 @keyframes pulse{50%{opacity:.25}}
-@media(prefers-reduced-motion:reduce){.stp.run .dot{animation:none}}
+@media(prefers-reduced-motion:reduce){
+  .stp.run .dot{animation:none}
+  .slide{transition:none}
+  .card img{transition:none}
+}
 .stp .nm{width:88px;flex:none;color:var(--ink)}
 .stp .dt{flex:1;color:var(--ink-2);font-family:monospace;font-size:11px;
          line-height:1.5;word-break:break-all}
 .stp .ms{color:var(--ink-3);font-family:monospace;font-size:11px;flex:none}
-.pill{font-size:11px;background:#eef2f7;color:var(--ink-2);padding:1px 7px;
-      border-radius:9px}
-.pill.live{background:#fff0e8;color:var(--orange)}
-.quick{display:flex;gap:6px;flex-wrap:wrap;padding:8px 14px 0}
-.quick button{font-size:12px;border:1px solid var(--line);border-radius:13px;
-              padding:3px 11px;color:var(--ink-2);background:#fff}
-.quick button:hover{border-color:var(--orange);color:var(--orange)}
-.pending{padding:0 14px}
-.pending .thumb{position:relative;display:inline-block;margin-top:8px}
-.pending img{height:64px;border-radius:4px;display:block;border:1px solid var(--line)}
+.pill{font-size:11px;background:#f0eeeb;color:var(--ink-2);padding:2px 9px;
+      border-radius:10px}
+.pill.live{background:var(--sand-soft);color:var(--sand)}
+.quick{display:flex;gap:6px;flex-wrap:wrap;padding:9px 16px 0}
+.quick button{font-size:12px;border:1px solid var(--line);border-radius:14px;
+              padding:4px 12px;color:var(--ink-2);background:#fff}
+.quick button:hover{border-color:var(--ink);color:var(--ink)}
+.pending{padding:0 16px}
+.pending .thumb{position:relative;display:inline-block;margin-top:9px}
+.pending img{height:64px;border-radius:6px;display:block;border:1px solid var(--line)}
 .pending .rm{position:absolute;top:-6px;right:-6px;width:20px;height:20px;
-             border-radius:50%;background:rgba(0,0,0,.65);color:#fff;
+             border-radius:50%;background:rgba(0,0,0,.68);color:#fff;
              font-size:13px;line-height:20px;text-align:center}
-.msg img{max-width:180px;border-radius:6px;display:block;margin-bottom:6px}
-.cform{display:flex;gap:8px;padding:10px 14px 14px;align-items:center}
-.pick{display:flex;align-items:center;justify-content:center;width:36px;height:36px;
-      border:1px solid var(--line);border-radius:4px;color:var(--ink-2);
-      cursor:pointer;flex:none;font-size:18px}
-.pick:hover{border-color:var(--orange);color:var(--orange)}
-.cform input{flex:1;border:1px solid var(--line);border-radius:4px;padding:9px 11px;
-             outline:none;font-size:14px;min-width:0}
-.cform input:focus{border-color:var(--orange)}
-.cform button{background:var(--orange);color:#fff;padding:0 20px;border-radius:4px}
-.diag{width:360px;flex:none;border-left:1px solid var(--line);overflow-y:auto;
-      padding:12px;background:#fbfbfc;font-size:12px;display:none}
+.msg img{max-width:180px;border-radius:7px;display:block;margin-bottom:6px}
+.cform{display:flex;gap:8px;padding:11px 16px 16px;align-items:center}
+.pick{display:flex;align-items:center;justify-content:center;width:38px;height:38px;
+      border:1px solid var(--line);border-radius:19px;color:var(--ink-2);
+      cursor:pointer;flex:none;font-size:17px}
+.pick:hover{border-color:var(--ink);color:var(--ink)}
+.cform input{flex:1;border:1px solid var(--line);border-radius:19px;
+             padding:10px 15px;outline:none;font-size:14px;min-width:0}
+.cform input:focus{border-color:var(--ink)}
+.cform button[type=submit]{background:var(--ink);color:#fff;padding:0 22px;
+                           height:38px;border-radius:19px}
+.diag{width:378px;flex:none;border-left:1px solid var(--line);overflow-y:auto;
+      padding:14px;background:#fbfaf9;font-size:12px;display:none}
 .chat.wide .diag{display:block}
-.diag h3{margin:12px 0 6px;font-size:12px;color:var(--ink-3);font-weight:600}
+.diag h3{margin:13px 0 6px;font-size:11.5px;color:var(--ink-3);font-weight:600;
+         letter-spacing:.5px}
 .diag h3:first-child{margin-top:0}
-.kv{display:flex;justify-content:space-between;gap:10px;padding:3px 0;
+.kv{display:flex;justify-content:space-between;gap:10px;padding:4px 0;
     border-bottom:1px dotted var(--line)}
 .kv span:first-child{color:var(--ink-3)}
-.hit{background:#fff;border:1px solid var(--line);border-radius:3px;padding:6px 8px;
+.hit{background:#fff;border:1px solid var(--line);border-radius:6px;padding:7px 9px;
      margin-bottom:5px;color:var(--ink-2)}
 .hit .t{display:flex;justify-content:space-between;gap:8px;margin-bottom:2px;
         font-family:monospace;font-size:11px}
-.tag{font-size:10px;padding:0 4px;border-radius:2px}
-.tag.yes{background:#e6f8ec;color:#1a7f37}
-.tag.no{background:#fdecec;color:#c0392b}
-
-footer{margin:36px 0 24px;text-align:center;color:var(--ink-3);font-size:12px;
-       line-height:2}
-footer code{background:#ececec;padding:1px 5px;border-radius:2px}
+.tag{font-size:10px;padding:1px 5px;border-radius:3px}
+.tag.yes{background:#eaf6ef;color:var(--ok)}
+.tag.no{background:#fbeceb;color:var(--err)}
 
 @media(max-width:1080px){
-  .hero{grid-template-columns:1fr}
-  .side,.panel{display:none}
+  .wrap{padding:0 16px}
+  .nav,.sbox{display:none}
+  .hero{height:auto}
+  .slide{position:static;display:block;opacity:1;pointer-events:auto}
+  .slide:not(.on){display:none}
+  .slide .txt{padding:38px 26px}
+  .slide h1{font-size:38px}
+  .slide .pic{height:260px}
+  .dots{left:26px;bottom:auto;top:12px}
+  .coupon{position:static;margin:0 26px 26px;max-width:none}
+  .feats{grid-template-columns:1fr 1fr}
+  .feat{border-left:0;padding-left:0}
+  .shop{grid-template-columns:1fr;gap:26px}
   .chat,.chat.wide{width:100%}
   .diag{display:none!important}
   .dtop{grid-template-columns:1fr}
@@ -373,112 +450,114 @@ footer code{background:#ececec;padding:1px 5px;border-radius:2px}
   <symbol id="i-cart" viewBox="0 0 24 24"><path d="M7 18a2 2 0 100 4 2 2 0 000-4zm10 0a2 2 0 100 4 2 2 0 000-4zM6.2 6h14.3l-2 8H8.1L6.2 6zm-.9-3H2v2h2l3 12h12v-2H8.4l-.3-1h11L22 4H5.9l-.6-1z"/></symbol>
   <symbol id="i-svc" viewBox="0 0 24 24"><path d="M12 2a9 9 0 00-9 9v5a3 3 0 003 3h1a1 1 0 001-1v-6a1 1 0 00-1-1H5v-1a7 7 0 0114 0v1h-2a1 1 0 00-1 1v6a1 1 0 001 1h1a3 3 0 003-3v-5a9 9 0 00-9-9z"/></symbol>
   <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"stroke="currentColor"stroke-width="2"fill="none"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-7l7 7-7 7"stroke="currentColor"stroke-width="2"fill="none"stroke-linecap="round"stroke-linejoin="round"/></symbol>
   <symbol id="i-doc" viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6V2zm7 1.5V7h3.5L13 3.5z"/></symbol>
   <symbol id="i-tool" viewBox="0 0 24 24"><path d="M21 6l-4 4-3-3 4-4a6 6 0 00-8 7L3 17l4 4 7-7a6 6 0 007-8z"/></symbol>
   <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 2l10 19H2L12 2zm-1 7v6h2V9h-2zm0 8v2h2v-2h-2z"/></symbol>
   <symbol id="i-up" viewBox="0 0 24 24"><path d="M2 21h4V9H2v12zM23 10a2 2 0 00-2-2h-6.3l1-4.6v-.3a1.5 1.5 0 00-.4-1L14 1 7.6 7.4A2 2 0 007 8.8V19a2 2 0 002 2h9a2 2 0 001.8-1.2l3-7.1V10z"/></symbol>
   <symbol id="i-down" viewBox="0 0 24 24"><path d="M22 3h-4v12h4V3zM1 14a2 2 0 002 2h6.3l-1 4.6v.3a1.5 1.5 0 00.4 1L10 23l6.4-6.4a2 2 0 00.6-1.4V5a2 2 0 00-2-2H6a2 2 0 00-1.8 1.2l-3 7.1V14z"/></symbol>
   <symbol id="i-img" viewBox="0 0 24 24"><path d="M21 3H3a1 1 0 00-1 1v16a1 1 0 001 1h18a1 1 0 001-1V4a1 1 0 00-1-1zm-1 15l-5-6-4 5-3-3-4 5V5h16v13zM8.5 10a1.5 1.5 0 100-3 1.5 1.5 0 000 3z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><path d="M10 3a7 7 0 105.2 11.7l4.5 4.6 1.4-1.4-4.5-4.6A7 7 0 0010 3zm0 2a5 5 0 110 10 5 5 0 010-10z"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><path d="M12 12a5 5 0 100-10 5 5 0 000 10zm0 2c-4.4 0-8 2.5-8 5.5V22h16v-2.5c0-3-3.6-5.5-8-5.5z"stroke="currentColor"stroke-width="1.6"fill="none"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.5l-1.4-1.3C5.4 14.5 2 11.4 2 7.6 2 4.9 4.1 3 6.8 3c1.6 0 3.1.7 4.1 1.9l1.1 1.3 1.1-1.3A5.4 5.4 0 0117.2 3C19.9 3 22 4.9 22 7.6c0 3.8-3.4 6.9-8.6 11.6l-1.4 1.3z"stroke="currentColor"stroke-width="1.7"fill="none"/></symbol>
+  <symbol id="i-heart-fill" viewBox="0 0 24 24"><path d="M12 20.5l-1.4-1.3C5.4 14.5 2 11.4 2 7.6 2 4.9 4.1 3 6.8 3c1.6 0 3.1.7 4.1 1.9l1.1 1.3 1.1-1.3A5.4 5.4 0 0117.2 3C19.9 3 22 4.9 22 7.6c0 3.8-3.4 6.9-8.6 11.6l-1.4 1.3z"/></symbol>
+  <symbol id="i-truck" viewBox="0 0 24 24"><path d="M2 5h11v9H2V5zm11 4h4l3 3v2h-7V9zM6.5 20a1.8 1.8 0 100-3.6 1.8 1.8 0 000 3.6zm11 0a1.8 1.8 0 100-3.6 1.8 1.8 0 000 3.6z"stroke="currentColor"stroke-width="1.6"fill="none"stroke-linejoin="round"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2.5l8 3v6c0 5-3.4 8.6-8 10-4.6-1.4-8-5-8-10v-6l8-3z"stroke="currentColor"stroke-width="1.6"fill="none"stroke-linejoin="round"/><path d="M8.4 12l2.4 2.4 4.6-4.8"stroke="currentColor"stroke-width="1.7"fill="none"stroke-linecap="round"stroke-linejoin="round"/></symbol>
+  <symbol id="i-return" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 108.5-8.5c-3 0-5.6 1.6-7.1 4"stroke="currentColor"stroke-width="1.6"fill="none"stroke-linecap="round"/><path d="M4 3v5h5"stroke="currentColor"stroke-width="1.6"fill="none"stroke-linecap="round"stroke-linejoin="round"/></symbol>
+  <symbol id="i-gift" viewBox="0 0 24 24"><path d="M3 9h18v3H3V9zm1 3h16v9H4v-9zm8-3V7m0 2c-2 0-4.5-.4-4.5-2.3C7.5 5.2 8.7 4.5 10 5c1.1.4 1.8 2 2 4zm0 0c2 0 4.5-.4 4.5-2.3 0-1.5-1.2-2.2-2.5-1.7-1.1.4-1.8 2-2 4z"stroke="currentColor"stroke-width="1.5"fill="none"stroke-linejoin="round"/><path d="M12 12v9"stroke="currentColor"stroke-width="1.5"/></symbol>
 </svg>
 
-<div class="topbar"><div class="wrap">
-  <span>中国大陆</span>
-  <a class="hi">亲，请登录</a><a>免费注册</a><a>网页无障碍</a>
+<header class="hd"><div class="wrap">
+  <div class="logo">smart<span>Mall</span>.</div>
+  <nav class="nav">
+    <a class="on">首页</a>
+    <a onclick="pickCat('全部')">全部商品</a>
+    <a onclick="scrollTo(0, document.querySelector('.shop').offsetTop - 90)">分类</a>
+    <a href="/merchant">商家后台</a>
+    <a onclick="openChat()">联系我们</a>
+  </nav>
   <span class="sp"></span>
-  <a>我的订单</a><a>收藏夹</a><a>会员中心</a><a>帮助中心</a>
-</div></div>
-
-<div class="promo"><div class="wrap">
-  <span>smartMall 秋季上新 · 全场满 299 减 50</span>
-  <span class="go">立即抢购</span>
-  <span class="cd">距结束
-    <b id="cdH">00</b>时<b id="cdM">00</b>分<b id="cdS">00</b>秒</span>
-</div></div>
-
-<header><div class="wrap">
-  <div class="logo">smartMall<small>SMARTMALL.COM</small></div>
-  <div class="search">
-    <form class="sbox" onsubmit="searchAsk(event)">
-      <span class="cat">宝贝<svg class="ico"><use href="#i-chev"/></svg></span>
-      <input id="q" placeholder="搜索商品，或直接把问题打在这里">
-      <button type="submit">搜索</button>
-    </form>
-    <div class="hot">
-      <a class="em">针织衫</a><a>羽绒服</a><a>连衣裙</a><a>单肩包</a>
-      <a>马丁靴</a><a>飞行员夹克</a><a>束脚裤</a>
+  <form class="sbox" onsubmit="searchAsk(event)">
+    <input id="q" placeholder="搜索商品，或直接把问题打在这里">
+    <button type="submit" title="搜索"><svg class="ico"><use href="#i-search"/></svg></button>
+  </form>
+  <div class="tools">
+    <div class="acctwrap">
+      <button class="iconbtn" id="userBtn" title="账号" onclick="toggleAcct(event)">
+        <svg class="ico"><use href="#i-user"/></svg>
+      </button>
+      <!-- 账号切换。点头像弹出，不是一个下拉框——这里发生的事是
+           **重新登录换一枚令牌**，而下拉框读起来像是在筛选什么东西 -->
+      <div class="acct" id="acct">
+        <div class="hh">当前身份</div>
+        <div class="me" id="acctMe"></div>
+        <div class="hh">切换账号</div>
+        <div id="acctList"></div>
+        <div class="note">切换会重新登录换一枚令牌。<b>订单归属只认令牌里的
+          身份</b>——改浏览器里的任何字段都越权不了。</div>
+      </div>
     </div>
+    <button class="iconbtn" id="favBtn" title="收藏夹" onclick="toggleFavOnly()">
+      <svg class="ico"><use href="#i-heart"/></svg>
+      <span class="n" id="favN" style="display:none">0</span>
+    </button>
   </div>
-  <a class="cartbtn"><svg class="ico"><use href="#i-cart"/></svg>购物车</a>
-  <a class="cartbtn" href="/merchant" style="margin-left:8px">商家后台</a>
 </div></header>
 
-<nav><div class="wrap">
-  <a>首页</a><a>女装<span class="tag">新</span></a><a>男装</a><a>鞋靴</a>
-  <a>箱包</a><a>配饰</a><a>会员中心</a><a>品质生活</a><a>企业采购</a>
-</div></nav>
-
 <div class="wrap">
-  <div class="hero">
-    <div class="side">
-      <a>女装 · 内衣<svg class="ico arrow"><use href="#i-chev"/></svg></a>
-      <a>男装 · 运动<svg class="ico arrow"><use href="#i-chev"/></svg></a>
-      <a>鞋靴 · 箱包<svg class="ico arrow"><use href="#i-chev"/></svg></a>
-      <a>美妆 · 个护<svg class="ico arrow"><use href="#i-chev"/></svg></a>
-      <a>手机 · 数码<svg class="ico arrow"><use href="#i-chev"/></svg></a>
-      <a>家电 · 家装<svg class="ico arrow"><use href="#i-chev"/></svg></a>
-      <a>母婴 · 玩具<svg class="ico arrow"><use href="#i-chev"/></svg></a>
-      <a>食品 · 生鲜<svg class="ico arrow"><use href="#i-chev"/></svg></a>
-      <a>汽车 · 工业<svg class="ico arrow"><use href="#i-chev"/></svg></a>
-    </div>
 
-    <div class="banner">
-      <img class="bg" src="/img/banner.jpg" alt="">
-      <div class="in">
-        <h1>多模态电商 AI 客服</h1>
-        <p>混合检索 · 引用溯源 · 越权校验 · 答不了就转人工</p>
-        <p style="margin-top:14px;font-size:13px">
-          点任意商品的<span class="kbd">联系客服</span>，会话自动带上该商品的
-          product_id —— 它决定检索过滤范围和查哪个 SKU 的库存
-        </p>
+  <!-- 首屏。第一屏是品牌语，后面几屏由真商品生成——
+       点「立即选购」直接开那件商品的详情，圆点是真的能切 -->
+  <section class="hero" id="hero"
+           onmouseenter="pauseHero()" onmouseleave="resumeHero()">
+    <div class="slide on" id="slide0">
+      <div class="txt">
+        <div class="eyebrow">新品系列</div>
+        <h1>让日常穿搭<br>更有质感</h1>
+        <p>从面料到版型，每一件都经得起细看</p>
+        <button class="cta" onclick="pickCat('全部')">开始选购
+          <svg class="ico"><use href="#i-arrow"/></svg></button>
       </div>
+      <div class="pic"><img src="/img/banner.jpg" alt=""></div>
     </div>
-
-    <div class="panel">
-      <div class="who">
-        <div class="avatar"><svg class="ico" style="width:22px;height:22px">
-          <use href="#i-svc"/></svg></div>
-        <div><b>智能客服在线</b>
-          <div class="note" style="margin-top:2px">7×24 小时</div></div>
-      </div>
-      <button class="btn-primary" onclick="openChat()">进入智能客服</button>
-      <button class="btn-ghost" onclick="toggleDiag();openChat()">
-        打开诊断面板</button>
-      <div class="note">
-        诊断面板会显示每一轮的意图、检索命中、词汇覆盖率、有没有转人工
-        以及为什么 —— 这些平时全是隐形的。
-      </div>
-      <div class="note" style="border-top:1px solid var(--line);padding-top:10px">
-        当前身份
-        <select id="who" onchange="switchIdentity(this.value)"
-                style="border:1px solid var(--line);padding:3px 6px;
-                       border-radius:2px;margin-left:4px">
-          <option value="demo">演示买家</option>
-          <option value="buyer2">另一位买家</option>
-          <option value="merchant">店铺管理员</option>
-        </select>
-        <span id="whoState" style="margin-left:6px;color:var(--ink-3)"></span>
-        <br>切换会重新登录换一个令牌。<b>订单归属只认令牌里的身份</b>——
-        改浏览器里的任何字段都越权不了。
+    <div class="dots" id="dots"></div>
+    <div class="coupon">
+      <svg class="gift"><use href="#i-gift"/></svg>
+      <div>
+        <b>首单立减 10%</b>
+        <em>新用户专享</em>
+        <div class="cd">距结束
+          <i id="cdH">00</i>时<i id="cdM">00</i>分<i id="cdS">00</i>秒</div>
+        <a class="go" onclick="openChat()">问问客服怎么用</a>
       </div>
     </div>
-  </div>
+  </section>
 
-  <div class="secthead">
-    <h2>猜你喜欢</h2>
-    <div class="tabs" id="tabs"></div>
-    <div class="line"></div>
-  </div>
-  <div class="grid" id="grid"></div>
+  <section class="feats">
+    <div class="feat"><svg><use href="#i-truck"/></svg>
+      <div><b>免费配送</b><em>订单满 299 元包邮</em></div></div>
+    <div class="feat"><svg><use href="#i-shield"/></svg>
+      <div><b>安全支付</b><em>全流程加密结算</em></div></div>
+    <div class="feat"><svg><use href="#i-return"/></svg>
+      <div><b>无忧退换</b><em>七天无理由退货</em></div></div>
+    <div class="feat"><svg><use href="#i-svc"/></svg>
+      <div><b>智能客服</b><em>7×24 小时随时问</em></div></div>
+  </section>
+
+  <section class="shop">
+    <aside class="cats">
+      <h3>按分类选购</h3>
+      <div id="cats"></div>
+    </aside>
+    <div>
+      <div class="sechead">
+        <h2 id="secTitle">新品上架</h2>
+        <span class="c" id="secCount"></span>
+        <button class="viewall" onclick="pickCat('全部')">查看全部</button>
+      </div>
+      <div class="grid" id="grid"></div>
+    </div>
+  </section>
 
   <footer>
     商品数据来自 <code>/api/products</code>，与客服工具层读同一张表 ——
@@ -491,7 +570,7 @@ footer code{background:#ececec;padding:1px 5px;border-radius:2px}
 <div class="detail" id="detail"></div>
 
 <button class="fab" id="fab" onclick="openChat()">
-  <svg><use href="#i-svc"/></svg>客服
+  <svg><use href="#i-svc"/></svg>智能客服
 </button>
 
 <div class="chat" id="chat">
@@ -516,7 +595,7 @@ footer code{background:#ececec;padding:1px 5px;border-radius:2px}
       <div class="trace" id="trace">
         <div class="th" onclick="toggleTrace()">
           <span id="traceCaret">▾</span><b>执行轨迹</b>
-          <span id="traceNow" style="color:var(--orange)"></span>
+          <span id="traceNow" style="color:var(--sand)"></span>
           <span class="sp"></span><span class="tot" id="traceTot"></span>
         </div>
         <div class="tb" id="traceBody"></div>
@@ -542,6 +621,125 @@ footer code{background:#ececec;padding:1px 5px;border-radius:2px}
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ================================================================ 身份
+
+   这一段原先是缺的：页面里调了 loadAuth / switchIdentity / authFetch，
+   三个函数一个都没定义 —— 于是 loadAuth() 抛 ReferenceError，把它后面的
+   loadProducts() 和 connect() 一起带走，整页既没有商品也连不上客服。
+   **报错只在控制台里**，页面看着像"接口挂了"，症状离病因隔了三层。
+
+   三个演示账号的密码都是 smartmall123（见 010_auth.sql 的种子）。
+   写死在前端是刻意的：这是演示页，不是登录流程；真实系统这里应该是
+   登录框。但**令牌仍然是后端签的**，前端拿到的只是一个不透明字符串，
+   改不出别人的身份来。 */
+const IDENTITIES = [
+  {key:'demo',     name:'演示买家',   note:'买家 · 有历史订单可查'},
+  {key:'buyer2',   name:'另一位买家', note:'买家 · 用来验越权拦得住'},
+  {key:'merchant', name:'店铺管理员', note:'商家 · 能发货、审退款'},
+];
+const PASSWORD = 'smartmall123';
+
+let auth = null;
+let switching = '';
+
+function loadAuth(){
+  try{ auth = JSON.parse(localStorage.getItem('smartmall.auth') || 'null'); }
+  catch(e){ auth = null; }
+  renderAcct();
+}
+
+function saveAuth(a){
+  auth = a;
+  try{ localStorage.setItem('smartmall.auth', JSON.stringify(a)); }catch(e){}
+  renderAcct();
+}
+
+/* 带令牌的 fetch。**唯一出口**——散着手写 headers 迟早漏一个，
+   而漏掉的表现是 1401，看起来像"功能坏了"而不是"没带令牌"。 */
+function authFetch(url, opts){
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {});
+  if (auth && auth.token) headers['Authorization'] = 'Bearer ' + auth.token;
+  return fetch(url, Object.assign({}, opts, {headers}));
+}
+
+async function switchIdentity(key){
+  if (switching) return;
+  switching = key;
+  renderAcct();
+  try{
+    const r = await fetch('/api/auth/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username:key, password:PASSWORD}),
+    });
+    const d = await r.json();
+    if (d.code !== 0){
+      // 登录失败要说清是哪一层的问题：订单服务没起来是演示时最常见的情况，
+      // 而"登录失败"四个字会让人去查密码
+      bubble('sys', `切换身份失败：${d.message || '未知错误'}`
+        + (d.code === 9503 ? '（订单服务 mall-product:8081 没起来，'
+                           + '在仓库根跑 make run-product）' : ''));
+      openChat();
+      return null;
+    }
+    saveAuth(d.data);
+    // 换了人就换一个会话：上一位买家问过的订单不该出现在下一位的上下文里
+    sessionId = null;
+    return d.data;
+  }catch(e){
+    bubble('sys', `切换身份失败：${e.message || e}`);
+    openChat();
+    return null;
+  }finally{
+    switching = '';
+    renderAcct();
+  }
+}
+
+function renderAcct(){
+  const cur = auth ? (auth.nickname || auth.username || '') : '';
+  $('#acctMe').innerHTML = auth
+    ? `<div class="avatar"><svg class="ico" style="width:18px;height:18px">
+         <use href="#i-user"/></svg></div>
+       <div><b>${esc(cur)}</b>
+         <em>#${esc(auth.userId)} · ${auth.role === 'merchant' ? '商家' : '买家'}</em>
+       </div>`
+    : `<div class="avatar"><svg class="ico" style="width:18px;height:18px">
+         <use href="#i-user"/></svg></div><div><b>未登录</b>
+       <em>选一个身份开始</em></div>`;
+
+  $('#acctList').innerHTML = IDENTITIES.map(id => {
+    const on = auth && auth.username === id.key;
+    const busy = switching === id.key;
+    return `<button class="idn ${on ? 'on' : ''}"
+              ${switching ? 'disabled' : ''} onclick="switchIdentity('${id.key}')">
+      <span class="t"><b>${esc(id.name)}</b><em>${esc(id.note)}</em></span>
+      <span class="ck">${busy ? '…' : '✓'}</span></button>`;
+  }).join('');
+
+  $('#userBtn').title = auth ? `${cur}（点击切换账号）` : '点击登录';
+}
+
+function toggleAcct(e){
+  e.stopPropagation();
+  const on = $('#acct').classList.toggle('open');
+  $('#userBtn').classList.toggle('on', on);
+}
+function closeAcct(){
+  $('#acct').classList.remove('open');
+  $('#userBtn').classList.remove('on');
+}
+document.addEventListener('click', ev => {
+  if (!ev.target.closest('.acctwrap')) closeAcct();
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key !== 'Escape') return;
+  closeAcct();
+  if ($('#detail').classList.contains('open')) closeDetail();
+});
+
+/* ================================================================ 执行轨迹 */
 
 /* 节点中文名由服务端随事件下发（nodes.NODE_LABELS），前端不再维护一份——
    两处各写一份必然漂移，而漂移的表现是页面显示英文函数名 */
@@ -626,8 +824,8 @@ const AGENTS = {
     hello: '说说想买什么、预算多少，我从在售商品里帮你挑。'
          + '没有符合条件的我会直说，不会硬推。',
     placeholder: '想买什么？说说预算和场合…',
-    quick: () => ['想买件通勤穿的外套，预算五百','有没有三百以内的针织衫',
-                  '要藏青色的 M 码','送人的，看着体面一点'],
+    quick: () => ['想要件通勤穿的外套','预算 300 以内','有没有米白色的',
+                  '秋天穿的针织衫'],
   },
 };
 
@@ -654,7 +852,7 @@ function sayHello(){
   bubble('sys', AGENTS[agentMode].hello);
 }
 
-/* ---------------------------------------------------------------- 商品 */
+/* ================================================================ 商品 */
 
 async function loadProducts(){
   try{
@@ -668,62 +866,201 @@ async function loadProducts(){
 
   if (!products.length){
     // 商品挂了不该让整页白屏，客服入口仍然可用
-    $('#grid').innerHTML = `<div style="grid-column:1/-1;background:#fff;
-      padding:40px;text-align:center;color:var(--ink-3)">
+    $('#grid').innerHTML = `<div class="empty">
       商品数据读取失败。${esc(lastProductsError || '')}<br>
       多半是应用连库的账号不对：迁移用的是 root，而应用默认用
-      <code>smartmall/smartmall</code>。跑一次
-      <code>db-init</code> 会把这个账号建出来。<br>
+      <code>smartmall/smartmall</code>。跑一次 <code>db-init</code>
+      会把这个账号建出来。<br>
       客服功能不受影响，右下角可直接进入。</div>`;
     return;
   }
-  renderTabs();
+  renderCats();
   renderGrid();
+  buildHero();
 }
 
-function renderTabs(){
+function renderCats(){
   const cats = ['全部', ...new Set(products.map(p => p.category).filter(Boolean))];
-  $('#tabs').innerHTML = cats.map(c =>
-    `<button class="${c===cat?'on':''}" onclick="pickCat('${esc(c)}')">${esc(c)}</button>`
-  ).join('');
+  $('#cats').innerHTML = cats.map(c =>
+    `<button class="${c === cat ? 'on' : ''}" onclick="pickCat('${esc(c)}')">
+       ${esc(c)}<svg class="ico"><use href="#i-arrow"/></svg></button>`).join('');
 }
-function pickCat(c){ cat = c; renderTabs(); renderGrid(); }
+
+function pickCat(c){
+  cat = c;
+  favOnly = false;
+  $('#favBtn').classList.remove('on');
+  renderCats();
+  renderGrid();
+}
 
 function imgFor(p){
   // main_image 来自数据库；005 没跑时为空，退化成一块占位底色而不是碎图
   return p.main_image ? `/img/${encodeURIComponent(p.main_image)}` : '';
 }
 
+/* ---------------------------------------------------------------- 收藏
+
+   卡片上那个爱心必须真的存点什么，否则它就是个点了没反应的装饰件。
+   只存在浏览器本地：这是"看着顺眼先记一下"，不是购物车，没有必要
+   为它开一张表、也没有必要让它跟着账号走。 */
+let favs = new Set();
+let favOnly = false;
+
+function loadFavs(){
+  try{ favs = new Set(JSON.parse(localStorage.getItem('smartmall.favs') || '[]')); }
+  catch(e){ favs = new Set(); }
+  renderFavCount();
+}
+
+function toggleFav(id, ev){
+  ev.stopPropagation();
+  favs.has(id) ? favs.delete(id) : favs.add(id);
+  try{ localStorage.setItem('smartmall.favs', JSON.stringify([...favs])); }catch(e){}
+  renderFavCount();
+  renderGrid();
+}
+
+function renderFavCount(){
+  const n = $('#favN');
+  n.textContent = favs.size;
+  n.style.display = favs.size ? '' : 'none';
+}
+
+function toggleFavOnly(){
+  favOnly = !favOnly;
+  $('#favBtn').classList.toggle('on', favOnly);
+  renderGrid();
+}
+
+/* 颜色名 → 色值。**认不出来的不画**：随手给个灰色块，页面就是在替这件
+   商品声明一个它没有的颜色，而买家是照着色块下单的 */
+const SWATCH = {
+  '白':'#ffffff', '米白':'#efe7db', '米色':'#e8ddc9', '象牙白':'#f2ece0',
+  '黑':'#1a1a1a', '灰':'#9a9a9a', '深灰':'#4a4a4a', '浅灰':'#cfcfcf',
+  '藏青':'#2b3a55', '蓝':'#3b5b8c', '浅蓝':'#a8c4dc', '天蓝':'#8fb8d8',
+  '焦糖':'#a8703c', '棕':'#7a5230', '驼':'#b98d5f', '卡其':'#c8b18d',
+  '红':'#c0392b', '酒红':'#7b2233', '粉':'#e8c0c8',
+  '绿':'#3d7a52', '墨绿':'#2f4438', '黄':'#e0b23c', '紫':'#6b4c8c',
+};
+
+function swatchOf(name){
+  if (SWATCH[name]) return SWATCH[name];
+  // "米白色" / "藏青蓝" 这类带后缀的，取最长的匹配前缀
+  const hit = Object.keys(SWATCH)
+    .filter(k => String(name).includes(k))
+    .sort((a, b) => b.length - a.length)[0];
+  return hit ? SWATCH[hit] : '';
+}
+
+function colorsOf(p){
+  const out = [];
+  (p.skus || []).forEach(s => {
+    let v = s.spec;
+    if (typeof v === 'string'){ try{ v = JSON.parse(v); }catch(e){ return; } }
+    const name = (v || {})['颜色'];
+    if (!name) return;
+    const hex = swatchOf(name);
+    if (hex && !out.some(x => x.hex === hex)) out.push({name, hex});
+  });
+  return out;
+}
+
+function visible(){
+  let list = cat === '全部' ? products : products.filter(p => p.category === cat);
+  if (favOnly) list = list.filter(p => favs.has(p.id));
+  return list;
+}
+
 function renderGrid(){
-  const list = cat === '全部' ? products : products.filter(p => p.category === cat);
+  const list = visible();
+  $('#secTitle').textContent = favOnly ? '我的收藏'
+                             : (cat === '全部' ? '新品上架' : cat);
+  $('#secCount').textContent = list.length ? `共 ${list.length} 件` : '';
+
+  if (!list.length){
+    $('#grid').innerHTML = `<div class="empty">${favOnly
+      ? '收藏夹还是空的。点商品图右上角的爱心可以收一件。'
+      : '这个分类下暂时没有商品。'}</div>`;
+    return;
+  }
+
   $('#grid').innerHTML = list.map(p => {
     const src = imgFor(p);
     const off = p.origin_price && p.origin_price > p.price;
+    const on = favs.has(p.id);
     return `<div class="card" onclick="openDetail(${p.id})">
       <div class="ph">
-        ${src ? `<img src="${src}" alt="${esc(p.name)}" loading="lazy">`
-              : `<div style="height:100%;background:#f0f0f0"></div>`}
+        ${src ? `<img src="${src}" alt="${esc(p.name)}" loading="lazy">` : ''}
+        <button class="fav ${on ? 'on' : ''}" onclick="toggleFav(${p.id},event)"
+                title="${on ? '取消收藏' : '收藏'}">
+          <svg class="ico"><use href="#i-heart${on ? '-fill' : ''}"/></svg></button>
         ${p.in_stock ? '' : '<div class="oos"><b>已售罄</b></div>'}
       </div>
-      <div class="body">
-        <div class="price"><i>¥</i>${p.price.toFixed(0)}${
-          off ? `<del>¥${p.origin_price.toFixed(0)}</del>` : ''}</div>
-        <div class="title"><span class="mark">自营</span>${esc(p.name)}</div>
-        <div class="badges">
-          <span>七天无理由</span><span>顺丰包邮</span>
-          ${off ? '<span>限时特惠</span>' : ''}
-        </div>
-        <div class="cardfoot">
-          <span class="shop">smartMall 旗舰店</span>
-          <span class="ask" onclick="event.stopPropagation();askProduct(${p.id})">
-            <svg class="ico"><use href="#i-svc"/></svg>联系客服</span>
-        </div>
-      </div>
+      <div class="nm">${esc(p.name)}</div>
+      <div class="pr">¥${p.price.toFixed(2)}${
+        off ? `<del>¥${p.origin_price.toFixed(2)}</del>` : ''}</div>
+      <div class="sw">${colorsOf(p).map(c =>
+        `<i style="background:${c.hex}" title="${esc(c.name)}"></i>`).join('')}</div>
+      <span class="ask" onclick="event.stopPropagation();askProduct(${p.id})">
+        <svg class="ico"><use href="#i-svc"/></svg>联系客服</span>
     </div>`;
   }).join('');
 }
 
-/* ---------------------------------------------------------------- 详情 */
+/* ---------------------------------------------------------------- 首屏轮播
+
+   第一屏是品牌语，后面几屏用真商品生成：圆点切的是真内容，
+   「立即选购」开的是那件商品的详情页。做成三张静态图配三个假圆点，
+   演示时点一下没反应就得当场解释，那比没有轮播还难看。 */
+let heroAt = 0, heroTimer = null, heroPaused = false;
+
+function buildHero(){
+  document.querySelectorAll('.hero .slide:not(#slide0)').forEach(el => el.remove());
+  const picks = products.filter(p => imgFor(p)).slice(0, 3);
+  const hero = $('#hero');
+  const dots = $('#dots');
+
+  picks.forEach((p, i) => {
+    const el = document.createElement('div');
+    el.className = 'slide';
+    el.innerHTML = `
+      <div class="txt">
+        <div class="eyebrow">${esc(p.category || '本季精选')}</div>
+        <h1>${esc(p.name)}</h1>
+        <p>¥${p.price.toFixed(2)}　${p.in_stock ? '现货在售' : '暂时售罄'}</p>
+        <button class="cta" onclick="openDetail(${p.id})">立即选购
+          <svg class="ico"><use href="#i-arrow"/></svg></button>
+      </div>
+      <div class="pic"><img src="${imgFor(p)}" alt="${esc(p.name)}"></div>`;
+    hero.insertBefore(el, dots);
+  });
+
+  const total = picks.length + 1;
+  dots.innerHTML = Array.from({length: total}, (_, i) =>
+    `<button class="${i === 0 ? 'on' : ''}" onclick="goHero(${i})"
+             title="第 ${i + 1} 屏"></button>`).join('');
+  heroAt = 0;
+  if (total > 1) startHero();
+}
+
+function goHero(i){
+  const slides = document.querySelectorAll('.hero .slide');
+  if (!slides.length) return;
+  heroAt = (i + slides.length) % slides.length;
+  slides.forEach((el, n) => el.classList.toggle('on', n === heroAt));
+  document.querySelectorAll('#dots button')
+    .forEach((b, n) => b.classList.toggle('on', n === heroAt));
+}
+
+function startHero(){
+  clearInterval(heroTimer);
+  heroTimer = setInterval(() => { if (!heroPaused) goHero(heroAt + 1); }, 6000);
+}
+function pauseHero(){ heroPaused = true; }
+function resumeHero(){ heroPaused = false; }
+
+/* ================================================================ 详情 */
 
 function openDetail(id){
   const p = products.find(x => x.id === id);
@@ -757,15 +1094,14 @@ function openDetail(id){
   $('#detail').innerHTML = `
     <button class="x" onclick="closeDetail()">×</button>
     <div class="dtop">
-      <div>${src ? `<img src="${src}" alt="${esc(p.name)}">`
-                 : '<div style="aspect-ratio:1;background:#f0f0f0"></div>'}</div>
+      <div class="dpic">${src ? `<img src="${src}" alt="${esc(p.name)}">` : ''}</div>
       <div>
         <h3>${esc(p.name)}</h3>
+        <div class="sub">${esc(p.subtitle || p.category || '')}</div>
         <div class="pricebar">
-          <span class="now"><i>¥</i>${p.price.toFixed(2)}</span>
+          <span class="now">¥${p.price.toFixed(2)}</span>
           ${off ? `<del>¥${p.origin_price.toFixed(2)}</del>` : ''}
-          <div style="font-size:12px;color:var(--ink-3);margin-top:6px">
-            价格与库存实时来自工具层，客服回答用的是同一份数据</div>
+          <div class="hint">价格与库存实时来自工具层，客服回答用的是同一份数据</div>
         </div>
         <div class="drow"><span class="k">规格</span>
           <div class="skus">${skus || '<span style="color:#bbb">暂无</span>'}</div></div>
@@ -849,7 +1185,7 @@ function searchAsk(e){
   askAbout(t);
 }
 
-/* ---------------------------------------------------------------- 客服 */
+/* ================================================================ 客服 */
 
 function connect(){
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://')
@@ -863,6 +1199,7 @@ function connect(){
 }
 
 function openChat(){
+  closeAcct();
   $('#chat').classList.add('open');
   $('#fab').classList.add('hide');
   renderCtx();
@@ -875,10 +1212,10 @@ function closeChat(){
 }
 function toggleDiag(){
   const on = $('#chat').classList.toggle('wide');
-  $('#diagBtn').style.background = on ? 'rgba(255,255,255,.42)' : '';
+  $('#diagBtn').style.background = on ? 'rgba(255,255,255,.4)' : '';
 }
 
-/* ---------------------------------------------------------------- 下单 */
+/* ================================================================ 下单 */
 
 function uuid(){
   // crypto.randomUUID 要求安全上下文。127.0.0.1 算安全上下文，
@@ -900,6 +1237,10 @@ async function buyNow(){
   // 这里只是少发一个请求
   if (placing) return;
 
+  if (!auth){
+    orderMsg('err', '请先在右上角选一个身份 —— 订单归属只认令牌里的身份。');
+    return;
+  }
   if (!selectedSku){
     orderMsg('err', '请先选择规格。');
     return;
@@ -933,6 +1274,14 @@ async function buyNow(){
             ? '<br><span class="hint">订单服务（mall-product:8081）没起来，'
             + '在仓库根跑 <code>make run-product</code></span>'
             : ''));
+      return;
+    }
+    if (!d.data){
+      // code=0 但没有订单体。**不能直接往下读 d.data.idempotentHit**——
+      // 那会抛一句 "Cannot read properties of null"，被 catch 抓住之后
+      // 原样显示给买家看，而他既看不懂也做不了任何事（实测踩到）
+      orderMsg('err', '下单接口没有返回订单信息。'
+        + '<span class="hint">多半是中间隔了一层代理，去看 ai-agent 的日志。</span>');
       return;
     }
 
@@ -1068,7 +1417,16 @@ async function orderAction(orderNo, action, verbs, body, isAdmin){
     if (d.code !== 0){
       // 失败也要把当前真实状态显示出来，而不是只报一句错——超时被自动取消
       // 那一刻点支付就会走到这里，用户需要知道单没了、钱没扣
-      orderMsg('err', `${verbs.fail}：${esc(d.message || '未知错误')}`);
+      orderMsg('err', `${verbs.fail}：${esc(d.message || '未知错误')}`
+        + (d.code === 1403
+            ? '<br><span class="hint">当前身份没有这个权限。'
+            + '发货、审退款要商家身份 —— 右上角换成「店铺管理员」再试。</span>'
+            : ''));
+      return;
+    }
+    if (!d.data){
+      orderMsg('err', `${verbs.ok}，但接口没有回订单信息。`
+        + '<span class="hint">去看 ai-agent 的日志。</span>');
       return;
     }
     renderOrder(d.data, d.data.idempotentHit ? verbs.again : verbs.ok);
@@ -1138,7 +1496,7 @@ function renderCtx(){
     ctx.style.display = 'flex';
     ctx.innerHTML = (src ? `<img src="${src}" alt="">` : '')
       + `<div>正在咨询：${esc(current.short_name || current.name)}
-         <span style="color:var(--orange)">¥${current.price.toFixed(0)}</span></div>`;
+         <b>¥${current.price.toFixed(0)}</b></div>`;
   } else {
     ctx.style.display = 'none';
   }
@@ -1310,62 +1668,51 @@ const kv = (k,v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
 function renderShoppingDiag(ev){
   /* 导购要看的东西和客服完全不同：客服看"这句话有没有依据"，
      导购看**收敛到哪一步了**。把命中率相似度搬过来是没意义的，
-     它一条都没检索。 */
-  const d = ev.debug || {};
-  const n = d.candidate_count ?? 0;
-  let h = '<h3>本轮</h3>'
-    + kv('已知需求', esc(d.need_text || '—'))
-    + kv('候选商品', n === 0
-        ? '<span class="tag no">0 件</span>' : `<span class="tag yes">${n} 件</span>`)
-    + kv('结果', {recommend:'给出推荐', ask:'追问收窄',
-                  no_match:'没有合适的', blocked:'已拦截'}[ev.outcome] || '-')
-    + kv('已追问', (d.asked ?? 0) + ' 轮')
-    + kv('耗时', (d.latency_ms?.total ?? 0) + ' ms');
-  // 放宽过条件必须显眼：用户以为这几件是符合他要求的
-  if (d.relaxed?.length)
-    h += kv('已放宽', `<span class="tag no">${esc(d.relaxed.join('、'))}</span>`);
-  // 工具挂了和"确实没货"在对话里长得一模一样，只有这里分得出来
-  if (d.error) h += kv('工具故障', `<span class="tag no">${esc(d.error)}</span>`);
+     导购一条检索都不发。 */
+  const d = ev.trace || {};
+  const need = ev.need || {};
+  let h = '<h3>已知需求</h3>';
+  const NEED_CN = {category:'品类', budget_max:'预算上限', budget_min:'预算下限',
+                   colors:'颜色', sizes:'尺码', scene:'场合'};
+  const rows = Object.entries(need).filter(([, v]) =>
+    v !== null && v !== undefined && !(Array.isArray(v) && !v.length));
+  h += rows.length
+    ? rows.map(([k, v]) => kv(NEED_CN[k] || k,
+        esc(Array.isArray(v) ? v.join('、') : v))).join('')
+    : '<div class="hit">还没问出任何条件</div>';
 
-  const need = d.need || {};
-  const rows = [['品类', need.category], ['颜色', (need.colors||[]).join('/')],
-                ['尺码', (need.sizes||[]).join('/')], ['场景', need.scene],
-                ['预算', need.price_min || need.price_max
-                  ? `${need.price_min ?? ''}~${need.price_max ?? ''}` : '']];
-  if (rows.some(([, v]) => v)){
-    h += '<h3>抽取到的条件</h3>';
-    rows.forEach(([k, v]) => { if (v) h += kv(k, esc(v)); });
-  }
+  h += '<h3>候选商品</h3>';
+  h += kv('候选数', ev.candidate_count ?? 0);
+  if (ev.relaxed?.length) h += kv('已放宽', esc(ev.relaxed.join('、')));
+  if (ev.question) h += kv('追问', esc(ev.question));
+  if (ev.outcome) h += kv('结果', esc(ev.outcome));
   if (d.tools_called?.length){
-    h += '<h3>商品检索</h3>';
-    d.tools_called.forEach((t, i) => h += `<div class="hit"><div class="t">
-      <span><svg class="ico"><use href="#i-tool"/></svg> 第 ${i+1} 次</span>
-      <span>${t.latency_ms}ms ${t.hit ? '有结果' : '零条'}</span></div></div>`);
+    h += '<h3>工具调用</h3>';
+    d.tools_called.forEach(t => h += `<div class="hit"><div class="t">
+      <span><svg class="ico"><use href="#i-tool"/></svg> ${esc(t.name)}</span>
+      <span>${t.latency_ms}ms ${t.hit ? '命中' : '无数据'}</span></div></div>`);
   }
   if (ev.recommended?.length){
-    h += '<h3>推荐商品</h3>';
-    ev.recommended.forEach(r => h += `<div class="hit">
-      <div class="t"><span>#${r.id}</span><span>¥${Number(r.price||0).toFixed(0)}</span></div>
-      <div>${esc(r.name)}</div></div>`);
+    h += '<h3>推荐</h3>';
+    ev.recommended.forEach(r => h += `<div class="hit">${esc(r.name)}
+      <span style="float:right">¥${Number(r.price || 0).toFixed(0)}</span></div>`);
   }
   $('#diag').innerHTML = h;
 }
 
 function renderDiag(ev){
-  if (agentMode === 'shopping') return renderShoppingDiag(ev);
-  const d = ev.debug || {};
-  let h = '<h3>本轮</h3>' + kv('意图', ev.intent || '-')
-        + kv('命中', d.hit_count ?? 0)
-        + kv('最高相似度', (d.max_score ?? 0).toFixed(3))
-        + kv('耗时', (d.latency_ms?.total ?? 0) + ' ms');
-  if (d.rewritten_query) h += kv('改写', esc(d.rewritten_query));
+  if (agentMode === 'shopping'){ renderShoppingDiag(ev); return; }
+  const d = ev.trace || {};
+  let h = '<h3>本轮</h3>';
+  h += kv('意图', esc(d.intent || '-'));
+  h += kv('命中', `${d.retrieval_hit_count ?? 0} 条`);
+  h += kv('最高相似度', (d.retrieval_max_score ?? 0).toFixed(3));
+  h += kv('词汇覆盖率', (d.retrieval_lexical_overlap ?? 0).toFixed(3));
+  if (d.rewritten_query) h += kv('改写为', esc(d.rewritten_query));
+  if (d.latency_ms) h += kv('总耗时', (d.latency_ms.total ?? 0) + 'ms');
   if (d.image_kind){
-    h += '<h3>图片理解</h3>' + kv('类型', {
-      product:'商品图', document:'单据/截图', other:'看不清'
-    }[d.image_kind] || d.image_kind);
-    if (d.latency_ms?.vision != null) h += kv('看图耗时', d.latency_ms.vision + ' ms');
-    // 脱敏命中平时应该是 0。**非 0 要显眼**——那说明提示词没拦住，
-    // 模型把个人信息转述出来了，只是被规则兜住了
+    h += '<h3>图片</h3>';
+    h += kv('类型', esc(d.image_kind));
     const pii = d.image_pii_hits || {};
     const n = Object.values(pii).reduce((a,b) => a + b, 0);
     h += kv('脱敏命中', n
@@ -1401,7 +1748,7 @@ function renderDiag(ev){
   $('#diag').innerHTML = h;
 }
 
-/* 促销倒计时。纯装饰，走到当天 24 点——写死一个"还剩 22 小时"的静态数字，
+/* 首单券倒计时。纯装饰，走到当天 24 点——写死一个"还剩 22 小时"的静态数字，
    在演示里被看出来很尴尬 */
 function tick(){
   const end = new Date(); end.setHours(24,0,0,0);
@@ -1413,6 +1760,7 @@ function tick(){
 }
 tick(); setInterval(tick, 1000);
 
+loadFavs();
 loadAuth();
 // 没有令牌就先按演示买家登录一次，否则页面一进来就点不了下单
 if (!auth) switchIdentity('demo');
