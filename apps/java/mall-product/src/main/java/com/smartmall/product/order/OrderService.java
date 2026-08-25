@@ -94,7 +94,7 @@ public class OrderService {
      * 时事务还没结束，扣掉的库存不会回滚，就会凭空少一件货。事务边界必须
      * 严格小于 catch 的范围，而这一点用注解表达不出来。
      */
-    public OrderView place(CreateOrderRequest req) {
+    public OrderView place(CreateOrderRequest req, Long userId) {
         // 快路径：用户手抖双击、前端超时重试。绝大多数重复提交在这里就返回了，
         // 不进事务、不碰库存
         MallOrder hit = orderMapper.findByRequestId(req.requestId());
@@ -104,7 +104,7 @@ public class OrderService {
         }
 
         try {
-            MallOrder created = tx.execute(status -> doPlace(req));
+            MallOrder created = tx.execute(status -> doPlace(req, userId));
             return OrderView.of(created, false, paymentTtl);
         } catch (DuplicateKeyException e) {
             // 慢路径：两个同 request_id 的请求并发，快路径都没命中。
@@ -122,7 +122,7 @@ public class OrderService {
     }
 
     /** 事务体：扣库存 → 建单。两步任一失败，整笔回滚。 */
-    private MallOrder doPlace(CreateOrderRequest req) {
+    private MallOrder doPlace(CreateOrderRequest req, Long userId) {
         int affected = skuMapper.deductStock(req.skuNo(), req.quantity());
         if (affected == 0) {
             // 扣减失败有三种原因，回查一次把它们分开——直接回「下单失败」
@@ -149,7 +149,7 @@ public class OrderService {
         MallOrder order = new MallOrder();
         order.setOrderNo(nextOrderNo());
         order.setRequestId(req.requestId());
-        order.setUserId(req.userId());
+        order.setUserId(userId);
         order.setProductId(sku.getProductId());
         order.setSkuNo(sku.getSkuNo());
         order.setSpec(sku.getSpec() == null ? "" : sku.getSpec());

@@ -1,6 +1,7 @@
 package com.smartmall.product.order;
 
 import com.smartmall.common.api.ApiResponse;
+import com.smartmall.product.auth.web.CurrentUser;
 import com.smartmall.product.order.dto.CreateOrderRequest;
 import com.smartmall.product.order.dto.OrderView;
 import com.smartmall.product.order.dto.RefundRequest;
@@ -35,31 +36,37 @@ public class OrderController {
 
     @PostMapping
     @Operation(summary = "下单", description = "扣库存与建单同事务；requestId 相同的重复提交只产生一笔")
-    public ApiResponse<OrderView> create(@Valid @RequestBody CreateOrderRequest req) {
-        return ApiResponse.ok(orderService.place(req));
+    public ApiResponse<OrderView> create(@Valid @RequestBody CreateOrderRequest req,
+                                         @CurrentUser Long userId) {
+        return ApiResponse.ok(orderService.place(req, userId));
     }
 
     // 绑定名一律显式写出。父 POM 已经开了编译器的 -parameters，靠推断本也能work，
     // 但那意味着一个构建参数没了、接口就在运行时炸——显式写死两个字符的成本，
-    // 换掉对编译选项的隐式依赖
+    // 换掉对编译选项的隐式依赖。
+    //
+    // userId 不再从参数来：**它此前是 @RequestParam，也就是调用方自己填的**。
+    // OrderService 里的归属校验（!order.getUserId().equals(userId)）写得是对的，
+    // 但条件里那个 userId 本身就是攻击者填的，校验形同虚设。现在它只可能
+    // 来自 JwtAuthFilter 校验过签名的令牌
     @PostMapping("/{orderNo}/pay")
     @Operation(summary = "支付", description = "重复支付幂等返回成功；已取消的订单报错，不会改成已支付")
     public ApiResponse<OrderView> pay(@PathVariable("orderNo") String orderNo,
-                                      @RequestParam("userId") Long userId) {
+                                      @CurrentUser Long userId) {
         return ApiResponse.ok(orderService.pay(orderNo, userId));
     }
 
     @PostMapping("/{orderNo}/cancel")
     @Operation(summary = "取消订单", description = "回补库存。仅待支付可取消，且至多回补一次")
     public ApiResponse<OrderView> cancel(@PathVariable("orderNo") String orderNo,
-                                         @RequestParam("userId") Long userId) {
+                                         @CurrentUser Long userId) {
         return ApiResponse.ok(orderService.cancel(orderNo, userId));
     }
 
     @PostMapping("/{orderNo}/confirm")
     @Operation(summary = "确认收货", description = "shipped/delivered → completed")
     public ApiResponse<OrderView> confirm(@PathVariable("orderNo") String orderNo,
-                                          @RequestParam("userId") Long userId) {
+                                          @CurrentUser Long userId) {
         return ApiResponse.ok(orderService.confirmReceipt(orderNo, userId));
     }
 
@@ -67,7 +74,7 @@ public class OrderController {
     @Operation(summary = "申请退款",
             description = "只挂起等审核，不动钱也不动库存——放款需要人点头")
     public ApiResponse<OrderView> applyRefund(@PathVariable("orderNo") String orderNo,
-                                              @RequestParam("userId") Long userId,
+                                              @CurrentUser Long userId,
                                               @Valid @RequestBody RefundRequest req) {
         return ApiResponse.ok(orderService.applyRefund(orderNo, userId, req.reason()));
     }
@@ -75,7 +82,7 @@ public class OrderController {
     @GetMapping("/{orderNo}")
     @Operation(summary = "查询订单", description = "不属于该用户的订单返回「订单不存在」，不泄露存在性")
     public ApiResponse<OrderView> get(@PathVariable("orderNo") String orderNo,
-                                      @RequestParam("userId") Long userId) {
+                                      @CurrentUser Long userId) {
         return ApiResponse.ok(orderService.get(orderNo, userId));
     }
 }

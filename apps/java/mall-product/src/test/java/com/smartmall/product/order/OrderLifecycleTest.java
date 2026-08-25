@@ -61,7 +61,7 @@ class OrderLifecycleTest {
 
     OrderView place(int qty) {
         return orderService.place(new CreateOrderRequest(
-                UUID.randomUUID().toString(), USER, "S-L", qty));
+                UUID.randomUUID().toString(), "S-L", qty), USER);
     }
 
     int stock() {

@@ -52,3 +52,19 @@ CREATE TABLE mall_order (
     CONSTRAINT uk_order_no   UNIQUE (order_no),
     CONSTRAINT uk_request_id UNIQUE (request_id)
 );
+
+-- 用户与角色。与 deploy/sql/migrations/010_auth.sql 对齐。
+--
+-- 种子密码统一 smartmall123（BCrypt 工作因子 10），哈希是实算并 checkpw
+-- 验过的——凭印象抄一个示例哈希的话，登录测试会一直红而且看不出为什么。
+CREATE TABLE IF NOT EXISTS mall_user (
+    id            BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    username      VARCHAR(64)  NOT NULL,
+    password_hash VARCHAR(100) NOT NULL,
+    nickname      VARCHAR(64)  NOT NULL DEFAULT '',
+    role          VARCHAR(16)  NOT NULL DEFAULT 'customer',
+    status        VARCHAR(16)  NOT NULL DEFAULT 'active',
+    created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_username UNIQUE (username)
+);

@@ -4,7 +4,6 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 
 /**
@@ -13,10 +12,10 @@ import jakarta.validation.constraints.Size;
  * <p><b>注意这里没有 price 字段，是刻意的。</b>金额由服务端按 SKU 表算，
  * 客户端传不进来。让前端传价格，等于把改价权交给任何会开浏览器控制台的人。
  *
- * <p><b>userId 目前从请求体传，这是个已知的临时方案。</b>真实系统里它必须
- * 来自会话或 JWT——现在这样，任何人都能以任意身份下单。项目还没有认证体系
- * （M0–M7 路线图里没排），所以这里先显式地把它标出来，而不是假装安全。
- * 接入认证时改动只在控制器一层：把参数换成从 SecurityContext 取。
+ * <p><b>这里也没有 userId，同样是刻意的。</b>它曾经在这个请求体里，那意味着
+ * 「任何人都能以任意身份下单」——而 OrderService 的归属校验恰好拿它当条件，
+ * 于是校验形同虚设。现在身份只从 JWT 的签名里来（{@code @CurrentUser}），
+ * 请求体里再也没有可以冒充别人的字段。
  */
 public record CreateOrderRequest(
 
@@ -27,10 +26,6 @@ public record CreateOrderRequest(
         @NotBlank(message = "requestId 不能为空")
         @Size(max = 64, message = "requestId 最长 64 字符")
         String requestId,
-
-        @NotNull(message = "userId 不能为空")
-        @Positive(message = "userId 必须为正")
-        Long userId,
 
         @NotBlank(message = "skuNo 不能为空")
         @Size(max = 64, message = "skuNo 最长 64 字符")

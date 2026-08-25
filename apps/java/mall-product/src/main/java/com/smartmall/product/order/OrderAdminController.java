@@ -1,6 +1,7 @@
 package com.smartmall.product.order;
 
 import com.smartmall.common.api.ApiResponse;
+import com.smartmall.product.auth.web.RequireMerchant;
 import com.smartmall.product.order.dto.OrderView;
 import com.smartmall.product.order.dto.RefundRequest;
 import com.smartmall.product.order.dto.ShipRequest;
@@ -21,15 +22,17 @@ import org.springframework.web.bind.annotation.RestController;
  * 是裸奔的。这里没有假装安全，而是把它写出来。
  *
  * <p><b>单独开一个 {@code /admin} 前缀就是为了这件事。</b>商家动作与用户
- * 动作混在同一个控制器里，将来接入认证时得一个方法一个方法地判断该不该拦，
- * 漏一个就是一个洞；分开之后，一条路径前缀规则就能把整片挡住。
+ * 动作混在同一个控制器里，接入认证时得一个方法一个方法地判断该不该拦，
+ * 漏一个就是一个洞；分开之后，类上一个 {@link RequireMerchant} 就把整片挡住了
+ * ——这个预留在补权限时真的省了事。
  *
  * <p>用户侧动作（下单、支付、取消、确认收货、申请退款）在
  * {@link OrderController}，那些靠 userId 校验归属。
  */
+@RequireMerchant
 @RestController
 @RequestMapping("/api/product/admin/orders")
-@Tag(name = "订单·商家", description = "发货 · 送达 · 退款审核（⚠️ 暂无鉴权）")
+@Tag(name = "订单·商家", description = "发货 · 送达 · 退款审核（仅 merchant 角色）")
 public class OrderAdminController {
 
     private final OrderService orderService;

@@ -58,7 +58,7 @@ class OrderServiceTest {
     }
 
     static CreateOrderRequest req(String skuNo, int qty) {
-        return new CreateOrderRequest(UUID.randomUUID().toString(), USER, skuNo, qty);
+        return new CreateOrderRequest(UUID.randomUUID().toString(), skuNo, qty);
     }
 
     int stockOf(String skuNo) {
@@ -72,7 +72,7 @@ class OrderServiceTest {
         @Test
         @DisplayName("成功下单会扣掉对应数量的库存，且订单落到待支付")
         void deducts_stock_and_creates_pending_order() {
-            OrderView v = orderService.place(req("S-A", 3));
+            OrderView v = orderService.place(req("S-A", 3), USER);
 
             assertThat(v.orderNo()).isNotBlank();
             assertThat(v.status()).isEqualTo("pending_payment");
@@ -86,14 +86,14 @@ class OrderServiceTest {
         void amount_is_computed_server_side() {
             // 请求体里根本没有 price 字段——这条测试真正锁住的是那个「缺席」：
             // 哪天有人为了图方便给 CreateOrderRequest 加上 price，这里会挂
-            OrderView v = orderService.place(req("S-A", 3));
+            OrderView v = orderService.place(req("S-A", 3), USER);
             assertThat(v.amount()).isEqualByComparingTo(new BigDecimal("897.00"));
         }
 
         @Test
         @DisplayName("规格是下单那一刻的快照，改了 SKU 也不会改写历史订单")
         void spec_is_snapshotted() {
-            OrderView v = orderService.place(req("S-A", 1));
+            OrderView v = orderService.place(req("S-A", 1), USER);
             jdbc.update("UPDATE sku SET spec = '{\"尺码\":\"XXL\"}' WHERE sku_no = 'S-A'");
 
             assertThat(orderMapper.findByOrderNo(v.orderNo()).getSpec()).contains("M");
@@ -102,7 +102,7 @@ class OrderServiceTest {
         @Test
         @DisplayName("库存不足时下单失败，且一件都不扣")
         void insufficient_stock_is_rejected_without_side_effect() {
-            assertThatThrownBy(() -> orderService.place(req("S-A", 11)))
+            assertThatThrownBy(() -> orderService.place(req("S-A", 11), USER))
                     .isInstanceOf(BizException.class)
                     .hasMessageContaining("库存不足")
                     .extracting(e -> ((BizException) e).getErrorCode())
@@ -115,16 +115,16 @@ class OrderServiceTest {
         @Test
         @DisplayName("零库存与已下架报的是不同的话，前端才能给出不同的引导")
         void out_of_stock_and_off_shelf_are_distinguishable() {
-            assertThatThrownBy(() -> orderService.place(req("S-EMPTY", 1)))
+            assertThatThrownBy(() -> orderService.place(req("S-EMPTY", 1), USER))
                     .hasMessageContaining("仅剩 0 件");
-            assertThatThrownBy(() -> orderService.place(req("S-OFF", 1)))
+            assertThatThrownBy(() -> orderService.place(req("S-OFF", 1), USER))
                     .hasMessageContaining("已下架");
         }
 
         @Test
         @DisplayName("不存在的 SKU 报 SKU_NOT_FOUND，而不是笼统的库存不足")
         void unknown_sku() {
-            assertThatThrownBy(() -> orderService.place(req("S-NOPE", 1)))
+            assertThatThrownBy(() -> orderService.place(req("S-NOPE", 1), USER))
                     .isInstanceOf(BizException.class)
                     .extracting(e -> ((BizException) e).getErrorCode())
                     .isEqualTo(ErrorCode.SKU_NOT_FOUND);
@@ -136,7 +136,7 @@ class OrderServiceTest {
             // 逻辑删除的 SKU：deductStock 的 deleted=0 条件会让它扣减失败
             jdbc.update("UPDATE sku SET deleted = 1 WHERE sku_no = 'S-A'");
 
-            assertThatThrownBy(() -> orderService.place(req("S-A", 1)))
+            assertThatThrownBy(() -> orderService.place(req("S-A", 1), USER))
                     .isInstanceOf(BizException.class);
 
             Integer raw = jdbc.queryForObject(
@@ -155,8 +155,8 @@ class OrderServiceTest {
         void same_request_id_yields_one_order() {
             CreateOrderRequest r = req("S-A", 2);
 
-            OrderView first = orderService.place(r);
-            OrderView second = orderService.place(r);
+            OrderView first = orderService.place(r, USER);
+            OrderView second = orderService.place(r, USER);
 
             assertThat(second.orderNo()).isEqualTo(first.orderNo());
             assertThat(first.idempotentHit()).isFalse();
@@ -169,8 +169,8 @@ class OrderServiceTest {
         @Test
         @DisplayName("不同 requestId 是两笔独立订单——幂等不能误伤真实的连续购买")
         void different_request_ids_are_distinct_orders() {
-            OrderView a = orderService.place(req("S-A", 1));
-            OrderView b = orderService.place(req("S-A", 1));
+            OrderView a = orderService.place(req("S-A", 1), USER);
+            OrderView b = orderService.place(req("S-A", 1), USER);
 
             assertThat(b.orderNo()).isNotEqualTo(a.orderNo());
             assertThat(stockOf("S-A")).isEqualTo(8);
@@ -184,7 +184,7 @@ class OrderServiceTest {
         @Test
         @DisplayName("取消订单会把库存原样还回去")
         void restores_stock() {
-            OrderView v = orderService.place(req("S-A", 4));
+            OrderView v = orderService.place(req("S-A", 4), USER);
             assertThat(stockOf("S-A")).isEqualTo(6);
 
             OrderView cancelled = orderService.cancel(v.orderNo(), USER);
@@ -196,7 +196,7 @@ class OrderServiceTest {
         @Test
         @DisplayName("重复取消不会重复回补——否则能凭空刷出库存")
         void second_cancel_does_not_restore_again() {
-            OrderView v = orderService.place(req("S-A", 4));
+            OrderView v = orderService.place(req("S-A", 4), USER);
             orderService.cancel(v.orderNo(), USER);
 
             assertThatThrownBy(() -> orderService.cancel(v.orderNo(), USER))
@@ -210,7 +210,7 @@ class OrderServiceTest {
         @Test
         @DisplayName("已支付的订单不能走取消这条路（退款是另一条链路）")
         void paid_order_cannot_be_cancelled() {
-            OrderView v = orderService.place(req("S-A", 1));
+            OrderView v = orderService.place(req("S-A", 1), USER);
             jdbc.update("UPDATE mall_order SET status = 'paid' WHERE order_no = ?", v.orderNo());
 
             assertThatThrownBy(() -> orderService.cancel(v.orderNo(), USER))
@@ -231,7 +231,7 @@ class OrderServiceTest {
         @Test
         @DisplayName("查别人的订单与查不存在的订单，返回完全相同的错误")
         void cross_user_read_is_indistinguishable_from_not_found() {
-            OrderView v = orderService.place(req("S-A", 1));
+            OrderView v = orderService.place(req("S-A", 1), USER);
 
             BizException cross = catchBiz(() -> orderService.get(v.orderNo(), OTHER_USER));
             BizException missing = catchBiz(() -> orderService.get("NO-SUCH-ORDER", OTHER_USER));
@@ -244,7 +244,7 @@ class OrderServiceTest {
         @Test
         @DisplayName("取消别人的订单会被拒，且不会回补库存")
         void cross_user_cancel_is_rejected() {
-            OrderView v = orderService.place(req("S-A", 3));
+            OrderView v = orderService.place(req("S-A", 3), USER);
 
             assertThatThrownBy(() -> orderService.cancel(v.orderNo(), OTHER_USER))
                     .isInstanceOf(BizException.class)
@@ -259,7 +259,7 @@ class OrderServiceTest {
         @Test
         @DisplayName("订单出参不含 user_id——它是鉴权依据，不该回给调用方")
         void order_view_does_not_leak_user_id() {
-            OrderView v = orderService.place(req("S-A", 1));
+            OrderView v = orderService.place(req("S-A", 1), USER);
             assertThat(OrderView.class.getRecordComponents())
                     .extracting(java.lang.reflect.RecordComponent::getName)
                     .doesNotContain("userId");

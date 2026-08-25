@@ -96,7 +96,7 @@ class OrderConcurrencyTest {
         List<Future<Void>> futures = stampede(THREADS, () -> {
             try {
                 orderService.place(new CreateOrderRequest(
-                        UUID.randomUUID().toString(), 1001L, "S-HOT", 1));
+                        UUID.randomUUID().toString(), "S-HOT", 1), 1001L);
                 ok.incrementAndGet();
             } catch (BizException e) {
                 soldOut.incrementAndGet();
@@ -124,7 +124,7 @@ class OrderConcurrencyTest {
             int qty = 1 + (int) (Thread.currentThread().threadId() % 4);   // 1~4 件
             try {
                 orderService.place(new CreateOrderRequest(
-                        UUID.randomUUID().toString(), 1001L, "S-MIX", qty));
+                        UUID.randomUUID().toString(), "S-MIX", qty), 1001L);
                 soldUnits.addAndGet(qty);
             } catch (BizException ignored) {
                 // 库存不足，正常结果
@@ -163,7 +163,7 @@ class OrderConcurrencyTest {
 
         List<Future<String>> futures = stampede(20, () -> {
             String no = orderService.place(new CreateOrderRequest(
-                    sharedRequestId, 1001L, "S-IDEM", 1)).orderNo();
+                    sharedRequestId, "S-IDEM", 1), 1001L).orderNo();
             returned.incrementAndGet();
             return no;
         });
@@ -185,7 +185,7 @@ class OrderConcurrencyTest {
     void concurrent_cancel_restores_stock_once() throws Exception {
         seed("S-CAN", 10);
         String orderNo = orderService.place(new CreateOrderRequest(
-                UUID.randomUUID().toString(), 1001L, "S-CAN", 3)).orderNo();
+                UUID.randomUUID().toString(), "S-CAN", 3), 1001L).orderNo();
         assertThat(skuMapper.findBySkuNo("S-CAN").getStock()).isEqualTo(7);
 
         AtomicInteger succeeded = new AtomicInteger();

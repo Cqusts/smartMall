@@ -66,7 +66,7 @@ class OrderFulfillmentTest {
 
     OrderView place(int qty) {
         return orderService.place(new CreateOrderRequest(
-                UUID.randomUUID().toString(), USER, "S-F", qty));
+                UUID.randomUUID().toString(), "S-F", qty), USER);
     }
 
     /** 下单并付款，返回订单号。多数履约测试从这里起步。 */
