@@ -371,6 +371,40 @@ class TestNumberExtraction:
         """
         assert grounding.numbers_in(text) == set()
 
+    @pytest.mark.parametrize("text", [
+        "秋天想要一件保暖又好打理的针织衫",
+        "这是一件羊毛混纺的高领衫",
+        "洗一次就起球的衣服不值得买",
+    ])
+    def test_article_yi_is_not_a_quantity_for_marketing(self, text):
+        """``件`` 是服装类目的量词，文案里躲不开。
+
+        **实测撞出来的**：闭环第三环，运营写的一句再普通不过的
+        「秋天想要一件保暖又好打理的针织衫」被判成"数字 1 没有出处"，
+        整条文案卡在合规上。一个在几乎每条文案上都报警的闸门，
+        和一个从不报警的一样没用——它会被整个绕过去。
+        """
+        assert grounding.numbers_in(text, article_yi=True) == set()
+
+    @pytest.mark.parametrize("text,expect", [
+        ("限购两件", {"2"}),
+        ("满三件打八折", {"3", "8"}),
+        ("十一件起批", {"11"}),      # 这里的「一」属于「十一」，不能摘
+        ("一天内发货", {"1"}),        # 天是度量单位不是量词
+        ("一折清仓", {"1"}),
+        ("一元秒杀", {"1"}),
+    ])
+    def test_article_yi_does_not_swallow_real_quantities(self, text, expect):
+        assert grounding.numbers_in(text, article_yi=True) == expect
+
+    def test_knowledge_side_stays_strict(self):
+        """两个 Agent 在这一点上刻意不一致。
+
+        知识运维拦错了无非是转人工写（现状），放过了是一个编出来的数字
+        进知识库、之后每次检索都命中它——代价不对称，所以这边照拦。
+        """
+        assert grounding.numbers_in("买一件送一件") == {"1"}
+
     def test_chinese_and_arabic_are_compared_after_normalising(self):
         """依据写「7天」而草稿写「七天」，不归一就会判成编造——
         把正确的草稿拦下来，比放过一条错的更让人绕过这套检查。"""

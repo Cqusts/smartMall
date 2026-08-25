@@ -9,6 +9,8 @@
     smartmall-agent copy --product-id 9001   # 运营：写文案（默认试跑）
     smartmall-agent media --product-id 9001  # 运营：出图（默认只拼提示词）
     smartmall-agent media --poll             # 取跑完的视频任务
+    smartmall-agent tasks                    # 跨 Agent 任务队列
+    smartmall-agent tasks --run              # 把队列里的活跑掉
 
 调试台的价值在于**看得见中间过程**：意图分到哪一类、检索命中了什么、
 分数多少、为什么转人工。这些在聊天界面里全是隐形的，而它们恰恰是
@@ -363,6 +365,72 @@ def cmd_copy(args: argparse.Namespace) -> int:
     return 0 if state.outcome in ("staged", "draft_only") else 1
 
 
+def cmd_tasks(args: argparse.Namespace) -> int:
+    """跨 Agent 任务队列：看有哪些活，或者把它们跑掉。
+
+        smartmall-agent tasks              # 看队列
+        smartmall-agent tasks --run        # 跑一轮
+        smartmall-agent tasks --chain 12   # 看某条链走到哪了
+    """
+    from .tasks.runner import run_pending
+    from .tasks.state import Status
+
+    deps = _build_deps(args, with_retriever=(not args.no_retriever))
+    if deps.tasks is None:
+        print("✗ 任务表没接上。建表：")
+        print("  mysql -u root -p smartmall < deploy/sql/migrations/012_agent_task.sql")
+        return 1
+
+    if args.chain:
+        rows = deps.tasks.chain(args.chain)
+        if not rows:
+            print(f"  没有 root_id={args.chain} 的链")
+            return 1
+        print(f"\n==> 任务链 #{args.chain}（{len(rows)} 环）")
+        for t in rows:
+            arrow = "  └─ " if t.parent_id else "  "
+            print(f"{arrow}#{t.id} {_KIND_CN.get(t.kind, t.kind)}"
+                  f"  {t.source_agent or '-'} → {t.target_agent or '-'}"
+                  f"  [{_STATUS_CN.get(t.status, t.status)}]")
+            print(f"       {truncate(t.subject, 46)}")
+            if t.error:
+                print(f"       ⚠ {truncate(t.error, 46)}")
+        return 0
+
+    if args.run:
+        report = run_pending(deps, limit=args.limit)
+        d = report.as_dict()
+        print(f"\n  认领 {d['claimed']} 条：完成 {d['done']}"
+              f" · 要人处理 {d['needs_human']} · 失败 {d['failed']}")
+        # 这个数字就是「闭环」本身：一直是 0 说明链断在第一环
+        print(f"  又派出去 {d['dispatched']} 条下一环任务")
+        for n in d["notes"]:
+            print(f"    ⚠ {n}")
+        if not d["claimed"]:
+            print("  队列里没有待办。先跑几轮 `smartmall-agent ask` 制造盲点。")
+        return 0
+
+    rows = deps.tasks.recent(args.limit, status=args.status or "")
+    if not rows:
+        print("  队列是空的。客服每次答不上来会自动往这里派活。")
+        return 0
+    print(f"\n{pad('ID', 6)} {pad('类型', 10)} {pad('状态', 10)}"
+          f" {pad('次', 3, right=True)} {pad('优先', 4, right=True)} 内容")
+    print("─" * 92)
+    for t in rows:
+        print(f"{pad(str(t.id), 6)} {pad(_KIND_CN.get(t.kind, t.kind), 10)}"
+              f" {pad(_STATUS_CN.get(t.status, t.status), 10)}"
+              f" {pad(str(t.times), 3, right=True)}"
+              f" {pad(str(t.priority), 4, right=True)} {truncate(t.subject, 34)}")
+    print(f"\n  跑一轮：smartmall-agent tasks --run")
+    return 0
+
+
+_KIND_CN = {"write_knowledge": "补写知识", "refresh_copy": "更新文案"}
+_STATUS_CN = {"pending": "待办", "running": "进行中", "done": "已完成",
+              "needs_human": "要人处理", "failed": "失败", "cancelled": "已取消"}
+
+
 def cmd_media(args: argparse.Namespace) -> int:
     """运营 Agent：给商品生成主图 / 宣传视频。
 
@@ -620,6 +688,19 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--write", dest="dry_run", action="store_false",
                    default=True, help="真的写库（写入的是待审文案）")
     s.set_defaults(func=cmd_copy)
+
+    s = sub.add_parser("tasks", parents=[common],
+                       help="跨 Agent 任务队列：看队列 / 跑一轮 / 看某条链")
+    s.add_argument("--run", action="store_true", help="跑一轮，把待办执行掉")
+    s.add_argument("--chain", type=int, help="按 root_id 看一整条链走到哪了")
+    s.add_argument("--status", choices=["pending", "running", "done",
+                                        "needs_human", "failed", "cancelled"])
+    s.add_argument("--limit", type=int, default=20)
+    # 补写知识要检索（复查库里是不是已经有了），所以默认装检索。
+    # 只想看看队列的话加这个跳过，省得等索引加载
+    s.add_argument("--no-retriever", action="store_true",
+                   help="不装检索。只看队列时用，--run 时别加")
+    s.set_defaults(func=cmd_tasks)
 
     s = sub.add_parser("media", parents=[common],
                        help="运营 Agent：生成商品图 / 宣传视频（默认只出提示词）")

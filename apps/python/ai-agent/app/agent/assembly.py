@@ -74,6 +74,7 @@ def build_deps(
     with_tools: bool = True,
     with_retriever: bool = True,
     with_media: bool = False,
+    with_tasks: bool = True,
     config: AgentConfig | None = None,
     log=print,
 ) -> Deps:
@@ -179,6 +180,18 @@ def build_deps(
             log(f"  ⚠ 素材库不可用（{type(exc).__name__}），生成的图不会落库")
             log("    建表：deploy/sql/migrations/011_marketing_asset.sql")
 
+    queue = None
+    if with_tasks:
+        from .tasks.store import MySqlTaskStore
+
+        try:
+            queue = MySqlTaskStore.from_env()
+            log("  任务：客服答不上来 → 自动派给知识运维 → 再派给运营")
+        except Exception as exc:  # noqa: BLE001
+            # 起不来只是回到"四个 Agent 各跑各的"，对话本身一点不受影响
+            log(f"  ⚠ 任务队列不可用（{type(exc).__name__}），Agent 之间不派活")
+            log("    建表：deploy/sql/migrations/012_agent_task.sql")
+
     return Deps(llm=llm, retriever=retriever, config=cfg, store=store,
                 tools=tools, vision=vlm, media=mediac, asset_store=assets,
-                asset_dir=asset_dir() if with_media else None)
+                asset_dir=asset_dir() if with_media else None, tasks=queue)

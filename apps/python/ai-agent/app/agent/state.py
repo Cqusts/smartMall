@@ -218,6 +218,13 @@ class AgentState:
     handover_summary: dict[str, Any] = field(default_factory=dict)
     handover_ticket_id: int | None = None
     """落库后的工单号。人工按它接手，也是补写任务的句柄。"""
+    dispatched_task_id: int | None = None
+    """这次转人工派出去的补写任务号（见 tasks/）。
+
+    **为 None 有两种完全不同的含义**：没接任务表，或者判定这次不该派
+    （自伤求助、用户主动要人工、服务故障都不是知识盲点）。诊断面板要
+    分得开，所以不派的原因记在 ``trace.postcheck_flags`` 之外——
+    这里只放真的派出去了的那个号。"""
     postcheck_flags: list[str] = field(default_factory=list)
     blocked: bool = False
     """输入安全检查未通过，直接回绝，不进入后续任何节点。"""

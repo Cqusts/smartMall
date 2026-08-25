@@ -95,6 +95,10 @@ class Deps:
     asset_dir: Any = None
     """生成结果的落地目录。**模型返回的 URL 24 小时后失效**，不下载到本地的话
     今天演示完、明天打开就是一片裂图（见 marketing/media.download）。"""
+    tasks: Any = None
+    """跨 Agent 任务队列。为 None 时四个 Agent 各跑各的——
+    这**不是降级，是它原本的样子**：客服照常转人工、工单照常落库，
+    只是没人自动接着往下做。"""
     on_event: Any = None
     """流式事件回调 ``(dict) -> None``。为 None 时整条链路完全同步，
     行为与从前一致——**流式不另起一套编排**，否则两条路径必然分叉。"""
@@ -745,4 +749,17 @@ def emit(state: AgentState, deps: Deps) -> AgentState:
             # 每一次转人工都是一个已经暴露的知识盲点。它比覆盖度矩阵
             # 推断出来的空格子更值钱——带着用户的原话，证明真的有人问
             state.handover_ticket_id = deps.store.save_handover(state)
+
+    if state.handover:
+        # 把这个盲点派给知识运维。**不是每次转人工都派**——自伤求助、
+        # 用户主动要人工、服务故障都不是知识盲点，判据在 tasks.dispatch。
+        #
+        # 放在工单落库之后，是为了任务里能带上 ticket_id；放在整个 emit
+        # 的最后，是因为它排在"给用户回话"后面——派活失败只少补一条知识，
+        # 而抛出去用户就看不到回复了（dispatch_handover 整段吞异常）
+        from .tasks.runner import dispatch_handover
+
+        task = dispatch_handover(state, deps)
+        if task is not None:
+            state.dispatched_task_id = task.id
     return state

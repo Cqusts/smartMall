@@ -57,6 +57,21 @@ _CN_NUM = re.compile(
     rf"(?<![第再又每])([零一二两三四五六七八九十百]+)\s*(?:{_UNIT_RE})"
 )
 
+#: 「一」当**冠词**用的时候不是数值主张。
+#:
+#: 中文里 ``一`` + 量词 常常只相当于英文的 a/an：「想要**一件**保暖的针织衫」
+#: 说的不是"恰好一件"，而是"一件（某件）"。而 ``件`` 正是服装类目的量词——
+#: 这个店铺卖的每一件商品，文案里都躲不开它。
+#:
+#: **只挡 ``一``，不挡别的数字。** 「三件」「限购两件」是真的数量主张。
+#: 前面的 lookbehind 保证「十一件」不受影响（那里的 ``一`` 属于 ``十一``）。
+#:
+#: 量词只列 ``件`` 与 ``次``：``天/年/元/折/度`` 这些是度量单位不是量词，
+#: 「一天」「一元」「一折」全都是实打实的数值，一个都不能放。
+#:
+#: **默认不启用**，见 :func:`numbers_in` 的 ``article_yi``。
+_ARTICLE_YI = re.compile(r"(?<![零一二两三四五六七八九十百])一(?=[件次])")
+
 #: 固定说法里的数字不是数值主张。
 #:
 #: **这份名单只能短，不能长。** 判据宁可多拦：拦错了无非是这条草稿
@@ -95,16 +110,30 @@ def _cn_to_int(s: str) -> str | None:
     return None
 
 
-def numbers_in(text: str) -> set[str]:
+def numbers_in(text: str, *, article_yi: bool = False) -> set[str]:
     """抽出文本里的数值，中文数字归一成阿拉伯数字。
 
     归一是必须的：依据里写「7天」而草稿写「七天」，不归一就会判成
     编造——把一条本来正确的草稿拦下来，比放过一条错的更让人不信任
     这套检查，因为人会开始绕过它。
+
+    ``article_yi=True`` 时把冠词用法的「一件」「一次」当成非数值。
+    **两个 Agent 在这一点上刻意不一致**，因为拦错的代价不一样：
+
+    * 知识运维（默认 False）：拦错了无非是这条草稿转人工写——那本来
+      就是现状。放过了是一个编出来的数字进知识库，之后每次检索都命中。
+      所以「买一件送一件」照拦。
+    * 运营（传 True）：``件`` 是服装类目的量词，「想要一件保暖的针织衫」
+      这种句子在文案里躲不开。实测就是它把闭环第三环卡住的——
+      **一个在几乎每条文案上都报警的闸门，和一个从不报警的一样没用**，
+      它会被整个绕过去。而文案本来就要人工过一遍才能发布。
     """
     text = text or ""
     for phrase in _IDIOMS:
         text = text.replace(phrase, "")
+    if article_yi:
+        # 冠词用法的「一」先摘掉，剩下的「件」「次」不带数字，自然不匹配
+        text = _ARTICLE_YI.sub("", text)
 
     out: set[str] = set()
     for m in _ARABIC.findall(text):
@@ -117,7 +146,8 @@ def numbers_in(text: str) -> set[str]:
 
 
 def unsourced_numbers(
-    text: str, evidence: Sequence[Evidence], *, question: str = ""
+    text: str, evidence: Sequence[Evidence], *, question: str = "",
+    article_yi: bool = False,
 ) -> list[str]:
     """草稿里出现、而依据与用户原问题里都没有的数字。
 
@@ -125,12 +155,15 @@ def unsourced_numbers(
     **只需要借这一条数值判据**。整个 :func:`check` 借过去的话，
     客服那套出口检查会跟着跑一遍，同一个「最好」会被报两次
     （"极限词:最好" + "绝对化用语:最好"），页面上像是出了两个问题。
+
+    ``article_yi`` 见 :func:`numbers_in`——运营那边传 True。
     """
     known: set[str] = set()
     for e in evidence:
-        known |= numbers_in(e.text)
-    known |= numbers_in(question)
-    return sorted(numbers_in(text) - known, key=lambda x: int(float(x)))
+        known |= numbers_in(e.text, article_yi=article_yi)
+    known |= numbers_in(question, article_yi=article_yi)
+    got = numbers_in(text, article_yi=article_yi)
+    return sorted(got - known, key=lambda x: int(float(x)))
 
 
 @dataclass

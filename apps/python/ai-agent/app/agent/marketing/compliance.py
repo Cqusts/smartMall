@@ -169,7 +169,11 @@ def check(
         # 页面上看着像出了两个问题
         from ..knowledge.grounding import unsourced_numbers
 
-        bad = unsourced_numbers(text, list(evidence), question=question)
+        # article_yi=True：``件`` 是服装类目的量词，「想要一件保暖的针织衫」
+        # 这种句子在文案里躲不开。知识运维那边刻意不开——两边拦错的代价
+        # 不一样，见 numbers_in 的注释
+        bad = unsourced_numbers(text, list(evidence), question=question,
+                                article_yi=True)
         if bad:
             result.blocked.append(f"数字没有出处:{'、'.join(bad)}")
 
