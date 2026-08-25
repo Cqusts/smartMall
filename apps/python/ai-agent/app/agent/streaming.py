@@ -54,6 +54,10 @@ def turn_result(state: AgentState) -> dict[str, Any]:
             state.handover_reason.value if state.handover_reason else ""
         ),
         "handover_ticket_id": state.handover_ticket_id,
+        # 这一轮往知识运维派出去的补写任务号。**闭环最值得看的就是这一瞬间**：
+        # 用户看到"我帮您转人工"的同时，面板上显示"已派发补写任务 #12"——
+        # 不透出来的话，跨 Agent 那条链在演示时完全是隐形的
+        "dispatched_task_id": state.dispatched_task_id,
         "postcheck_flags": state.postcheck_flags,
         # 调试面板用。把它放进正式响应而不是藏在日志里，是因为
         # "为什么这么答"对演示和调参都是最有价值的信息

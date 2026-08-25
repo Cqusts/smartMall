@@ -13,6 +13,15 @@ from .routers import chat, media, ws
 
 app = create_app(settings, description="LangGraph 编排：客服 Agent · 运营 Agent · 考核 Agent")
 
+# 商品列表现在是 579 个商品、437KB 的 JSON。gzip 之后 35KB —— 实测的两个数。
+# 加在这里而不是 ai-common 里：只有这个服务往外发大 JSON，别的服务
+# 响应都是几百字节，压缩反而是纯开销。
+#
+# minimum_size 取 1KB：比这更小的响应，压缩头本身就占掉可观比例
+from starlette.middleware.gzip import GZipMiddleware  # noqa: E402
+
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
 # 依赖检查：M0 用连通性探测，接入真实客户端后替换为深度检查
 reg = app.state.health
 s = settings

@@ -30,7 +30,12 @@ _DDL = [
     """CREATE TABLE product (id INTEGER PRIMARY KEY, product_no TEXT, name TEXT,
         short_name TEXT, category_id INTEGER, brand TEXT, status TEXT,
         main_image TEXT DEFAULT '', deleted INTEGER DEFAULT 0)""",
-    "CREATE TABLE category (id INTEGER PRIMARY KEY, name TEXT)",
+    # 照 01_product.sql 的列写。**别自己编一个最小表**：少一列 path，
+    # list_catalog 就查不出一级类目，而那种失败在页面上表现为侧边栏空白
+    """CREATE TABLE category (id INTEGER PRIMARY KEY, parent_id INTEGER
+        NOT NULL DEFAULT 0, name TEXT NOT NULL, level INTEGER NOT NULL DEFAULT 1,
+        path TEXT NOT NULL DEFAULT '', sort_order INTEGER DEFAULT 0,
+        deleted INTEGER NOT NULL DEFAULT 0)""",
     """CREATE TABLE product_attr (product_id INTEGER, attr_key TEXT,
         attr_value TEXT, is_core INTEGER DEFAULT 0)""",
     """CREATE TABLE sku (id INTEGER PRIMARY KEY AUTOINCREMENT, sku_no TEXT,
@@ -46,8 +51,10 @@ _DDL = [
 ]
 
 _SEED = [
-    "INSERT INTO category VALUES (1024, '针织衫')",
-    "INSERT INTO category VALUES (1030, '夹克')",
+    "INSERT INTO category VALUES (1, 0, '服装', 1, '/1', 0, 0)",
+    "INSERT INTO category VALUES (24, 1, '上装', 2, '/1/24', 0, 0)",
+    "INSERT INTO category VALUES (1024, 24, '针织衫', 3, '/1/24/1024', 0, 0)",
+    "INSERT INTO category VALUES (1030, 24, '夹克', 3, '/1/24/1030', 0, 0)",
     "INSERT INTO product VALUES (9001,'P9001','米白针织衫','针织衫',1024,"
     "'smartMall','on_sale','9001.jpg',0)",
     "INSERT INTO product_attr VALUES (9001,'材质','100%羊毛',1)",
@@ -247,6 +254,74 @@ class TestProductTools:
             conn.execute(text("DROP TABLE sku"))
         with pytest.raises(ToolError):
             box.get_sku_stock_price(9001)
+
+
+class TestListCatalog:
+    """店铺列表的批量取数。
+
+    **这一组盯的是查询次数，不是返回值。** 老写法每个商品四次往返，
+    12 个商品时看不出来；加到 579 个商品实测 2317 次查询 / 597ms，
+    而那还是 SQLite。功能测试对这个退化完全无感——它返回的数据是对的。
+    """
+
+    def _count_queries(self, box, fn):
+        from sqlalchemy import event
+
+        n = {"q": 0}
+
+        def bump(*a, **kw):
+            n["q"] += 1
+
+        event.listen(box.engine, "before_cursor_execute", bump)
+        try:
+            out = fn()
+        finally:
+            event.remove(box.engine, "before_cursor_execute", bump)
+        return out, n["q"]
+
+    def test_查询次数不随商品数增长(self, box):
+        items, n = self._count_queries(box, lambda: box.list_catalog())
+        assert len(items) >= 2
+        # ID 列表 + 商品 + 属性 + SKU + 尺码表 + 类目表 = 6
+        assert n <= 6, f"用了 {n} 次查询，说明又退回逐个商品查了"
+
+    def test_一次给全页面要的东西(self, box):
+        item = {i["id"]: i for i in box.list_catalog()}[9001]
+        assert item["name"] == "米白针织衫"
+        assert item["attrs"]["材质"] == "100%羊毛"
+        assert len(item["skus"]) == 2
+        assert item["size_chart"]["chart"]["表头"][0] == "尺码"
+        # 缺货的也要在列表里带出来并标好，理由同 get_sku_stock_price
+        assert {s["sku_no"]: s["in_stock"] for s in item["skus"]} == {
+            "S-M": True, "S-L": False}
+
+    def test_没有尺码表不是错误(self, box):
+        item = {i["id"]: i for i in box.list_catalog()}[9002]
+        assert item["size_chart"] is None
+
+    def test_带出一级类目(self, box):
+        """侧边栏要的是「服装」，不是「针织衫」——570 个商品有 65 个
+        三级类目，全列出来没人翻得动。"""
+        item = {i["id"]: i for i in box.list_catalog()}[9001]
+        assert item["root_category"] == "服装"
+
+    def test_类目没有路径时退回三级名(self, box):
+        """老种子里的类目有 path，手工插的可能没有。没有 path 时
+        退回自己的名字，而不是让侧边栏出现一堆空白项。"""
+        from sqlalchemy import text
+
+        with box.engine.begin() as conn:
+            conn.execute(text("UPDATE category SET path = ''"))
+        item = {i["id"]: i for i in box.list_catalog()}[9001]
+        assert item["root_category"] == "针织衫"
+
+    def test_查询失败照样抛出(self, box):
+        from sqlalchemy import text
+
+        with box.engine.begin() as conn:
+            conn.execute(text("DROP TABLE product_attr"))
+        with pytest.raises(ToolError):
+            box.list_catalog()
 
 
 # ---------------------------------------------------------------- 订单号抽取

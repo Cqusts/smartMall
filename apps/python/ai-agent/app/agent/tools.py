@@ -67,6 +67,8 @@ class ToolBox(Protocol):
 
     def get_size_chart(self, product_id: int) -> dict[str, Any] | None: ...
 
+    def list_catalog(self, limit: int = 600) -> list[dict[str, Any]]: ...
+
     def get_order_status(
         self, order_no: str, user_id: int | None
     ) -> dict[str, Any] | None: ...
@@ -252,6 +254,93 @@ class MySqlToolBox:
             "note": rows[0]["note"] or "",
         }
 
+    def list_catalog(self, limit: int = 600) -> list[dict[str, Any]]:
+        """店铺列表要的全部数据，**一共四次查询**。
+
+        原先店铺页是这么拼的：先拿 ID 列表，再对每个商品分别查详情、
+        查属性、查 SKU、查尺码表 —— 每个商品四次往返。12 个商品时
+        看不出来（49 次查询，几十毫秒）；上到 579 个商品实测
+        **2317 次查询 / 597ms**，而那还是 SQLite 这种进程内的库。
+        MySQL 走 TCP，每次往返按 0.2ms 算就是四百多毫秒起步。
+
+        这里换成四次 IN 查询然后在内存里归拢。**不是提前优化**：
+        它是加完 500 个商品之后量出来的，量之前谁也不知道差多少。
+        """
+        import json
+
+        ids = self.list_on_sale_product_ids(limit)
+        if not ids:
+            return []
+        # IN 列表用绑定参数一个个占位，不拼字符串——ID 是内部来的，
+        # 但拼 SQL 这个习惯本身不该有
+        marks = ",".join(f":i{n}" for n in range(len(ids)))
+        params = {f"i{n}": v for n, v in enumerate(ids)}
+
+        rows = self._rows(
+            f"SELECT {self._BASE_COLS}, p.main_image, p.category_id FROM product p "
+            "LEFT JOIN category c ON c.id = p.category_id "
+            f"WHERE p.id IN ({marks}) AND p.deleted = 0", params)
+        items = {int(r["id"]): dict(r, attrs={}, skus=[], size_chart=None)
+                 for r in rows}
+
+        for r in self._rows(
+                "SELECT product_id, attr_key, attr_value FROM product_attr "
+                f"WHERE product_id IN ({marks})", params):
+            item = items.get(int(r["product_id"]))
+            if item is not None:
+                item["attrs"][r["attr_key"]] = r["attr_value"]
+
+        for r in self._rows(
+                "SELECT product_id, sku_no, spec, price, origin_price, stock,"
+                f" status FROM sku WHERE product_id IN ({marks})"
+                " AND deleted = 0 ORDER BY sku_no", params):
+            item = items.get(int(r["product_id"]))
+            if item is None:
+                continue
+            item["skus"].append({
+                "sku_no": r["sku_no"], "spec": r["spec"],
+                "price": float(r["price"]),
+                "origin_price": float(r["origin_price"] or 0) or None,
+                "stock": int(r["stock"]),
+                "in_stock": r["stock"] > 0 and r["status"] == "on_sale",
+            })
+
+        for r in self._rows(
+                "SELECT product_id, chart, note FROM size_chart "
+                f"WHERE product_id IN ({marks})", params):
+            item = items.get(int(r["product_id"]))
+            if item is None:
+                continue
+            chart = r["chart"]
+            item["size_chart"] = {
+                "chart": json.loads(chart) if isinstance(chart, str) else chart,
+                "note": r["note"] or "",
+            }
+
+        # 一级类目名。**页面侧边栏要的是「食品」，不是「饼干糕点」**——
+        # 570 个商品铺开有 65 个三级类目，全列出来没人翻得动，而按
+        # 一级分只有二十来个，正好是一屏。
+        #
+        # 在 Python 里拼而不是在 SQL 里递归 JOIN：类目表统共一百来行，
+        # 一次全捞进来做字典查，比一条自连接的 SQL 好读得多
+        cat_rows = self._rows(
+            "SELECT id, name, path FROM category WHERE deleted = 0", {})
+        by_id = {int(r["id"]): r["name"] for r in cat_rows}
+        # path 形如 /4/60/4060，第一段就是一级类目
+        root_of = {}
+        for r in cat_rows:
+            head = str(r["path"] or "").strip("/").split("/")[0]
+            root_of[int(r["id"])] = by_id.get(int(head)) if head.isdigit() else None
+
+        detail_rows = {int(r["id"]): r for r in rows}
+        for pid, item in items.items():
+            cid = detail_rows.get(pid, {}).get("category_id")
+            item["root_category"] = (
+                root_of.get(int(cid)) if cid else None) or item.get("category") or ""
+
+        # 顺序按 ID，与 list_on_sale_product_ids 一致
+        return [items[i] for i in ids if i in items]
+
     # ------------------------------------------------------------ 订单
 
     def get_order_status(
@@ -371,6 +460,17 @@ class StubToolBox:
             self.permission_denials.append(f"{user_id} → {order_no}")
             return None
         return {k: v for k, v in order.items() if k != "user_id"}
+
+    def list_catalog(self, limit=600):
+        self._check("list_catalog")
+        out = []
+        for pid in sorted(self.products)[:limit]:
+            d = dict(self.products[pid])
+            d.setdefault("attrs", {})
+            d["skus"] = self.skus.get(pid, [])
+            d["size_chart"] = self.charts.get(pid)
+            out.append(d)
+        return out
 
     def recommend_products(self, product_id, kind="similar"):
         self._check("recommend_products")

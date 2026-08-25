@@ -189,6 +189,16 @@ button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
 .fav:hover{color:var(--ink)}
 .fav.on{color:#c8564f}
 .fav .ico{width:15px;height:15px}
+.ph-none{width:100%;height:100%;display:flex;flex-direction:column;
+         align-items:center;justify-content:center;gap:4px;color:var(--ink-3);
+         text-align:center;padding:8px}
+.ph-none span{color:var(--ink-2);font-weight:500;line-height:1.3}
+.ph-none em{font-style:normal;font-size:10.5px;color:#b9b3ab;letter-spacing:.5px}
+.cats .cn{margin-left:auto;font-size:11.5px;color:var(--ink-3);
+          font-variant-numeric:tabular-nums}
+.cats button.on .cn{color:var(--sand)}
+.cats button .ico{margin-left:8px}
+.cats{max-height:calc(100vh - 140px);overflow-y:auto;position:sticky;top:92px}
 .card .oos{position:absolute;inset:0;background:rgba(255,255,255,.72);
            display:flex;align-items:center;justify-content:center}
 .card .oos b{font-size:13px;letter-spacing:2px;color:var(--ink-2);font-weight:500;
@@ -205,6 +215,10 @@ button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
 .card .ask{margin-top:9px;font-size:12.5px;color:var(--ink-3);display:inline-flex;
            align-items:center;gap:4px}
 .card .ask:hover{color:var(--sand)}
+.more{grid-column:1/-1;margin-top:8px;border:1px solid var(--line);
+      border-radius:8px;padding:14px;font-size:14px;color:var(--ink-2);
+      background:#fff}
+.more:hover{border-color:var(--ink);color:var(--ink)}
 .empty{grid-column:1/-1;background:#faf9f8;border-radius:9px;padding:48px 30px;
        text-align:center;color:var(--ink-3);line-height:1.9}
 .empty code{background:#efece8;padding:1px 6px;border-radius:3px;color:var(--ink-2)}
@@ -336,6 +350,7 @@ footer code{background:#f2efec;padding:1px 6px;border-radius:3px}
         border-radius:5px}
 .handover{margin-top:9px;background:#fdf7ea;border:1px solid #eedcb4;
           border-radius:7px;padding:8px 10px;font-size:12px;color:var(--warn)}
+.hint2{display:block;color:var(--ink-3);margin-top:2px}
 /* 导购推荐出来的商品卡。点得进详情，不然用户还得回列表自己找 */
 .recs{margin-top:10px;border-top:1px dashed var(--line);padding-top:9px;
       display:flex;flex-direction:column;gap:7px}
@@ -880,14 +895,31 @@ async function loadProducts(){
 }
 
 function renderCats(){
-  const cats = ['全部', ...new Set(products.map(p => p.category).filter(Boolean))];
-  $('#cats').innerHTML = cats.map(c =>
+  // **按一级类目分，不按三级。** 570 个商品铺开有 65 个三级类目
+  // （饼干糕点、坚果炒货、肉干肉脯……），全列在侧边栏没人翻得动；
+  // 按一级分只有二十来个（食品、玩具、数码……），正好一屏。
+  //
+  // 排序按商品数，多的在前——不按字典序：字典序第一个是"办公用品"，
+  // 而用户想先看到的是货最多的那些
+  const n = {};
+  products.forEach(p => {
+    const c = p.root_category || p.category;
+    if (c) n[c] = (n[c] || 0) + 1;
+  });
+  const cats = Object.keys(n).sort((a, b) => n[b] - n[a] || a.localeCompare(b, 'zh'));
+  $('#cats').innerHTML =
+    `<button class="${cat === '全部' ? 'on' : ''}" onclick="pickCat('全部')">
+       全部<span class="cn">${products.length}</span>
+       <svg class="ico"><use href="#i-arrow"/></svg></button>`
+    + cats.map(c =>
     `<button class="${c === cat ? 'on' : ''}" onclick="pickCat('${esc(c)}')">
-       ${esc(c)}<svg class="ico"><use href="#i-arrow"/></svg></button>`).join('');
+       ${esc(c)}<span class="cn">${n[c]}</span>
+       <svg class="ico"><use href="#i-arrow"/></svg></button>`).join('');
 }
 
 function pickCat(c){
   cat = c;
+  shown = PAGE;          // 换类目要回到第一页，否则会停在上一个类目的页码
   favOnly = false;
   $('#favBtn').classList.remove('on');
   renderCats();
@@ -899,6 +931,35 @@ function imgFor(p){
   return p.main_image ? `/img/${encodeURIComponent(p.main_image)}` : '';
 }
 
+/* 没有实拍图的商品画什么。
+
+   仓库里只有 9001–9012 那 12 张实拍。**把它们循环贴到 570 个商品上是
+   最差的选择**：一包饼干配一张针织衫照片，比空着糟得多——和给商品画
+   一个它没有的颜色块是同一类错误，用户是照着图下单的。
+
+   所以画一块带类目名的色块，一眼看得出是占位。底色由类目名算出来，
+   同一个类目永远同一个颜色，翻页时不会闪成万花筒。 */
+function tintOf(name){
+  let h = 0;
+  for (const ch of String(name || '')) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  // 只在米色系里转，饱和度压得很低——它是背景不是主角，
+  // 五颜六色的占位块会把真实拍图的那几个商品压下去
+  return `hsl(${h % 360} 26% 91%)`;
+}
+
+function placeholder(p, big){
+  const label = esc(p.category || p.short_name || '商品');
+  return `<div class="ph-none" style="background:${tintOf(p.category)}">
+    <span style="font-size:${big ? 15 : 12}px">${label}</span>
+    <em>暂无实拍图</em></div>`;
+}
+
+function tileOf(p, big){
+  const src = imgFor(p);
+  return src ? `<img src="${src}" alt="${esc(p.name)}" loading="lazy">`
+             : placeholder(p, big);
+}
+
 /* ---------------------------------------------------------------- 收藏
 
    卡片上那个爱心必须真的存点什么，否则它就是个点了没反应的装饰件。
@@ -906,6 +967,12 @@ function imgFor(p){
    为它开一张表、也没有必要让它跟着账号走。 */
 let favs = new Set();
 let favOnly = false;
+
+/* 一次最多铺多少张卡。**579 张一次性 innerHTML 实测页面就绪要 3.8 秒**，
+   而用户在第一屏之外什么都看不到 —— 那三秒纯粹浪费在他不会看的卡片上。
+   真实店铺也是分页的。 */
+const PAGE = 60;
+let shown = PAGE;
 
 function loadFavs(){
   try{ favs = new Set(JSON.parse(localStorage.getItem('smartmall.favs') || '[]')); }
@@ -929,6 +996,7 @@ function renderFavCount(){
 
 function toggleFavOnly(){
   favOnly = !favOnly;
+  shown = PAGE;
   $('#favBtn').classList.toggle('on', favOnly);
   renderGrid();
 }
@@ -967,7 +1035,8 @@ function colorsOf(p){
 }
 
 function visible(){
-  let list = cat === '全部' ? products : products.filter(p => p.category === cat);
+  let list = cat === '全部' ? products
+    : products.filter(p => (p.root_category || p.category) === cat);
   if (favOnly) list = list.filter(p => favs.has(p.id));
   return list;
 }
@@ -976,7 +1045,9 @@ function renderGrid(){
   const list = visible();
   $('#secTitle').textContent = favOnly ? '我的收藏'
                              : (cat === '全部' ? '新品上架' : cat);
-  $('#secCount').textContent = list.length ? `共 ${list.length} 件` : '';
+  $('#secCount').textContent = list.length
+    ? (list.length > shown ? `共 ${list.length} 件，已显示 ${shown} 件`
+                           : `共 ${list.length} 件`) : '';
 
   if (!list.length){
     $('#grid').innerHTML = `<div class="empty">${favOnly
@@ -985,13 +1056,14 @@ function renderGrid(){
     return;
   }
 
-  $('#grid').innerHTML = list.map(p => {
+  const page = list.slice(0, shown);
+  $('#grid').innerHTML = page.map(p => {
     const src = imgFor(p);
     const off = p.origin_price && p.origin_price > p.price;
     const on = favs.has(p.id);
     return `<div class="card" onclick="openDetail(${p.id})">
       <div class="ph">
-        ${src ? `<img src="${src}" alt="${esc(p.name)}" loading="lazy">` : ''}
+        ${tileOf(p)}
         <button class="fav ${on ? 'on' : ''}" onclick="toggleFav(${p.id},event)"
                 title="${on ? '取消收藏' : '收藏'}">
           <svg class="ico"><use href="#i-heart${on ? '-fill' : ''}"/></svg></button>
@@ -1005,7 +1077,15 @@ function renderGrid(){
       <span class="ask" onclick="event.stopPropagation();askProduct(${p.id})">
         <svg class="ico"><use href="#i-svc"/></svg>联系客服</span>
     </div>`;
-  }).join('');
+  }).join('') + (list.length > shown
+    ? `<button class="more" onclick="showMore()">
+         再看 ${Math.min(PAGE, list.length - shown)} 件（还有 ${list.length - shown} 件）
+       </button>` : '');
+}
+
+function showMore(){
+  shown += PAGE;
+  renderGrid();
 }
 
 /* ---------------------------------------------------------------- 首屏轮播
@@ -1094,7 +1174,7 @@ function openDetail(id){
   $('#detail').innerHTML = `
     <button class="x" onclick="closeDetail()">×</button>
     <div class="dtop">
-      <div class="dpic">${src ? `<img src="${src}" alt="${esc(p.name)}">` : ''}</div>
+      <div class="dpic">${tileOf(p, true)}</div>
       <div>
         <h3>${esc(p.name)}</h3>
         <div class="sub">${esc(p.subtitle || p.category || '')}</div>
@@ -1642,7 +1722,12 @@ function handle(ev){
     h.innerHTML = `<svg class="ico"><use href="#i-warn"/></svg> `
       + `已转接人工：${esc(ev.handover_reason)}`
       + (ev.handover_ticket_id ? `<br>工单 #${ev.handover_ticket_id}，`
-        + `补答后会回灌知识库，下次就能自动回答` : '');
+        + `补答后会回灌知识库，下次就能自动回答` : '')
+      // 跨 Agent 那条链在演示时本来是完全隐形的：用户只看到"帮您转人工"，
+      // 而后台已经把补写任务派给知识运维了。**这一瞬间最值得看**
+      + (ev.dispatched_task_id
+          ? `<br>已自动派发补写任务 #${ev.dispatched_task_id} 给知识运维 →`
+          + `<span class="hint2">补完会再通知运营更新文案</span>` : '');
     el.appendChild(h);
   }
   if (ev.trace_id){
