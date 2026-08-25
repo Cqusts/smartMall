@@ -20,6 +20,21 @@ public interface MallOrderMapper extends BaseMapper<MallOrder> {
     MallOrder findByOrderNo(@Param("orderNo") String orderNo);
 
     /**
+     * 商家侧订单列表。
+     *
+     * <p>{@code status} 为空时返回全部；给了就按状态筛——商家最常用的动作是
+     * "把待发货的都发了"，那需要 {@code status=paid} 这一档。
+     *
+     * <p>不做分页只给 limit：这是演示规模的取舍。真实店铺得改成键集分页，
+     * OFFSET 翻到第 1000 页时数据库仍要扫过前面所有行。
+     */
+    @Select("<script>SELECT * FROM mall_order"
+            + "<if test='status != null and status != \"\"'> WHERE status = #{status}</if>"
+            + " ORDER BY id DESC LIMIT #{limit}</script>")
+    List<MallOrder> listForMerchant(@Param("status") String status,
+                                    @Param("limit") int limit);
+
+    /**
      * 置为已取消。
      *
      * <p>{@code AND status = 'pending_payment'} 决定了这个方法**至多成功一次**。

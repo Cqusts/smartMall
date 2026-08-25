@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smartMall 商家后台</title>
+<!--
+  商家后台。
+
+  与店铺页（index.html）刻意分成两个页面而不是一个页面里加个开关：
+  两边的受众、权限、数据都不一样，混在一起的结果是买家页里躺着一堆
+  只有商家能用的代码，而"哪些元素该按角色隐藏"迟早会漏一个——
+  漏的方向通常是该藏的没藏。
+
+  **这个页面不做任何权限判断**，它只是把令牌带上。能不能操作由
+  mall-product 的 @RequireMerchant 决定。前端藏按钮是体验，不是安全：
+  藏了照样能用 curl 调，所以真正的判定必须在服务端。
+-->
+<style>
+:root{
+  --orange:#ff5000; --ink:#333; --ink-2:#666; --ink-3:#999;
+  --line:#e8e8e8; --bg:#f5f5f5; --ok:#00a870; --warn:#b78103;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+     color:var(--ink);background:var(--bg)}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer;border:none;background:none}
+a{color:inherit;text-decoration:none}
+
+.top{background:#fff;border-bottom:2px solid var(--orange);padding:0 20px;
+     display:flex;align-items:center;gap:20px;height:56px;position:sticky;top:0;z-index:10}
+.top .logo{font-size:19px;font-weight:700;color:var(--orange);letter-spacing:-.5px}
+.top .logo span{color:var(--ink);font-weight:400;font-size:14px;margin-left:8px}
+.top .sp{flex:1}
+.top .who{font-size:13px;color:var(--ink-2)}
+.top .who b{color:var(--ink)}
+.top a.back{font-size:13px;color:var(--ink-2);border:1px solid var(--line);
+            padding:5px 12px;border-radius:3px}
+.top a.back:hover{border-color:var(--orange);color:var(--orange)}
+
+.tabs{background:#fff;padding:0 20px;display:flex;gap:2px;border-bottom:1px solid var(--line)}
+.tabs button{padding:11px 20px;font-size:14px;color:var(--ink-2);
+             border-bottom:2px solid transparent}
+.tabs button.on{color:var(--orange);border-bottom-color:var(--orange);font-weight:600}
+
+.wrap{max-width:1180px;margin:16px auto;padding:0 20px}
+.panel{display:none}
+.panel.on{display:block}
+
+.card{background:#fff;border:1px solid var(--line);border-radius:4px;
+      padding:16px;margin-bottom:14px}
+.card h3{font-size:15px;margin-bottom:12px;font-weight:600}
+
+table{width:100%;border-collapse:collapse;background:#fff;font-size:13px}
+th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;
+      vertical-align:top}
+th{background:#fafafa;color:var(--ink-2);font-weight:600;white-space:nowrap}
+td.num{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+
+.tag{display:inline-block;padding:1px 7px;border-radius:2px;font-size:12px}
+.tag.draft{background:#f0f0f0;color:var(--ink-2)}
+.tag.on_sale{background:#e8f7f0;color:var(--ok)}
+.tag.off_shelf{background:#fff1f0;color:#c0392b}
+.tag.pending_payment{background:#fff8e6;color:var(--warn)}
+.tag.paid{background:#e8f4ff;color:#1668dc}
+.tag.shipped,.tag.delivered{background:#e8f7f0;color:var(--ok)}
+.tag.completed{background:#f0f0f0;color:var(--ink-2)}
+.tag.cancelled{background:#f0f0f0;color:var(--ink-3)}
+.tag.refunding{background:#fff1f0;color:#c0392b}
+.tag.refunded{background:#f0f0f0;color:var(--ink-3)}
+
+.btn{border:1px solid var(--line);border-radius:3px;padding:4px 11px;font-size:12.5px;
+     color:var(--ink-2);background:#fff}
+.btn:hover{border-color:var(--orange);color:var(--orange)}
+.btn.primary{background:var(--orange);border-color:var(--orange);color:#fff}
+.btn.primary:hover{opacity:.9;color:#fff}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn+.btn{margin-left:5px}
+
+.field{margin-bottom:10px}
+.field label{display:block;font-size:12.5px;color:var(--ink-2);margin-bottom:3px}
+.field input,.field textarea,.field select{width:100%;border:1px solid var(--line);
+  border-radius:3px;padding:6px 9px}
+.field textarea{min-height:60px;resize:vertical}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 14px}
+
+.msg{padding:9px 12px;border-radius:3px;font-size:13px;margin-bottom:12px;display:none}
+.msg.on{display:block}
+.msg.ok{background:#e8f7f0;color:var(--ok)}
+.msg.err{background:#fff1f0;color:#c0392b}
+.hint{color:var(--ink-3);font-size:12.5px}
+.blockers{color:var(--warn);font-size:12px;margin-top:3px}
+.empty{padding:36px;text-align:center;color:var(--ink-3);background:#fff;
+       border:1px solid var(--line);border-radius:4px}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div class="logo">smartMall<span>商家后台</span></div>
+  <span class="sp"></span>
+  <span class="who" id="who">未登录</span>
+  <a class="back" href="/">← 回到店铺</a>
+</div>
+
+<div class="tabs">
+  <button id="tabProducts" class="on" onclick="showTab('products')">商品管理</button>
+  <button id="tabOrders" onclick="showTab('orders')">订单管理</button>
+</div>
+
+<div class="wrap">
+  <div class="msg" id="msg"></div>
+
+  <!-- ------------------------------------------------------ 商品 -->
+  <div class="panel on" id="panelProducts">
+    <div class="card">
+      <h3>上架新商品</h3>
+      <div class="grid">
+        <div class="field"><label>商品编号 *</label><input id="pNo" placeholder="P2026001"></div>
+        <div class="field"><label>商品名 *</label><input id="pName" placeholder="复古工装夹克"></div>
+        <div class="field"><label>简称</label><input id="pShort" placeholder="工装夹克"></div>
+        <div class="field"><label>类目 ID *</label><input id="pCat" value="1024"></div>
+        <div class="field"><label>品牌</label><input id="pBrand" value="smartMall"></div>
+        <div class="field"><label>主图文件名</label><input id="pImg" placeholder="9002.jpg"></div>
+      </div>
+      <div class="field"><label>副标题</label><input id="pSub" placeholder="秋冬加厚 · 通勤百搭"></div>
+      <div class="field">
+        <label>结构化属性　<span class="hint">一行一条，形如「材质=100%羊毛」。
+          这是运营 Agent 写文案的事实基准，<b>空着它就写不了</b></span></label>
+        <textarea id="pAttrs" placeholder="材质=100%羊毛&#10;克重=320g&#10;洗涤=水温不超过30度手洗"></textarea>
+      </div>
+      <div class="field">
+        <label>规格　<span class="hint">一行一条：编号,规格JSON,价格,原价,库存。
+          <b>没有规格上不了架</b></span></label>
+        <textarea id="pSkus" placeholder='K2026001,{"颜色":"藏青","尺码":"M"},459,599,12'></textarea>
+      </div>
+      <button class="btn primary" onclick="createProduct()">建为草稿</button>
+      <span class="hint">　新建一律是草稿，确认无误再上架</span>
+    </div>
+
+    <div class="card">
+      <h3>商品列表 <span class="hint" id="pCount"></span></h3>
+      <div id="productList"></div>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------ 订单 -->
+  <div class="panel" id="panelOrders">
+    <div class="card">
+      <h3>订单
+        <select id="oStatus" onchange="loadOrders()" style="border:1px solid var(--line);
+                padding:3px 8px;border-radius:3px;font-size:13px;margin-left:8px">
+          <option value="">全部</option>
+          <option value="pending_payment">待付款</option>
+          <option value="paid">待发货</option>
+          <option value="shipped">已发货</option>
+          <option value="delivered">已送达</option>
+          <option value="completed">已完成</option>
+          <option value="refunding">退款中</option>
+        </select>
+      </h3>
+      <div id="orderList"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* 令牌与店铺页共用同一份 localStorage —— 在店铺页切成商家身份之后
+   进来就不用再登一次。**它只是凭证，不是身份本身**：后端只验签名。 */
+let auth = null;
+
+function loadAuth(){
+  try { auth = JSON.parse(localStorage.getItem('smartmall.auth') || 'null'); }
+  catch(e){ auth = null; }
+}
+
+function saveAuth(a){
+  auth = a;
+  try { localStorage.setItem('smartmall.auth', JSON.stringify(a)); } catch(e){}
+}
+
+/* 带令牌的 fetch。**唯一出口** —— 散着手写 headers 迟早漏一个，
+   而漏的表现是 401，看起来像"功能坏了"而不是"没带令牌"。 */
+async function api(url, opts){
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {});
+  if (auth && auth.token) headers['Authorization'] = 'Bearer ' + auth.token;
+  const r = await fetch(url, Object.assign({}, opts, {headers}));
+  return await r.json();
+}
+
+function say(kind, text){
+  const m = $('#msg');
+  m.className = 'msg on ' + kind;
+  m.textContent = text;
+  clearTimeout(say._t);
+  say._t = setTimeout(() => m.className = 'msg', 6000);
+}
+
+/* 商家身份。没有就自动登录 —— 这是演示页，不是生产登录流程。
+   真实系统这里应该是登录框，见 README 的说明。 */
+async function ensureMerchant(){
+  if (auth && auth.role === 'merchant'){ renderWho(); return true; }
+  const d = await (await fetch('/api/auth/login', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username:'merchant', password:'smartmall123'}),
+  })).json();
+  if (d.code !== 0){
+    say('err', '商家登录失败：' + (d.message || '') +
+        '（订单服务没起来？.\\smartmall.ps1 up）');
+    return false;
+  }
+  saveAuth(d.data);
+  renderWho();
+  return true;
+}
+
+function renderWho(){
+  $('#who').innerHTML = auth
+    ? `<b>${esc(auth.nickname || auth.username)}</b> · #${auth.userId} · ${esc(auth.role)}`
+    : '未登录';
+}
+
+function showTab(name){
+  ['products','orders'].forEach(n => {
+    $('#panel' + n[0].toUpperCase() + n.slice(1)).classList.toggle('on', n === name);
+    $('#tab' + n[0].toUpperCase() + n.slice(1)).classList.toggle('on', n === name);
+  });
+  if (name === 'orders') loadOrders();
+}
+
+/* ---------------------------------------------------------------- 商品 */
+
+function parseAttrs(text){
+  const out = {};
+  (text || '').split('\n').forEach(line => {
+    const i = line.indexOf('=');
+    if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  });
+  return out;
+}
+
+/* 规格一行：编号,规格JSON,价格,原价,库存
+   规格 JSON 里有逗号，所以**不能整行按逗号切** —— 先按第一个逗号取编号，
+   再从末尾取三个数字，剩下的中间段整个是 JSON。
+   实测踩过：按逗号 split 会把 {"颜色":"藏青","尺码":"M"} 切成两半。 */
+function parseSkus(text){
+  const out = [];
+  (text || '').split('\n').forEach(line => {
+    line = line.trim();
+    if (!line) return;
+    const first = line.indexOf(',');
+    if (first < 0) return;
+    const skuNo = line.slice(0, first).trim();
+    const rest = line.slice(first + 1);
+    const parts = rest.split(',');
+    if (parts.length < 3) return;
+    const stock = parts.pop().trim();
+    const originPrice = parts.pop().trim();
+    const price = parts.pop().trim();
+    const spec = parts.join(',').trim();
+    out.push({
+      skuNo, spec,
+      price: Number(price),
+      originPrice: originPrice === '' ? null : Number(originPrice),
+      stock: parseInt(stock, 10),
+    });
+  });
+  return out;
+}
+
+async function createProduct(){
+  const body = {
+    productNo: $('#pNo').value.trim(),
+    name: $('#pName').value.trim(),
+    shortName: $('#pShort').value.trim() || null,
+    categoryId: parseInt($('#pCat').value, 10) || null,
+    brand: $('#pBrand').value.trim() || null,
+    subtitle: $('#pSub').value.trim() || null,
+    mainImage: $('#pImg').value.trim() || null,
+    attrs: parseAttrs($('#pAttrs').value),
+    skus: parseSkus($('#pSkus').value),
+  };
+  if (!body.productNo || !body.name || !body.categoryId){
+    say('err', '商品编号、商品名、类目 ID 是必填的');
+    return;
+  }
+  const d = await api('/api/admin/products', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body),
+  });
+  if (d.code !== 0){ say('err', d.message || '建失败'); return; }
+  say('ok', `已建为草稿：#${d.data.id} ${d.data.name}`);
+  ['pNo','pName','pShort','pSub','pImg','pAttrs','pSkus'].forEach(i => $('#' + i).value = '');
+  loadProducts();
+}
+
+async function loadProducts(){
+  const d = await api('/api/admin/products?limit=100');
+  if (d.code !== 0){
+    $('#productList').innerHTML = `<div class="empty">读不到商品：${esc(d.message || '')}</div>`;
+    return;
+  }
+  const items = d.data || [];
+  $('#pCount').textContent = `共 ${items.length} 个`;
+  if (!items.length){
+    $('#productList').innerHTML = '<div class="empty">还没有商品，用上面的表单建一个</div>';
+    return;
+  }
+  $('#productList').innerHTML = `<table>
+    <tr><th>ID</th><th>编号</th><th>商品</th><th>状态</th><th>规格 / 库存</th><th>属性</th><th>操作</th></tr>
+    ${items.map(p => `
+      <tr>
+        <td class="num">${p.id}</td>
+        <td class="num">${esc(p.productNo)}</td>
+        <td>${esc(p.name)}<br><span class="hint">${esc(p.subtitle || '')}</span></td>
+        <td><span class="tag ${p.status}">${statusCn(p.status)}</span>
+            ${p.blockers && p.blockers.length
+              ? `<div class="blockers">⚠ ${p.blockers.map(esc).join('<br>⚠ ')}</div>` : ''}</td>
+        <td>${(p.skus || []).map(s => `
+              <div class="num">${esc(s.skuNo)}　${esc(s.spec)}<br>
+              ¥${s.price}　库存 ${s.stock}
+              <button class="btn" style="padding:1px 7px"
+                onclick="editSku(${p.id},'${esc(s.skuNo)}','${esc(s.spec)}',${s.price},${s.stock})">改</button>
+              </div>`).join('') || '<span class="hint">无</span>'}
+            <button class="btn" style="margin-top:4px;padding:2px 8px"
+              onclick="addSku(${p.id})">+ 加规格</button></td>
+        <td>${Object.entries(p.attrs || {}).map(([k, v]) =>
+              `<div class="hint">${esc(k)}：${esc(v)}</div>`).join('') || '<span class="hint">无</span>'}</td>
+        <td>${p.status === 'on_sale'
+              ? `<button class="btn" onclick="shelf(${p.id},'off-shelf')">下架</button>`
+              : `<button class="btn primary" onclick="shelf(${p.id},'on-shelf')">上架</button>`}</td>
+      </tr>`).join('')}
+  </table>`;
+}
+
+function statusCn(s){
+  return ({draft:'草稿', on_sale:'在售', off_shelf:'已下架',
+    pending_payment:'待付款', paid:'待发货', shipped:'已发货',
+    delivered:'已送达', completed:'已完成', cancelled:'已取消',
+    refunding:'退款中', refunded:'已退款'})[s] || s;
+}
+
+async function shelf(id, action){
+  const d = await api(`/api/admin/products/${id}/${action}`, {method:'POST'});
+  if (d.code !== 0){
+    // 上架被挡下是**常态不是异常**：缺 SKU、缺属性都会走到这里，
+    // 而消息里已经逐条说清了缺什么
+    say('err', d.message || '操作失败');
+    return;
+  }
+  say('ok', action === 'on-shelf' ? '已上架，店铺页可见' : '已下架（数据保留，历史订单不受影响）');
+  loadProducts();
+}
+
+async function upsertSku(pid, spec){
+  const d = await api(`/api/admin/products/${pid}/skus`, {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(spec),
+  });
+  if (d.code !== 0){ say('err', d.message || '失败'); return; }
+  say('ok', '规格已保存');
+  loadProducts();
+}
+
+function editSku(pid, skuNo, spec, price, stock){
+  const p = prompt(`改价（${skuNo}）`, price);
+  if (p === null) return;
+  const s = prompt(`改库存（${skuNo}）`, stock);
+  if (s === null) return;
+  upsertSku(pid, {skuNo, spec, price:Number(p), originPrice:null, stock:parseInt(s,10)});
+}
+
+function addSku(pid){
+  const line = prompt('新规格：编号,规格JSON,价格,原价,库存',
+                      'K-NEW,{"颜色":"米白","尺码":"L"},399,499,10');
+  if (!line) return;
+  const parsed = parseSkus(line);
+  if (!parsed.length){ say('err', '格式不对'); return; }
+  upsertSku(pid, parsed[0]);
+}
+
+/* ---------------------------------------------------------------- 订单 */
+
+async function loadOrders(){
+  const st = $('#oStatus').value;
+  const d = await api('/api/admin/orders?limit=100' + (st ? '&status=' + st : ''));
+  if (d.code !== 0){
+    $('#orderList').innerHTML = `<div class="empty">读不到订单：${esc(d.message || '')}</div>`;
+    return;
+  }
+  const items = d.data || [];
+  if (!items.length){
+    $('#orderList').innerHTML = '<div class="empty">没有符合条件的订单</div>';
+    return;
+  }
+  $('#orderList').innerHTML = `<table>
+    <tr><th>订单号</th><th>买家</th><th>商品</th><th>金额</th><th>状态</th>
+        <th>物流</th><th>操作</th></tr>
+    ${items.map(o => `
+      <tr>
+        <td class="num">${esc(o.orderNo)}<br><span class="hint">${fmtTime(o.createdAt)}</span></td>
+        <td class="num">#${o.userId}</td>
+        <td class="num">${esc(o.skuNo)}<br><span class="hint">${esc(o.spec)} ×${o.quantity}</span></td>
+        <td class="num">¥${o.amount}</td>
+        <td><span class="tag ${o.status}">${statusCn(o.status)}</span>
+            ${o.refundReason ? `<div class="blockers">退款理由：${esc(o.refundReason)}</div>` : ''}</td>
+        <td class="num">${o.expressCompany ? esc(o.expressCompany) + '<br>' + esc(o.expressNo) : '<span class="hint">—</span>'}</td>
+        <td>${orderActions(o)}</td>
+      </tr>`).join('')}
+  </table>`;
+}
+
+function fmtTime(t){
+  if (!t) return '';
+  return String(t).replace('T', ' ').slice(0, 16);
+}
+
+function orderActions(o){
+  if (o.status === 'paid')
+    return `<button class="btn primary" onclick="ship('${o.orderNo}')">发货</button>`;
+  if (o.status === 'shipped')
+    return `<button class="btn" onclick="orderAct('${o.orderNo}','deliver')">标记送达</button>`;
+  if (o.status === 'refunding')
+    return `<button class="btn primary" onclick="orderAct('${o.orderNo}','refund-approve')">同意退款</button>`
+         + `<button class="btn" onclick="rejectRefund('${o.orderNo}')">驳回</button>`;
+  return '<span class="hint">—</span>';
+}
+
+async function orderAct(orderNo, action, body){
+  const d = await api(`/api/admin/orders/${orderNo}/${action}`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body || {}),
+  });
+  if (d.code !== 0){ say('err', d.message || '操作失败'); return; }
+  say('ok', '已处理：' + statusCn(d.data.status));
+  loadOrders();
+}
+
+function ship(orderNo){
+  const company = prompt('快递公司', '中通');
+  if (!company) return;
+  const expressNo = prompt('快递单号', 'ZT' + Date.now());
+  if (!expressNo) return;
+  // 发货之后客服就能答出物流了——那是这条链最有说服力的一环
+  orderAct(orderNo, 'ship', {company, expressNo});
+}
+
+function rejectRefund(orderNo){
+  const reason = prompt('驳回理由（会展示给买家）', '商品已拆封，不影响二次销售的条件不满足');
+  if (!reason) return;
+  orderAct(orderNo, 'refund-reject', {reason});
+}
+
+/* ---------------------------------------------------------------- 启动 */
+
+(async function init(){
+  loadAuth();
+  if (await ensureMerchant()) loadProducts();
+})();
+</script>
+</body>
+</html>

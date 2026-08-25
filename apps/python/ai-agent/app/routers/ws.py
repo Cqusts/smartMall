@@ -42,6 +42,23 @@ async def index() -> str:
     return page.read_text(encoding="utf-8")
 
 
+@router.get("/merchant", response_class=HTMLResponse, summary="商家后台")
+async def merchant_page() -> str:
+    """商家后台。
+
+    与店铺页分成两个页面而不是一页里加开关：两边的受众、权限、数据都不同，
+    混在一起的结果是买家页里躺着一堆只有商家能用的代码，而"哪些元素该按
+    角色隐藏"迟早会漏一个——漏的方向通常是该藏的没藏。
+
+    **这个路由不做鉴权**，页面本身也不做。能不能操作由 mall-product 的
+    ``@RequireMerchant`` 决定：前端藏按钮是体验不是安全，藏了照样能 curl。
+    """
+    page = _WEB / "merchant.html"
+    if not page.is_file():  # pragma: no cover
+        return "<h1>缺少 web/merchant.html</h1>"
+    return page.read_text(encoding="utf-8")
+
+
 @router.get("/img/{name}", summary="商品图")
 async def product_image(name: str) -> FileResponse:
     """商品图。
@@ -226,6 +243,62 @@ async def refund_order(order_no: str, request: Request,
         raise HTTPException(status_code=400, detail="订单号格式不合法")
     return await _forward("POST", f"/api/product/orders/{order_no}/refund",
                           json_body=payload, authorization=_auth(request))
+
+
+# ---------------------------------------------------------------- 商家后台
+#
+# 全部原样透传，**这一层不做任何权限判断**——判定在 mall-product 的
+# @RequireMerchant 上。在这里再写一份角色检查的结果是两份规则渐行渐远，
+# 而先漏的那份不会有人发现。
+
+@router.get("/api/admin/products", summary="商品列表（商家）")
+async def admin_products(request: Request, limit: int = 50) -> dict[str, Any]:
+    return await _forward("GET", "/api/product/admin/products",
+                          params={"limit": limit}, authorization=_auth(request))
+
+
+@router.post("/api/admin/products", summary="新建商品（商家）")
+async def admin_create_product(payload: dict[str, Any],
+                               request: Request) -> dict[str, Any]:
+    return await _forward("POST", "/api/product/admin/products",
+                          json_body=payload, authorization=_auth(request))
+
+
+@router.put("/api/admin/products/{pid}", summary="改商品（商家）")
+async def admin_update_product(pid: int, payload: dict[str, Any],
+                               request: Request) -> dict[str, Any]:
+    return await _forward("PUT", f"/api/product/admin/products/{pid}",
+                          json_body=payload, authorization=_auth(request))
+
+
+@router.put("/api/admin/products/{pid}/skus", summary="改价改库存（商家）")
+async def admin_upsert_sku(pid: int, payload: dict[str, Any],
+                           request: Request) -> dict[str, Any]:
+    return await _forward("PUT", f"/api/product/admin/products/{pid}/skus",
+                          json_body=payload, authorization=_auth(request))
+
+
+#: 上下架。白名单映射而不是把动作直接拼进 URL——否则调用方就能自己
+#: 指定下游路径（与订单那边同一个理由）
+_SHELF_ACTIONS = {"on-shelf": "on-shelf", "off-shelf": "off-shelf"}
+
+
+@router.post("/api/admin/products/{pid}/{action}", summary="上下架（商家）")
+async def admin_shelf(pid: int, action: str, request: Request) -> dict[str, Any]:
+    if action not in _SHELF_ACTIONS:
+        raise HTTPException(status_code=404, detail=f"未知动作：{action}")
+    return await _forward("POST", f"/api/product/admin/products/{pid}/{action}",
+                          authorization=_auth(request))
+
+
+@router.get("/api/admin/orders", summary="订单列表（商家）")
+async def admin_orders(request: Request, status: str | None = None,
+                       limit: int = 50) -> dict[str, Any]:
+    params: dict[str, Any] = {"limit": limit}
+    if status:
+        params["status"] = status
+    return await _forward("GET", "/api/product/admin/orders",
+                          params=params, authorization=_auth(request))
 
 
 #: 商家侧动作。演示页要能把整条链路点完，否则「发货 → 客服答得出物流」

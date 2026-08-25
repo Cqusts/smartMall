@@ -775,3 +775,55 @@ class TestShoppingWiring:
         store.ttl = -1
         store.get(None)                      # 触发淘汰
         assert ctx.session_id not in store._agent_state, "会话没了它还占着"
+
+
+class TestMerchantPage:
+    """商家后台。
+
+    与店铺页分成两个页面：两边受众、权限、数据都不同，混在一起的结果是
+    买家页里躺着一堆只有商家能用的代码，而「哪些元素该按角色隐藏」
+    迟早会漏一个——漏的方向通常是该藏的没藏。
+    """
+
+    def _text(self, path="/merchant") -> str:
+        pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        return TestClient(app).get(path).text
+
+    def test_page_is_served(self):
+        assert "商家后台" in self._text()
+
+    def test_page_has_no_external_dependencies(self):
+        """演示环境常常没有外网，"打不开"比"不好看"严重得多。"""
+        assert not re.findall(r"https?://[^\"'\s<]*", self._text())
+
+    def test_storefront_links_to_it(self):
+        assert 'href="/merchant"' in self._text("/")
+
+    def test_it_sends_the_token(self):
+        """不带令牌的话每个请求都是 401，看起来像"功能坏了"。"""
+        text = self._text()
+        assert "Authorization" in text and "Bearer" in text
+
+    def test_it_does_not_decide_permissions_itself(self):
+        """**前端藏按钮是体验，不是安全**——藏了照样能 curl 调。
+
+        这条钉住的是：页面里不该出现「role == merchant 才放行」这类判断，
+        它会让人以为权限已经做了。真正的判定在 mall-product 的
+        @RequireMerchant 上。
+        """
+        text = self._text()
+        assert "@RequireMerchant" in text or "mall-product" in text, (
+            "页面注释里要写明权限判定在哪一端"
+        )
+
+    def test_sku_line_parser_handles_json_commas(self):
+        """规格 JSON 里有逗号，整行按逗号切会把它切成两半。
+
+        这不是假想：{"颜色":"藏青","尺码":"M"} 正是最常见的写法。
+        """
+        text = self._text()
+        assert "不能整行按逗号切" in text

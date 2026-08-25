@@ -8,6 +8,8 @@ import com.smartmall.product.order.dto.ShipRequest;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -39,6 +41,14 @@ public class OrderAdminController {
 
     public OrderAdminController(OrderService orderService) {
         this.orderService = orderService;
+    }
+
+    @Operation(summary = "订单列表", description = "status 为空返回全部；商家看的是全店的单")
+    @GetMapping
+    public ApiResponse<java.util.List<com.smartmall.product.order.dto.MerchantOrderView>> list(
+            @RequestParam(value = "status", required = false) String status,
+            @RequestParam(value = "limit", defaultValue = "50") int limit) {
+        return ApiResponse.ok(orderService.listForMerchant(status, limit));
     }
 
     @PostMapping("/{orderNo}/ship")

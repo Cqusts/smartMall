@@ -507,6 +507,23 @@ public class OrderService {
     }
 
     /** 查单。同样的越权口径：不属于你的单，就是"不存在"。 */
+    /**
+     * 商家侧订单列表。**没有归属校验，因为商家看的就是全店的单**——
+     * 这也正是这几个接口必须 @RequireMerchant 的理由：买家拿到它
+     * 就等于能看全店订单。
+     */
+    public List<com.smartmall.product.order.dto.MerchantOrderView> listForMerchant(
+            String status, int limit) {
+        return orderMapper.listForMerchant(status, Math.min(Math.max(limit, 1), 200))
+                .stream()
+                .map(o -> new com.smartmall.product.order.dto.MerchantOrderView(
+                        o.getOrderNo(), o.getUserId(), o.getProductId(), o.getSkuNo(),
+                        o.getSpec(), o.getQuantity(), o.getAmount(), o.getStatus(),
+                        o.getCreatedAt(), o.getExpressCompany(), o.getExpressNo(),
+                        o.getRefundReason()))
+                .toList();
+    }
+
     public OrderView get(String orderNo, Long userId) {
         MallOrder order = orderMapper.findByOrderNo(orderNo);
         if (order == null || !order.getUserId().equals(userId)) {
