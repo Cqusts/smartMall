@@ -86,6 +86,15 @@ class Deps:
     的前提，而那不需要先有写权限。"""
     copy_store: Any = None
     """营销文案落库通道（运营 Agent 用）。为 None 时只生成不落库。"""
+    media: Any = None
+    """图/视频生成模型（运营 Agent 用）。为 None 时**只出提示词不生成**——
+    提示词是这条链路上唯一能被规则检查的东西（图生成完就查不了了），
+    看得见它就能判断该不该接模型，而那一步不该先花钱。"""
+    asset_store: Any = None
+    """素材落库通道。为 None 时只生成不落库。"""
+    asset_dir: Any = None
+    """生成结果的落地目录。**模型返回的 URL 24 小时后失效**，不下载到本地的话
+    今天演示完、明天打开就是一片裂图（见 marketing/media.download）。"""
     on_event: Any = None
     """流式事件回调 ``(dict) -> None``。为 None 时整条链路完全同步，
     行为与从前一致——**流式不另起一套编排**，否则两条路径必然分叉。"""

@@ -9,7 +9,7 @@ from ai_common import create_app
 from ai_common.checks import http_check, kafka_check, tcp_check
 
 from .config import settings
-from .routers import chat, ws
+from .routers import chat, media, ws
 
 app = create_app(settings, description="LangGraph 编排：客服 Agent · 运营 Agent · 考核 Agent")
 
@@ -17,6 +17,7 @@ app = create_app(settings, description="LangGraph 编排：客服 Agent · 运�
 reg = app.state.health
 s = settings
 app.include_router(chat.router)
+app.include_router(media.router)
 app.include_router(ws.router)
 
 reg.register("litellm", http_check(f"{s.litellm_base_url}/health/liveliness"))
@@ -32,6 +33,8 @@ async def info():
         "service": settings.service_name,
         "version": settings.version,
         "milestone": "M2",
-        "capabilities": ["customer_service", "marketing", "sales_kpi_judge"],
-        "implemented": ["customer_service"],
+        "capabilities": ["customer_service", "shopping_guide", "knowledge_ops",
+                         "marketing", "sales_kpi_judge"],
+        "implemented": ["customer_service", "shopping_guide", "knowledge_ops",
+                        "marketing"],
     }

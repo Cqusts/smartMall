@@ -55,6 +55,9 @@ logs/
 *.log
 airflow.db
 comfyui-output/
+# 运营 Agent 生成的图与视频。**不进版本库**：一个 5 秒 720P 视频就是几 MB，
+# 而且它是可再生的——库里的 prompt 与 model 留着，重跑一次就有
+apps/python/ai-agent/web/generated/
 
 # ---- IDE ----
 .idea/

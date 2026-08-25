@@ -6,6 +6,9 @@
     smartmall-agent trace "会起球吗"          # 单轮 + 打印完整 Trace
     smartmall-agent shop -v                  # 导购 Agent：多轮收敛出商品
     smartmall-agent kb                       # 知识运维：给盲点起草（默认试跑）
+    smartmall-agent copy --product-id 9001   # 运营：写文案（默认试跑）
+    smartmall-agent media --product-id 9001  # 运营：出图（默认只拼提示词）
+    smartmall-agent media --poll             # 取跑完的视频任务
 
 调试台的价值在于**看得见中间过程**：意图分到哪一类、检索命中了什么、
 分数多少、为什么转人工。这些在聊天界面里全是隐形的，而它们恰恰是
@@ -63,8 +66,13 @@ def _default_env_files() -> list[Path]:
 # ---------------------------------------------------------------- 装配
 
 
-def _build_deps(args: argparse.Namespace, *, with_retriever: bool = True) -> Deps:
-    """CLI 侧装配。只负责把命令行参数翻成配置，装配本身走 assembly。"""
+def _build_deps(args: argparse.Namespace, *, with_retriever: bool = True,
+                with_media: bool = False) -> Deps:
+    """CLI 侧装配。只负责把命令行参数翻成配置，装配本身走 assembly。
+
+    ``with_media`` 默认关：**装上它就意味着这条命令随时可能花钱**，
+    而 chat / ask / eval 一次也用不到它。
+    """
     from .assembly import build_deps, config_from_env
 
     cfg = config_from_env(
@@ -78,6 +86,7 @@ def _build_deps(args: argparse.Namespace, *, with_retriever: bool = True) -> Dep
         with_store=not args.no_trace,
         with_tools=not args.no_tools,
         with_retriever=with_retriever,
+        with_media=with_media,
         config=cfg,
     )
 
@@ -354,6 +363,63 @@ def cmd_copy(args: argparse.Namespace) -> int:
     return 0 if state.outcome in ("staged", "draft_only") else 1
 
 
+def cmd_media(args: argparse.Namespace) -> int:
+    """运营 Agent：给商品生成主图 / 宣传视频。
+
+    **默认不生成，只拼提示词。** 与 copy/kb 的 --write 是同一个理由，
+    但这里还多一条：调一次模型就花一次额度，而免费额度用完之后
+    连"再试一次"都做不到。提示词恰恰是这条链路上唯一查得了的东西
+    （生成完的图，规则一个字也读不了），先看它是最划算的一步。
+    """
+    deps = _build_deps(args, with_retriever=False, with_media=not args.dry_run)
+
+    if args.poll:
+        from .marketing.media_flow import poll_pending
+
+        report = poll_pending(deps, limit=args.limit)
+        if not report.checked:
+            print("  没有在跑的视频任务")
+        else:
+            print(f"  查了 {report.checked} 个：成功 {report.succeeded}"
+                  f" · 还在跑 {report.running} · 失败 {report.failed}"
+                  f" · 没查到状态 {report.unknown}")
+        for note in report.notes:
+            print(f"    ⚠ {note}")
+        return 0
+
+    if not args.product_id:
+        print("✗ 要指定商品：smartmall-agent media --product-id 9002")
+        return 1
+
+    from .marketing.media_flow import NEGATIVE, MediaBrief, safe_run_media
+
+    brief = MediaBrief(product_id=args.product_id, kind=args.kind,
+                       usage=args.usage, duration=args.duration)
+    state = safe_run_media(brief, deps)
+
+    print(f"\n==> 商品 #{brief.product_id} {state.product_name}"
+          f"（{'宣传视频' if brief.kind == 'video' else '商品图 · ' + brief.usage}）")
+    if state.prompt:
+        print(f"\n  提示词：{state.prompt}")
+        print(f"  负向：{NEGATIVE}")
+    if state.flags:
+        print(f"\n  ⚠ {'、'.join(state.flags)}")
+    if state.local_path:
+        print(f"\n  已落地：{state.local_path}")
+
+    tail = {
+        "generated": f"→ marketing_asset #{state.asset_id}（待审核，不会自动上架）",
+        "queued": (f"→ marketing_asset #{state.asset_id}，任务 "
+                   f"{state.task.task_id if state.task else '?'} 还在跑。"
+                   "过一两分钟跑 `smartmall-agent media --poll` 取结果"),
+        "prompt_only": "试跑没调模型。加 --write 会真的生成并写入一条**待审**素材",
+        "needs_human": "上面的问题要人处理，没有生成",
+        "skipped": "本轮跳过",
+    }
+    print(f"\n  {tail.get(state.outcome, state.outcome)}")
+    return 0 if state.outcome in ("generated", "queued", "prompt_only") else 1
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     from .graph import safe_run_turn
 
@@ -554,6 +620,22 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--write", dest="dry_run", action="store_false",
                    default=True, help="真的写库（写入的是待审文案）")
     s.set_defaults(func=cmd_copy)
+
+    s = sub.add_parser("media", parents=[common],
+                       help="运营 Agent：生成商品图 / 宣传视频（默认只出提示词）")
+    s.add_argument("--kind", default="image", choices=["image", "video"])
+    s.add_argument("--usage", default="white",
+                   choices=["white", "scene", "detail"],
+                   help="白底主图 / 场景图 / 细节图。视频忽略这个")
+    s.add_argument("--duration", type=int, default=5, help="视频秒数")
+    s.add_argument("--poll", action="store_true",
+                   help="不生成，只把还在跑的视频任务查一遍并下载")
+    s.add_argument("--limit", type=int, default=20, help="--poll 一次查几个")
+    # 默认不调模型：调一次花一次额度，而免费额度用完之后连"再试一次"
+    # 都做不到。提示词是这条链路上唯一查得了的东西，先看它最划算
+    s.add_argument("--write", dest="dry_run", action="store_false",
+                   default=True, help="真的生成并写入一条**待审**素材")
+    s.set_defaults(func=cmd_media)
 
     s = sub.add_parser("kb", parents=[common],
                        help="知识运维 Agent：给知识盲点起草待审条目")

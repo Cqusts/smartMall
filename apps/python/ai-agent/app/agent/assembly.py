@@ -12,9 +12,24 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from .llm import FakeLlmClient, OpenAiCompatClient
 from .nodes import AgentConfig, Deps
+
+
+def asset_dir() -> Path:
+    """生成素材的落地目录。
+
+    默认放在 ``web/generated``，因为它要被页面直接引用（见
+    ``routers/media.py``）。**不放 web/img**：那里是商家自己传的商品图，
+    与机器生成的素材混在一起之后，"这张图是不是 AI 画的"就只能靠查库——
+    而《人工智能生成合成内容标识办法》要求的恰恰是它可被识别。
+    """
+    override = os.environ.get("SMARTMALL_ASSET_DIR", "").strip()
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[2] / "web" / "generated"
 
 
 def config_from_env(**overrides) -> AgentConfig:
@@ -58,6 +73,7 @@ def build_deps(
     with_store: bool = True,
     with_tools: bool = True,
     with_retriever: bool = True,
+    with_media: bool = False,
     config: AgentConfig | None = None,
     log=print,
 ) -> Deps:
@@ -70,6 +86,9 @@ def build_deps(
     是别立假门槛**：导购一条检索都不发，却要为了装配去申请 embedding
     的 key、等它把几千条切片灌进内存，起不来还直接报错退出——
     用户会以为是导购坏了。
+
+    ``with_media`` 默认关，与上面相反的理由：**它是唯一一个装上就可能
+    花钱的组件**，而 chat / ask / eval 一次也用不到。谁要用谁显式打开。
     """
     cfg = config or config_from_env()
 
@@ -133,5 +152,33 @@ def build_deps(
             # 失败关闭：不配就不收图。装作没看见比"看了但没脱敏"安全得多
             log(f"  ⚠ 看图不可用（{type(exc).__name__}），发图会被婉拒")
 
+    mediac, assets = None, None
+    if with_media:
+        if fake_llm:
+            from .marketing.media import FakeMediaClient
+
+            mediac = FakeMediaClient()
+            log("  生成：假模型（不调 API、不花额度）")
+        else:
+            from .marketing.media import DashScopeMediaClient
+
+            try:
+                mediac = DashScopeMediaClient()
+                log(f"  生成：{mediac.image_model} / {mediac.video_model}")
+            except Exception as exc:  # noqa: BLE001
+                # 不配就只出提示词。提示词是这条链路上唯一能被规则检查的
+                # 东西，看得见它比生成不了更要紧
+                log(f"  ⚠ 生成模型不可用（{type(exc).__name__}），只出提示词")
+
+        from .marketing.store import MySqlAssetStore
+
+        try:
+            assets = MySqlAssetStore.from_env()
+            log("  素材：写入 marketing_asset（一律待审）")
+        except Exception as exc:  # noqa: BLE001
+            log(f"  ⚠ 素材库不可用（{type(exc).__name__}），生成的图不会落库")
+            log("    建表：deploy/sql/migrations/011_marketing_asset.sql")
+
     return Deps(llm=llm, retriever=retriever, config=cfg, store=store,
-                tools=tools, vision=vlm)
+                tools=tools, vision=vlm, media=mediac, asset_store=assets,
+                asset_dir=asset_dir() if with_media else None)

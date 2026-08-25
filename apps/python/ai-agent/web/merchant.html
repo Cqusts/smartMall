@@ -107,6 +107,7 @@ td.num{font-family:ui-monospace,Consolas,monospace;font-size:12px}
 <div class="tabs">
   <button id="tabProducts" class="on" onclick="showTab('products')">商品管理</button>
   <button id="tabOrders" onclick="showTab('orders')">订单管理</button>
+  <button id="tabAssets" onclick="showTab('assets')">AI 素材</button>
 </div>
 
 <div class="wrap">
@@ -161,6 +162,21 @@ td.num{font-family:ui-monospace,Consolas,monospace;font-size:12px}
         </select>
       </h3>
       <div id="orderList"></div>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------ AI 素材 -->
+  <div class="panel" id="panelAssets">
+    <div class="card">
+      <h3>AI 素材 <span class="hint" id="aCount"></span>
+        <button class="btn" style="float:right" onclick="pollVideos()">查视频任务</button>
+      </h3>
+      <p class="hint" style="margin-bottom:10px">
+        提示词只用商品属性表里的事实拼，不让模型润色——润色一遍它就会自己加上
+        "高级羊绒质感"，而那正是要防的编造。生成的素材<b>一律待审</b>，
+        审核通过前不会出现在商品页上。
+      </p>
+      <div id="assetList"></div>
     </div>
   </div>
 </div>
@@ -227,11 +243,12 @@ function renderWho(){
 }
 
 function showTab(name){
-  ['products','orders'].forEach(n => {
+  ['products','orders','assets'].forEach(n => {
     $('#panel' + n[0].toUpperCase() + n.slice(1)).classList.toggle('on', n === name);
     $('#tab' + n[0].toUpperCase() + n.slice(1)).classList.toggle('on', n === name);
   });
   if (name === 'orders') loadOrders();
+  if (name === 'assets') loadAssets();
 }
 
 /* ---------------------------------------------------------------- 商品 */
@@ -334,7 +351,13 @@ async function loadProducts(){
               `<div class="hint">${esc(k)}：${esc(v)}</div>`).join('') || '<span class="hint">无</span>'}</td>
         <td>${p.status === 'on_sale'
               ? `<button class="btn" onclick="shelf(${p.id},'off-shelf')">下架</button>`
-              : `<button class="btn primary" onclick="shelf(${p.id},'on-shelf')">上架</button>`}</td>
+              : `<button class="btn primary" onclick="shelf(${p.id},'on-shelf')">上架</button>`}
+            <div style="margin-top:6px">
+              <button class="btn" onclick="genMedia(this,${p.id},'image','white')">AI 主图</button>
+              <button class="btn" onclick="genMedia(this,${p.id},'image','scene')">AI 场景图</button><br>
+              <button class="btn" style="margin-top:4px"
+                onclick="genMedia(this,${p.id},'video','')">AI 短视频</button>
+            </div></td>
       </tr>`).join('')}
   </table>`;
 }
@@ -455,6 +478,108 @@ function rejectRefund(orderNo){
   const reason = prompt('驳回理由（会展示给买家）', '商品已拆封，不影响二次销售的条件不满足');
   if (!reason) return;
   orderAct(orderNo, 'refund-reject', {reason});
+}
+
+/* ---------------------------------------------------------------- AI 素材 */
+
+/* 生成一次素材。
+
+   按钮要**立刻禁用并改字**：图要几秒、视频要一两分钟，没有反馈的话
+   商家会以为没点上，然后连点五次——每一次都真的花一份额度。 */
+async function genMedia(btn, productId, kind, usage){
+  const was = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = kind === 'video' ? '排队中…' : '生成中…';
+  try {
+    const d = await api('/api/admin/media', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({productId, kind, usage}),
+    });
+    if (d.code !== 0){
+      // 合规没过、属性表是空的都会走到这里，而 message 里逐条说清了原因。
+      // **原样显示**：把它压成一句"生成失败"，商家就无从判断该改什么
+      say('err', d.message || '没生成出来');
+      return;
+    }
+    const head = d.data.outcome === 'queued'
+      ? `视频任务已排队（${d.data.taskId}）。生成要 1–5 分钟，过一会儿到` +
+        '「AI 素材」点「查视频任务」取结果'
+      : `已生成素材 #${d.data.assetId}，待审核——审核通过前不会挂到商品页`;
+    // 提示拼成一条。**分两次 say 只会看到后一条**：它是同一个横幅，
+    // 后写的把前面的盖掉了——而被盖掉的偏偏是"生成成功了"那句
+    const flags = d.data.flags || [];
+    say('ok', flags.length ? head + '　⚠ ' + flags.join('、') : head);
+    loadAssets();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = was;
+  }
+}
+
+async function loadAssets(){
+  const d = await api('/api/admin/media?limit=100');
+  if (d.code !== 0){
+    $('#assetList').innerHTML = `<div class="empty">读不到素材：${esc(d.message || '')}</div>`;
+    return;
+  }
+  const items = d.data || [];
+  $('#aCount').textContent = `共 ${items.length} 个`;
+  if (!items.length){
+    $('#assetList').innerHTML =
+      '<div class="empty">还没有素材。到「商品管理」点某个商品的「AI 主图」</div>';
+    return;
+  }
+  $('#assetList').innerHTML = `<table>
+    <tr><th>ID</th><th>商品</th><th>类型</th><th>预览</th><th>任务</th>
+        <th>模型</th><th>审核</th></tr>
+    ${items.map(a => `
+      <tr>
+        <td class="num">${a.id}</td>
+        <td class="num">#${a.productId}</td>
+        <td>${a.kind === 'video' ? '视频' : '图'}${a.usage ? '<br><span class="hint">' + esc(usageCn(a.usage)) + '</span>' : ''}</td>
+        <td>${assetPreview(a)}</td>
+        <td>${taskCn(a.taskStatus)}
+            ${a.error ? `<div class="blockers">${esc(a.error)}</div>` : ''}</td>
+        <td class="num">${esc(a.model || '—')}
+            ${a.aiGenerated ? '<div class="hint">AI 生成</div>' : ''}</td>
+        <td><span class="tag ${a.reviewStatus === 'approved' ? 'on_sale' : 'draft'}">
+            ${a.reviewStatus === 'approved' ? '已通过' : '待审'}</span></td>
+      </tr>`).join('')}
+  </table>`;
+}
+
+function usageCn(u){
+  return ({white:'白底主图', scene:'场景图', detail:'细节图'})[u] || u;
+}
+
+function taskCn(s){
+  return ({pending:'排队中', running:'生成中', succeeded:'已完成',
+           failed:'失败'})[s] || s || '—';
+}
+
+function assetPreview(a){
+  if (!a.localPath)
+    // 没落地的素材不给链接：源 URL 24 小时就失效，点开是一片空白，
+    // 而那看起来像页面坏了
+    return '<span class="hint">文件没落地</span>';
+  const url = '/' + a.localPath;
+  return a.kind === 'video'
+    ? `<video src="${esc(url)}" style="max-width:160px;border-radius:3px" controls muted></video>`
+    : `<a href="${esc(url)}" target="_blank"><img src="${esc(url)}"
+         style="max-width:110px;border-radius:3px;border:1px solid var(--line)"></a>`;
+}
+
+async function pollVideos(){
+  const d = await api('/api/admin/media/poll', {method:'POST'});
+  if (d.code !== 0){ say('err', d.message || '查询失败'); return; }
+  const r = d.data;
+  const head = r.checked
+    ? `查了 ${r.checked} 个：成功 ${r.succeeded} · 还在跑 ${r.running}` +
+      ` · 失败 ${r.failed} · 没查到状态 ${r.unknown}`
+    : '没有在跑的视频任务';
+  const notes = r.notes || [];
+  say('ok', notes.length ? head + '　⚠ ' + notes.join('；') : head);
+  loadAssets();
 }
 
 /* ---------------------------------------------------------------- 启动 */

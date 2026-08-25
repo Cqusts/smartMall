@@ -85,7 +85,9 @@ def get_deps() -> Deps:
     if _deps is None:
         from ..agent.assembly import build_deps
 
-        _deps = build_deps(log=lambda m: None)
+        # with_media=True：商家后台的素材生成走这一份 Deps。
+        # 装不上（没 key、没建表）也不影响对话——那两个组件只是留空
+        _deps = build_deps(with_media=True, log=lambda m: None)
     return _deps
 
 
