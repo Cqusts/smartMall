@@ -457,10 +457,17 @@ footer code{background:#ececec;padding:1px 5px;border-radius:2px}
         以及为什么 —— 这些平时全是隐形的。
       </div>
       <div class="note" style="border-top:1px solid var(--line);padding-top:10px">
-        演示用户 ID
-        <input id="user" value="10086" style="width:74px;border:1px solid
-          var(--line);padding:3px 6px;border-radius:2px;margin-left:4px">
-        <br>查订单时用；换成别人的 ID 会被越权校验挡下。
+        当前身份
+        <select id="who" onchange="switchIdentity(this.value)"
+                style="border:1px solid var(--line);padding:3px 6px;
+                       border-radius:2px;margin-left:4px">
+          <option value="demo">演示买家</option>
+          <option value="buyer2">另一位买家</option>
+          <option value="merchant">店铺管理员</option>
+        </select>
+        <span id="whoState" style="margin-left:6px;color:var(--ink-3)"></span>
+        <br>切换会重新登录换一个令牌。<b>订单归属只认令牌里的身份</b>——
+        改浏览器里的任何字段都越权不了。
       </div>
     </div>
   </div>
@@ -897,7 +904,6 @@ async function buyNow(){
     return;
   }
   const qty = Math.min(20, Math.max(1, parseInt($('#qty').value, 10) || 1));
-  const userId = parseInt($('#user').value, 10) || 10086;
 
   placing = true;
   const btn = $('#buybtn');
@@ -905,14 +911,15 @@ async function buyNow(){
   orderMsg('ok', '<span class="hint">正在提交订单…</span>');
 
   try{
-    const r = await fetch('/api/orders', {
+    const r = await authFetch('/api/orders', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         // 一次下单动作一个 requestId。重试要复用同一个才有幂等意义，
         // 所以它在这里生成、不在重试里重新生成
         requestId: uuid(),
-        userId: userId,
+        // **这里没有 userId**：曾经有，那意味着改一个数字就能替别人下单。
+        // 归属现在由令牌决定，前端连伪造的机会都没有
         skuNo: selectedSku,
         quantity: qty,
       }),
@@ -1045,13 +1052,13 @@ function renderOrder(o, verb){
 async function orderAction(orderNo, action, verbs, body, isAdmin){
   if (placing) return;
   placing = true;
-  const userId = parseInt($('#user').value, 10) || 10086;
-  // 商家侧走 /api/admin/orders，不带 user_id —— 那些动作没有"归属用户"这回事
+  // 用户侧与商家侧都只带令牌。商家动作要求 merchant 角色（后端
+  // @RequireMerchant 判定）——买家身份点发货会拿到 1403
   const url = isAdmin
     ? `/api/admin/orders/${encodeURIComponent(orderNo)}/${action}`
-    : `/api/orders/${encodeURIComponent(orderNo)}/${action}?user_id=${userId}`;
+    : `/api/orders/${encodeURIComponent(orderNo)}/${action}`;
   try{
-    const r = await fetch(url, {
+    const r = await authFetch(url, {
       method: 'POST',
       headers: body ? {'Content-Type': 'application/json'} : undefined,
       body: body ? JSON.stringify(body) : undefined,
@@ -1201,7 +1208,7 @@ function send(e){
     message: text,
     image: pendingImage,
     session_id: sessionId,
-    user_id: parseInt($('#user').value) || null,
+    user_id: auth ? auth.userId : null,
     // 导购不钉商品：它要在整个在售列表里挑，钉住就等于替用户先决定了
     product_id: (current && agentMode !== 'shopping') ? current.id : null,
   }));
@@ -1405,6 +1412,9 @@ function tick(){
 }
 tick(); setInterval(tick, 1000);
 
+loadAuth();
+// 没有令牌就先按演示买家登录一次，否则页面一进来就点不了下单
+if (!auth) switchIdentity('demo');
 loadProducts();
 connect();
 </script>

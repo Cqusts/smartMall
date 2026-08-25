@@ -16,7 +16,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (APIRouter, HTTPException, Request, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.responses import FileResponse, HTMLResponse
 
 from ..agent.state import AgentState
@@ -127,7 +128,8 @@ _SAFE_ORDER_NO = re.compile(r"\d{14,24}")
 
 async def _forward(method: str, path: str, *,
                    json_body: dict[str, Any] | None = None,
-                   params: dict[str, Any] | None = None) -> dict[str, Any]:
+                   params: dict[str, Any] | None = None,
+                   authorization: str | None = None) -> dict[str, Any]:
     """把请求原样转给 mall-product。
 
     **这里只是转发，不是实现。**下单是写操作，而本服务的工具层是刻意全只读的
@@ -142,9 +144,14 @@ async def _forward(method: str, path: str, *,
     import httpx
 
     url = f"{settings.order_base_url.rstrip('/')}{path}"
+    # 令牌**原样透传**，这里不解析也不重签。这一层只是转发，它没有密钥、
+    # 也不该有——身份的判定权在 mall-product 那一端（见 JwtService 的类注释：
+    # 鉴权要放在被访问的那一端，不是放在你希望别人走的那条路上）
+    headers = {"Authorization": authorization} if authorization else None
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.request(method, url, json=json_body, params=params)
+            resp = await client.request(method, url, json=json_body,
+                                        params=params, headers=headers)
     except Exception as exc:  # noqa: BLE001
         # 订单服务没起来是演示时最常见的情况，错误要说清楚是哪个服务、
         # 怎么起——只回一句"失败"，用户会以为是代码坏了
@@ -165,50 +172,68 @@ async def _forward(method: str, path: str, *,
         }
 
 
+#: 用户侧转发。**身份不再作为参数出现在这一层**——它曾经是 ?user_id=，
+#: 也就是浏览器里改一个数字就能操作别人的订单。现在只透传令牌，
+#: 判定权在 mall-product。
+def _auth(request: Request) -> str | None:
+    return request.headers.get("Authorization")
+
+
+@router.post("/api/auth/login", summary="登录（转发到 mall-product）")
+async def login(payload: dict[str, Any]) -> dict[str, Any]:
+    """换取令牌。
+
+    **这一层不碰密码也不签令牌**：它没有密钥，签发权在 mall-product。
+    转发存在的唯一理由和订单一样——演示页由本服务托管，跨域调 8081 更麻烦。
+    """
+    return await _forward("POST", "/api/product/auth/login", json_body=payload)
+
+
 @router.post("/api/orders", summary="下单（转发到 mall-product）")
-async def create_order(payload: dict[str, Any]) -> dict[str, Any]:
-    return await _forward("POST", "/api/product/orders", json_body=payload)
+async def create_order(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+    return await _forward("POST", "/api/product/orders", json_body=payload,
+                          authorization=_auth(request))
 
 
 @router.post("/api/orders/{order_no}/pay", summary="支付（转发到 mall-product）")
-async def pay_order(order_no: str, user_id: int) -> dict[str, Any]:
+async def pay_order(order_no: str, request: Request) -> dict[str, Any]:
     if not _SAFE_ORDER_NO.fullmatch(order_no):
         raise HTTPException(status_code=400, detail="订单号格式不合法")
     return await _forward("POST", f"/api/product/orders/{order_no}/pay",
-                          params={"userId": user_id})
+                          authorization=_auth(request))
 
 
 @router.post("/api/orders/{order_no}/cancel", summary="取消（转发到 mall-product）")
-async def cancel_order(order_no: str, user_id: int) -> dict[str, Any]:
+async def cancel_order(order_no: str, request: Request) -> dict[str, Any]:
     if not _SAFE_ORDER_NO.fullmatch(order_no):
         raise HTTPException(status_code=400, detail="订单号格式不合法")
     return await _forward("POST", f"/api/product/orders/{order_no}/cancel",
-                          params={"userId": user_id})
+                          authorization=_auth(request))
 
 
 @router.post("/api/orders/{order_no}/confirm", summary="确认收货（转发）")
-async def confirm_order(order_no: str, user_id: int) -> dict[str, Any]:
+async def confirm_order(order_no: str, request: Request) -> dict[str, Any]:
     if not _SAFE_ORDER_NO.fullmatch(order_no):
         raise HTTPException(status_code=400, detail="订单号格式不合法")
     return await _forward("POST", f"/api/product/orders/{order_no}/confirm",
-                          params={"userId": user_id})
+                          authorization=_auth(request))
 
 
 @router.post("/api/orders/{order_no}/refund", summary="申请退款（转发）")
-async def refund_order(order_no: str, user_id: int,
+async def refund_order(order_no: str, request: Request,
                        payload: dict[str, Any]) -> dict[str, Any]:
     if not _SAFE_ORDER_NO.fullmatch(order_no):
         raise HTTPException(status_code=400, detail="订单号格式不合法")
     return await _forward("POST", f"/api/product/orders/{order_no}/refund",
-                          params={"userId": user_id}, json_body=payload)
+                          json_body=payload, authorization=_auth(request))
 
 
 #: 商家侧动作。演示页要能把整条链路点完，否则「发货 → 客服答得出物流」
 #: 这个最有说服力的环节没法演。
 #:
-#: ⚠️ 下游那几个接口本身没有鉴权（项目还没有认证体系），这里转发也就同样
-#: 没有。真实部署里 /api/product/admin/** 应该在网关上整片拦掉，只放给
-#: 运营后台——那也正是它被单独放到 admin 前缀下的原因。
+#: 下游那几个接口现在要求 merchant 角色（OrderAdminController 上的
+#: @RequireMerchant），这里只负责把令牌透传过去。买家令牌会拿到 1403，
+#: 不带令牌拿到 1401——两种都由 mall-product 判定，不在这一层。
 _ADMIN_ACTIONS = {
     "ship": "ship",
     "deliver": "deliver",
@@ -218,7 +243,7 @@ _ADMIN_ACTIONS = {
 
 
 @router.post("/api/admin/orders/{order_no}/{action}", summary="商家侧动作（演示用转发）")
-async def admin_order_action(order_no: str, action: str,
+async def admin_order_action(order_no: str, action: str, request: Request,
                              payload: dict[str, Any] | None = None) -> dict[str, Any]:
     if not _SAFE_ORDER_NO.fullmatch(order_no):
         raise HTTPException(status_code=400, detail="订单号格式不合法")
@@ -228,7 +253,8 @@ async def admin_order_action(order_no: str, action: str,
         raise HTTPException(status_code=404, detail=f"未知动作：{action}")
     return await _forward(
         "POST", f"/api/product/admin/orders/{order_no}/{downstream}",
-        json_body=payload if payload is not None else {})
+        json_body=payload if payload is not None else {},
+        authorization=_auth(request))
 
 
 @router.websocket("/ws/chat")
