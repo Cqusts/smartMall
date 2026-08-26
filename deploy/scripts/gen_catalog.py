@@ -22,10 +22,17 @@
 
 ---------------------------------------------------------------- 另一条
 
-**不给它们配图。** 仓库里只有 9001–9012 那 12 张实拍。把这 12 张循环
-贴到 500 个商品上，就会出现"巧克力饼干"配一张针织衫照片 —— 那比没有图
-糟得多，和给商品画一个它没有的颜色块是同一类错误。``main_image`` 留空，
-页面按类目渲染一个带类目名的占位块，一眼能看出是占位。
+**配图按类目来，不按商品。** 图是 fetch_images.py 从 Openverse 抓的
+CC 授权实拍，每个三级类目 4 张（``c{类目id}-{1..4}.jpg``），同类目的
+10 个商品轮着用。
+
+按商品逐个搜要 570 次请求，而"手工曲奇 独立包装"和"低糖曲奇 办公室零食"
+搜出来本来就是同一类照片。同类目 10 个商品共用 4 张，重复看得见——
+但一张真实的曲奇照片配一个曲奇商品，比灰色占位块强，也比配一张针织衫
+照片诚实。
+
+**抓不到图的类目留空**，页面退回占位块。硬塞一张不相干的照片是这里
+唯一不能做的事。
 """
 
 from __future__ import annotations
@@ -518,6 +525,17 @@ PER_L3 = 10
 
 BRANDS = ["smartMall", "smartMall 优选", "smartMall 甄选"]
 
+#: 图放在 web/img/ 下，文件名形如 c4060-1.jpg
+IMG_DIR = Path(__file__).resolve().parents[2] / "apps" / "python" / "ai-agent" \
+    / "web" / "img"
+
+
+def images_for(l3_id: int) -> list[str]:
+    """这个类目抓到了哪几张图。**按文件是否真的存在来判断**，
+    不按"应该有 4 张"——抓失败的类目要老老实实退回占位块，
+    而不是让页面上出现一批 404。"""
+    return sorted(p.name for p in IMG_DIR.glob(f"c{l3_id}-*.jpg"))
+
 # ---------------------------------------------------------------- 生成
 
 
@@ -543,6 +561,7 @@ def build() -> tuple[list[str], list[str], list[str], list[str], dict]:
         cats[l3_id] = (l3_id, l2_id, l3, 3, f"/{l1_id}/{l2_id}/{l3_id}")
         schema = KINDS[kind]
         stats[kind] = stats.get(kind, 0) + PER_L3
+        pics = images_for(l3_id)
 
         for i in range(PER_L3):
             # 名字：修饰 + 核心。撞名就换一个修饰词——库里两个同名商品
@@ -569,7 +588,8 @@ def build() -> tuple[list[str], list[str], list[str], list[str], dict]:
             sold_out = rnd.random() < 0.10
             products.append(
                 f"({pid}, 'P{pid}', '{esc(name)}', '{esc(pre + core)}', {l3_id}, "
-                f"'{esc(rnd.choice(BRANDS))}', 'on_sale', '')")
+                f"'{esc(rnd.choice(BRANDS))}', 'on_sale', "
+                f"'{esc(pics[i % len(pics)]) if pics else ''}')")
 
             over = dict(OVERRIDES.get(l3_id, {}))
             dropped = set(over.pop("-", ()))
