@@ -64,3 +64,9 @@ apps/python/ai-agent/web/generated/
 .vscode/
 *.iml
 .DS_Store
+
+# ---- Milvus Lite ----
+# 嵌入式模式下 collection 是一个**目录**（3.x 起，不是单文件），
+# 默认落在 ./data/kb.db。索引是派生数据，重跑 `index` 就能重建。
+data/
+*.db/

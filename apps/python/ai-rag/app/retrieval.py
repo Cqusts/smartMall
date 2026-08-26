@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Iterable, Sequence
 
+from smartmall_pipeline.rag.store import SEARCHABLE_REVIEW_STATUS
+
 
 class RetrievalOutcome(StrEnum):
     """检索结果的处置方式。"""
@@ -89,7 +91,8 @@ def build_filter_expr(
 
     前三条是**硬性过滤，任何查询都必须带上**，调用方无法绕过：
 
-    * ``review_status == "approved"`` —— 未审核的知识绝不进入检索结果
+    * ``review_status in [...]`` —— 未审核的知识绝不进入检索结果。
+      取值见 ``SEARCHABLE_REVIEW_STATUS``，与本地实现共用一份
     * ``valid_to_ts == 0 or valid_to_ts > now`` —— 过期知识自动排除
     * ``kb_version == ...`` —— 版本隔离，支持秒级回滚
 
@@ -97,8 +100,12 @@ def build_filter_expr(
     """
     now_ts = now_ts if now_ts is not None else int(time.time())
 
+    # 状态列表与 LocalVectorStore.load() 共用一份定义——各写一份的话，
+    # 人工改写过的知识（revised）会出现"本地能查到、Milvus 查不到"，
+    # 而且不报错。见 SEARCHABLE_REVIEW_STATUS 的注释。
+    statuses = ", ".join(f'"{_escape(s)}"' for s in SEARCHABLE_REVIEW_STATUS)
     clauses = [
-        'review_status == "approved"',
+        f"review_status in [{statuses}]",
         f"(valid_to_ts == 0 or valid_to_ts > {now_ts})",
     ]
 

@@ -36,6 +36,41 @@ def dot(a: Sequence[float], b: Sequence[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
+SEARCHABLE_REVIEW_STATUS = ("approved", "revised")
+"""哪些审核状态算「可检索」。
+
+``revised`` 是人工改写过的，恰恰是质量最高的那批，必须能被检索到；
+``pending`` / ``rejected`` 绝不进检索结果。
+
+**两个后端共用这一份定义。** 之前 ``LocalVectorStore.load()`` 收
+``('approved','revised')`` 而 ``build_filter_expr`` 只收 ``approved``——
+同一条人工改写过的知识，本地能查到、换到 Milvus 就查不到，且不报错。
+"""
+
+CHUNK_ID_STRIDE = 1000
+"""一个 knowledge_item 最多允许的切片数。见 :func:`chunk_pk`。"""
+
+
+def chunk_pk(item_id: int, chunk_seq: int) -> int:
+    """由 ``(item_id, chunk_seq)`` 合成切片主键。
+
+    **两个后端必须用同一个规则。** Milvus 那边 ``chunk_id`` 是主键，
+    upsert 靠它定位要覆盖哪一行；本地实现靠它与 Milvus 的结果对齐。
+    各写一份的话，同一条知识在两个后端会有两个 id，而不会有任何报错。
+
+    ``chunk_seq`` 越界必须报错而不是回绕：``item_id=7, chunk_seq=1000``
+    与 ``item_id=8, chunk_seq=0`` 会算出同一个主键，后写的那条**静默
+    覆盖**前一条——检索时只是少了一条知识，查不出是哪一步弄丢的。
+    """
+    if not 0 <= chunk_seq < CHUNK_ID_STRIDE:
+        raise ValueError(
+            f"chunk_seq={chunk_seq} 超出 [0, {CHUNK_ID_STRIDE}) —— "
+            f"再切下去主键会和 item_id={item_id + 1} 的切片撞上。"
+            f"要支持更多切片得同时调大两个后端的 CHUNK_ID_STRIDE。"
+        )
+    return item_id * CHUNK_ID_STRIDE + chunk_seq
+
+
 @dataclass
 class LocalHit:
     """一条召回结果。字段与 ai-rag 的 Hit 对齐。"""
@@ -68,8 +103,8 @@ class LocalHit:
 
     @property
     def chunk_id(self) -> int:
-        """与 Milvus 的 chunk_id 对应。本地实现用 (item_id, chunk_seq) 合成。"""
-        return self.item_id * 1000 + self.chunk_seq
+        """与 Milvus 的 chunk_id 对应。见 :func:`chunk_pk`。"""
+        return chunk_pk(self.item_id, self.chunk_seq)
 
 
 @dataclass
@@ -187,7 +222,9 @@ class LocalVectorStore:
             "       k.product_ids, k.asset_ids, k.valid_to, k.review_status "
             "FROM kb_embedding e "
             "JOIN knowledge_item k ON k.id = e.item_id "
-            "WHERE k.deleted = 0 AND k.review_status IN ('approved','revised')"
+            "WHERE k.deleted = 0 AND k.review_status IN ("
+            + ", ".join(f"'{s}'" for s in SEARCHABLE_REVIEW_STATUS)
+            + ")"
         )
         with self.engine.connect() as conn:  # type: ignore[attr-defined]
             raw = conn.execute(stmt).mappings().fetchall()

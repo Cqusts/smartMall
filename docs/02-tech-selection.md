@@ -84,6 +84,25 @@
 - 支持标量字段过滤（`product_id`、`review_status`、`valid_to`），这是本项目检索的刚需
 - Standalone 模式单容器可跑，符合单机部署基线
 
+**开发机上不需要 Docker，也不需要 Linux。**
+`milvus-lite` 3.2 起是**纯 Python 包**（`py3-none-any`，无 `.so`/`.dll`），
+整条依赖链（faiss-cpu / grpcio / numpy / pyarrow / protobuf）都有 Windows
+轮子，jieba 是免编译的源码包。把 `KB_MILVUS_URI` 从 `http://host:19530`
+换成一个本地文件路径就切到嵌入式模式，**业务代码一行不用改**。
+
+两种形态有一处差异必须显式配：`analyzer`。Lite 只认 `standard` / `jieba`，
+服务端只认 `standard` / `english` / `chinese` / `arabic` / `thai`（没有
+`jieba`）。写死任何一个，另一边建 collection 就报 `unknown tokenizer type`。
+这不只是名字之差——分词结果不同，BM25 召回也会有差异，调阈值时别把两边
+的数混着看。
+
+**什么时候才真需要上服务端。** 判据不是条数，是这三条踩到任意一条：
+① 单机内存装不下（1024 维 float32，约 100 万条 / 4GB）；② 需要不重启就
+增量更新；③ 多进程要共享一份索引。实测暴力检索的拐点：纯 Python 逐条
+点积在 5000 条就要 279ms、5 万条 3 秒；换成一次矩阵乘，100 万条只要
+76ms——**先撑不住的是内存，不是速度**。所以在本项目的量级上，
+`LocalVectorStore` 不是将就，Milvus 也不是性能需求。
+
 **否决项**
 
 | 方案 | 否决原因 |
@@ -92,6 +111,7 @@
 | **Elasticsearch + 向量插件** | 向量检索性能弱于专用向量库，且资源占用大（JVM） |
 | **Qdrant** | 能力接近 Milvus，但中文社区资料与稀疏检索生态不如 Milvus |
 | **Chroma** | 定位是原型/本地开发，不适合作为项目主库 |
+| **FAISS / hnswlib 裸库** | 只有索引没有标量过滤与持久化，本项目每次查询都要过 `review_status` / `valid_to` 两条硬性过滤，得自己再写一层——那就是在重造 Milvus 的一半 |
 
 ### 2.4 数据清洗：Data-Juicer + Label Studio
 

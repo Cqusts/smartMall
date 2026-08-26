@@ -10,6 +10,8 @@ import time
 
 import pytest
 
+from smartmall_pipeline.rag.store import SEARCHABLE_REVIEW_STATUS
+
 from app import chunking
 from app.retrieval import (
     Hit,
@@ -100,14 +102,28 @@ class TestFilterExpr:
     def test_always_includes_hard_filters(self):
         """三条硬性过滤任何查询都必须带上。"""
         expr = build_filter_expr(kb_version="kb-v3")
-        assert 'review_status == "approved"' in expr
+        assert "review_status in [" in expr
         assert "valid_to_ts" in expr
         assert 'kb_version == "kb-v3"' in expr
 
     def test_hard_filters_present_even_without_version(self):
         expr = build_filter_expr()
-        assert 'review_status == "approved"' in expr
+        assert "review_status in [" in expr
         assert "valid_to_ts" in expr
+
+    def test_searchable_statuses_agree_with_the_local_backend(self):
+        """两个后端对「什么算可检索」必须是同一份定义。
+
+        改之前 ``build_filter_expr`` 只收 ``approved``，而
+        ``LocalVectorStore.load()`` 收 ``('approved','revised')``——
+        人工改写过的知识（revised，恰恰是质量最高的那批）在本地能查到、
+        换到 Milvus 就查不到，**而且不报错**。
+        """
+        expr = build_filter_expr()
+        for status in SEARCHABLE_REVIEW_STATUS:
+            assert f'"{status}"' in expr, f"{status} 应该算可检索"
+        assert "revised" in expr, "人工改写过的知识必须能被检索到"
+        assert "pending" not in expr and "rejected" not in expr, "未审核的绝不能进结果"
 
     def test_expiry_uses_current_time(self):
         now = int(time.time())

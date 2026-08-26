@@ -1,3 +1,18 @@
-# ai-rag —— M0 运行时依赖（轻量，可直接安装验证）
+# ai-rag —— 运行时依赖
 # 模型相关的重依赖见 requirements-ml.txt，按里程碑引入
 uvicorn[standard]>=0.32
+
+# Milvus 客户端。同一份代码跑两种形态：
+#   uri=http://host:19530  → Milvus 服务端
+#   uri=/path/to/kb.db     → Milvus Lite（嵌入式）
+pymilvus>=2.5
+
+# Milvus Lite —— 纯 Python 实现，**Windows / macOS / Linux 都能装**，
+# 不需要 Docker，也不需要 Linux 服务器。开发机上就靠它。
+# [chinese] 装的是 jieba：中文 BM25 的分词器，不装的话中文全文检索没法用。
+milvus-lite[chinese]>=3.2
+
+# 词汇覆盖率（lexical_overlap）与切片主键规则要和数据中台共用一份实现。
+# 各写一份的话，同一个阈值在两个检索后端下会是两个含义，且不会报错。
+#   pip install -e pipelines
+smartmall-pipeline

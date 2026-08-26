@@ -146,6 +146,75 @@ class TestLexicalCoverage:
         assert bm25.Bm25Index.build([]).coverage("任何问题") == {}
 
 
+class TestLexicalStats:
+    """接 Milvus 之后算词汇覆盖率的那条路。
+
+    Milvus 的 ``hybrid_search`` 只返回融合后的 RRF 分——给不出分路分数，
+    更给不出词汇覆盖率。而 ``graph.has_lexical_support`` 正是靠覆盖率
+    决定「转人工」还是「澄清」。所以换到 Milvus 后台，这个数得由
+    :class:`LexicalStats` 从语料级 IDF 表 + 命中自身的文本补出来。
+    """
+
+    DOCS = [
+        "七天无理由退换：签收后七天内可申请退换",
+        "发货时效：现货商品 48 小时内发出",
+        "支持的快递：默认发顺丰，偏远地区改发中通",
+        "退货运费：非质量问题由买家承担",
+    ]
+
+    @pytest.fixture
+    def stats(self):
+        return bm25.LexicalStats.build(self.DOCS)
+
+    @pytest.fixture
+    def index(self):
+        return bm25.Bm25Index.build(list(enumerate(self.DOCS)))
+
+    @pytest.mark.parametrize("query", [
+        "七天无理由能退吗",
+        "你们支持花呗分期吗",
+        "退货运费谁出",
+        "48小时发货吗",
+    ])
+    def test_agrees_with_bm25index_to_the_digit(self, stats, index, query):
+        """**这条是 LexicalStats 能存在的前提。**
+
+        ``lexical_support_min`` 这个阈值是照着 ``Bm25Index.coverage``
+        量出来的。两个实现给出不同的数，就等于换个检索后端阈值含义
+        就变了——而且不会有任何报错，只会安静地把闸门调松或调死。
+        """
+        expected = index.coverage(query)
+        got = [stats.coverage(query, t) for t in self.DOCS]
+        assert got == pytest.approx([expected.get(i, 0.0) for i in range(len(self.DOCS))])
+        # 别让这条退化成 0 == 0 的自我安慰
+        assert max(got) > 0, "这个查询在语料里应该有覆盖，否则这条断言什么也没验"
+
+    def test_the_gate_still_discriminates(self, stats):
+        """覆盖率换了实现，但拦花呗的能力必须还在——这才是它的用途。"""
+        absent = max(stats.coverage("你们支持花呗分期吗", t) for t in self.DOCS)
+        present = max(stats.coverage("七天无理由能退吗", t) for t in self.DOCS)
+        assert absent < 0.15, "库里没有花呗，覆盖率必须低"
+        assert present > 0.3, "库里有七天无理由，覆盖率必须高"
+
+    def test_only_keeps_document_frequencies(self, stats):
+        """内存是 O(词表) 不是 O(语料)：只存 df 与总数，不存每篇文档的词。
+
+        这正是它与 Bm25Index 的分工——召回交给 Milvus，这里只算判据。
+        """
+        assert stats.total == len(self.DOCS)
+        assert not hasattr(stats, "doc_tokens")
+        assert stats.df["退货"] == 1 and stats.df["七天"] == 1
+
+    def test_df_counts_documents_not_occurrences(self):
+        """一篇文档里出现十次也只算一次 df，否则 IDF 会被词频污染。"""
+        s = bm25.LexicalStats.build(["退货退货退货退货"])
+        assert s.df["退货"] == 1
+
+    def test_empty_query_or_corpus(self, stats):
+        assert stats.coverage("", self.DOCS[0]) == 0.0
+        assert bm25.LexicalStats.build([]).coverage("任何问题", "任何文本") == 0.0
+
+
 # ---------------------------------------------------------------- 向量打包
 
 

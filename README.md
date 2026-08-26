@@ -177,7 +177,7 @@ ClickHouse 全家桶）是另一条路，本地开发用不到，见
 | 里程碑 | 状态 | 内容 |
 |---|---|---|
 | **M0 基础设施** | ✅ 已完成 | monorepo 骨架、11 个服务、compose 三件套、30 张表、Kafka 契约、健康探针 |
-| **M1 数据中台 + RAG** | 🟡 核心已完成 | 四道清洗关卡、`knowledge_item`、混合检索、发版门禁、覆盖度矩阵、3 个 DAG（426 测试）<br/>待接真实环境：JDDC 导入、Milvus 集成验证、Label Studio 项目配置 |
+| **M1 数据中台 + RAG** | 🟡 核心已完成 | 四道清洗关卡、`knowledge_item`、混合检索、发版门禁、覆盖度矩阵、3 个 DAG（434 测试）、ai-rag `/search` 接通 Milvus（含跑在 Milvus Lite 上的集成测试）<br/>待接真实环境：JDDC 导入、Label Studio 项目配置、bge-reranker |
 | **M2 文本 AI 客服** | ✅ 已完成 | LangGraph 状态机、七类意图分流、引用溯源、转人工、Trace 落库、点赞点踩、知识盲点回流、只读业务工具（含越权校验）、WebSocket 流式、店铺前台与客服浮窗、评测集与门禁<br/>待做：Redis 会话（多实例部署才需要） |
 | **M3 运营 Agent + 素材** | 🟡 核心已完成 | 文案生产（卖点溯源 + 广告法合规拦截）、商品图与宣传视频生成（云 API）、素材一律待审、《标识办法》要求的 AI 生成标识<br/>未做：CosyVoice2 口播、ComfyUI 工作流版本化、虚拟试穿 |
 | **M4 多模态客服** | 🟡 核心已完成 | 图片理解入口（qwen-vl-max）、图片 PII 脱敏（失败关闭）、单据/商品图分流<br/>未做：把素材作为答案挂载回去 |
@@ -235,16 +235,24 @@ pipelines/recipes/  Data-Juicer 配方 + 算子校验工具
 apps/python/ai-rag/app/
   chunking.py       按 biz_type 分策略切分
   retrieval.py      硬性过滤 · RRF 融合 · 阈值裁剪
-  milvus_store.py   Milvus 2.5 原生 BM25 混合检索
+  milvus_store.py   Milvus 检索层：分路召回（继承 pipeline 的索引层）
+  search.py         /search 的服务层：向量化 · 硬性过滤 · 判据补全
+pipelines/smartmall_pipeline/rag/
+  store.py          LocalVectorStore（MySQL + 内存，无 Milvus 也能跑）
+  milvus.py         Milvus 索引层：schema · 建表 · 写入
+  bm25.py           中文 BM25 + LexicalStats（词汇覆盖率）
 ```
 
-**测试**：462 个（pipeline 426 + ai-rag 36），`pytest` 全绿。
+**测试**：499 个（pipeline 434 + ai-rag 65），`pytest` 全绿。
 端到端用例从 300 条合成对话跑到可发布的知识条目，断言漏斗单调递减、
-PII 零残留、全链路可溯源、流水线可复现。
+PII 零残留、全链路可溯源、流水线可复现。ai-rag 里有 28 条**真跑
+Milvus**（Milvus Lite，嵌入式，不需要 Docker）的集成测试——
+`milvus_store.py` 曾经是没人实例化过的死代码，三个阻塞缺陷全部是
+纯逻辑测试发现不了、只有真实例才会报的。
 
 ```bash
-cd pipelines && pip install -e ".[dev]" && pytest -q   # 426 passed
-cd apps/python/ai-rag && pip install -e ../ai-common && pytest -q   # 36 passed
+cd pipelines && pip install -e ".[dev]" && pytest -q   # 434 passed
+cd apps/python/ai-rag && pip install -e ../ai-common -r requirements.txt && pytest -q   # 65 passed
 ```
 
 ### 跑一遍数据中台
@@ -294,6 +302,48 @@ smartmall-pipeline clean --llm openai --limit 20
 Windows PowerShell 用 `$env:MYSQL_HOST="localhost"` 设置环境变量，
 且不支持 `&&`，命令需分行执行。也可以把上面这些写进 `deploy/.env`，
 CLI 会自动读取（见 `deploy/.env.example`）。
+
+### 换到 Milvus（Windows 上也不需要 Docker）
+
+默认的 `LocalVectorStore` 把向量放 MySQL、检索在内存里做，不需要额外
+部署任何东西。要走 Milvus 那条路，**在 Windows 上也不需要 Docker 或
+Linux 服务器**——`milvus-lite` 3.2 起是纯 Python 包：
+
+```bash
+pip install pymilvus "milvus-lite[chinese]"
+
+# 把索引写进 Milvus。--milvus-uri 给一个文件路径 = Milvus Lite（嵌入式）
+smartmall-pipeline index --backend both --milvus-uri ./data/kb.db
+
+# 起检索服务
+export KB_MILVUS_URI=$PWD/data/kb.db      # PowerShell: $env:KB_MILVUS_URI="D:\smartMall\data\kb.db"
+cd apps/python/ai-rag && uvicorn app.main:app --port 9001
+
+# Agent 指过来
+smartmall-agent chat --rag-url http://localhost:9001
+```
+
+`--backend both` 是两边都写。上线到 Milvus 服务端时只改两处：
+`KB_MILVUS_URI=http://host:19530`，以及 `MILVUS_ANALYZER=chinese`
+（Lite 只认 `jieba`，服务端只认 `chinese`，两边合法取值不同）。
+
+**三个踩过的坑**，都写进测试了：
+
+- **`MILVUS_URI` 这个变量名不能用** —— pymilvus 自己读它并按 URL 校验，
+  设成文件路径会在 import 阶段抛 `Illegal uri`，报错点在 pymilvus 内部。
+  所以本项目用 `KB_MILVUS_URI`。
+- **接 Milvus 不能直接用 `hybrid_search`** —— 它只返回融合后的 RRF 分
+  （上限 `2/(k+1)≈0.033`），而 Agent 的拒答阈值 `handover_below=0.30`
+  是照余弦相似度量出来的。喂 RRF 分进去，**每一条查询都会转人工**，
+  且不报错。所以走的是分路召回 + 本地 RRF。
+- **Milvus 给不出 `lexical_overlap`** —— 那是 `has_lexical_support` 用来
+  区分「转人工」和「澄清」的判据。缺了它闸门退回 `bm25 > 0`，而那个
+  判据近乎恒真。补法见 `LexicalStats`：只存语料级 `term→df`
+  （内存 O(词表)），覆盖率对命中自身的文本算。
+
+什么时候才真需要 Milvus 服务端，见
+[docs/02-tech-selection.md](docs/02-tech-selection.md#23-向量库milvus-standalone)——
+判据不是条数，是内存装不下 / 要免重启增量 / 要多进程共享索引。
 
 ### 跟客服 Agent 对话
 

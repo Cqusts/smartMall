@@ -24,6 +24,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from . import coverage as coverage_mod
 from . import publish as publish_mod
@@ -1131,12 +1132,44 @@ def cmd_index(args: argparse.Namespace) -> int:
         return 1
     print(f"==> 向量化后端：{provider.name}")
 
+    want_local = args.backend in ("local", "both")
+    want_milvus = args.backend in ("milvus", "both")
+    print(f"==> 索引后端：{args.backend}")
+
+    milvus = None
+    if want_milvus:
+        from .rag.milvus import MilvusConfig, MilvusIndex
+
+        milvus = MilvusIndex(MilvusConfig(
+            uri=args.milvus_uri, analyzer=args.milvus_analyzer,
+            collection=args.milvus_collection,
+        ))
+        try:
+            # rebuild 时重建 collection：schema 或 analyzer 改过之后，
+            # 往旧 collection 里写只会写进一个字段定义已经不同的表
+            milvus.ensure_collection(drop_existing=args.rebuild)
+        except Exception as exc:  # noqa: BLE001
+            print(f"\n✗ 连不上 Milvus（{args.milvus_uri}）：{exc}")
+            print("  本地开发把 --milvus-uri 指向一个文件路径即可，例如")
+            print("    --milvus-uri ./data/kb.db")
+            print("  那是 Milvus Lite，纯 Python，不需要 Docker 或 Linux。")
+            return 1
+        kind = "Lite（嵌入式）" if "://" not in args.milvus_uri else "服务端"
+        print(f"  Milvus {kind}：{args.milvus_uri} / {args.milvus_collection}")
+
+    if want_milvus and not want_local:
+        # embedding_status 只有一个标志位，表达不了"进了 Milvus 但没进本地"。
+        # 这些条目会被标成 indexed，之后 `--backend local` 就跳过它们——
+        # 本地索引永远是空的，而且不报错。说清楚比留个坑强。
+        print("  ⚠ 只写 Milvus：这批条目会被标成 indexed，本地索引不会有它们。")
+        print("    以后要回到本地检索，得跑 `index --backend local --rebuild`。")
+
     store = LocalVectorStore(engine=repo.engine)
 
     # 换后端必须在**写入前**拦住。混用检测在加载索引时才报错，
     # 那时候已经晚了：被拦住的是下游（Agent 起不来），
     # 而制造混用的是这一步。
-    existing = store.providers_in_index()
+    existing = store.providers_in_index() if want_local else {}
     others = {p: n for p, n in existing.items() if p and p != provider.name}
     if others and not args.rebuild:
         print(f"\n✗ 索引里已有其他后端的向量：{others}")
@@ -1144,15 +1177,21 @@ def cmd_index(args: argparse.Namespace) -> int:
         print("  用 `index --rebuild` 全量重建（会删掉旧后端的向量）。")
         return 1
 
+    from .rag.store import SEARCHABLE_REVIEW_STATUS
+
+    statuses = ", ".join(f"'{s}'" for s in SEARCHABLE_REVIEW_STATUS)
     where = (
-        "k.deleted = 0 AND k.review_status IN ('approved','revised')"
+        f"k.deleted = 0 AND k.review_status IN ({statuses})"
         if args.rebuild
-        else "k.deleted = 0 AND k.review_status IN ('approved','revised') "
+        else f"k.deleted = 0 AND k.review_status IN ({statuses}) "
              "AND k.embedding_status IN ('pending','stale')"
     )
     with repo.engine.connect() as conn:
         rows = conn.execute(text(
-            f"SELECT k.id, k.biz_type, k.title, k.content FROM knowledge_item k "
+            f"SELECT k.id, k.biz_type, k.title, k.content, k.modality, "
+            f"       k.category_id, k.product_ids, k.asset_ids, "
+            f"       k.review_status, k.valid_to, k.quality_score "
+            f"FROM knowledge_item k "
             f"WHERE {where} ORDER BY k.id LIMIT :limit"
         ), {"limit": args.limit}).mappings().fetchall()
 
@@ -1174,8 +1213,9 @@ def cmd_index(args: argparse.Namespace) -> int:
         (r["id"], 0, f"{r['title']}\n{r['content']}" if r["title"] else r["content"])
         for r in rows
     ]
+    meta = {r["id"]: r for r in rows}
 
-    if args.rebuild:
+    if args.rebuild and want_local:
         # REPLACE INTO 只覆盖主键相同的行。切分数量变了、条目被下架、
         # 或者换了后端，都会留下没人覆盖到的旧行——它们正是"混用"的来源。
         # 重建就要重建干净，先删再写。
@@ -1196,16 +1236,59 @@ def cmd_index(args: argparse.Namespace) -> int:
             print(f"\n✗ 第 {i} 批向量化失败：{exc}")
             print(f"  已完成 {done} 条，重跑本命令会从断点继续")
             return 1
-        store.upsert(
-            [(iid, seq, txt, vec) for (iid, seq, txt), vec in zip(chunk, vectors)],
-            provider.name,
-        )
+        if want_local:
+            store.upsert(
+                [(iid, seq, txt, vec) for (iid, seq, txt), vec in zip(chunk, vectors)],
+                provider.name,
+            )
+        if milvus is not None:
+            try:
+                milvus.upsert_chunks([
+                    _milvus_row(meta[iid], seq, txt, vec, args.kb_version)
+                    for (iid, seq, txt), vec in zip(chunk, vectors)
+                ])
+            except Exception as exc:  # noqa: BLE001
+                print(f"\n✗ 第 {i} 批写 Milvus 失败：{exc}")
+                print(f"  已完成 {done} 条，重跑本命令会从断点继续")
+                return 1
         repo.mark_indexed([iid for iid, _, _ in chunk])
         done += len(chunk)
         print(f"\r  已向量化 {done}/{len(payload)}", end="", flush=True)
 
     print(f"\n  ✓ 完成 {done} 条")
+    if milvus is not None:
+        # 报 collection 的实际条数，不报"我以为写了多少"——
+        # 写入报错被吞掉的情况下，这两个数会对不上
+        print(f"  Milvus collection 现有 {milvus.count()} 条")
     return 0
+
+
+def _milvus_row(
+    row: Any, chunk_seq: int, text: str, vector: list[float], kb_version: str
+) -> dict[str, Any]:
+    """把 knowledge_item 的一行摊平成 Milvus 的字段。
+
+    ``sparse_vec`` 不填——它由 collection 上挂的 BM25 Function 从 text
+    自动生成，手动提供会报错。``chunk_id`` 也不填，由 upsert_chunks
+    按 chunk_pk 合成，与本地实现同一个规则。
+    """
+    valid_to = row["valid_to"]
+    return {
+        "item_id": int(row["id"]),
+        "chunk_seq": int(chunk_seq),
+        "text": text[:4096],  # VARCHAR(4096)，超了 Milvus 直接拒收整批
+        "dense_vec": list(vector),
+        "biz_type": row["biz_type"] or "qa",
+        "modality": row["modality"] or "text",
+        "category_id": int(row["category_id"] or 0),
+        "product_ids": [int(x) for x in json.loads(row["product_ids"] or "[]")],
+        "asset_ids": [int(x) for x in json.loads(row["asset_ids"] or "[]")],
+        "review_status": row["review_status"],
+        # 0 表示永久有效，与 build_filter_expr 的 `valid_to_ts == 0` 对应
+        "valid_to_ts": int(valid_to.timestamp()) if valid_to else 0,
+        "quality_score": float(row["quality_score"] or 0.0),
+        "kb_version": kb_version,
+    }
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -1502,6 +1585,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="单批条数；默认取所选后端声明的上限")
     s.add_argument("--rebuild", action="store_true",
                    help="全量重建，而非只处理 pending/stale")
+    s.add_argument("--backend", choices=("local", "milvus", "both"), default="local",
+                   help="索引写到哪：local=MySQL+内存（默认，不需要额外部署）、"
+                        "milvus=Milvus、both=两边都写")
+    s.add_argument("--milvus-uri", default=os.environ.get("KB_MILVUS_URI", "./data/kb.db"),
+                   help="Milvus 地址。给 http://host:19530 是服务端；"
+                        "给一个文件路径就是 Milvus Lite（嵌入式，纯 Python，"
+                        "Windows 也能跑，不需要 Docker 或 Linux）")
+    s.add_argument("--milvus-collection", default=os.environ.get("MILVUS_COLLECTION", "kb_chunk"))
+    s.add_argument("--milvus-analyzer",
+                   default=os.environ.get("MILVUS_ANALYZER", "jieba"),
+                   help="中文分词器。Lite 用 jieba，服务端用 chinese——"
+                        "两边合法取值不同，传错会在建 collection 时报 "
+                        "unknown tokenizer type")
+    s.add_argument("--kb-version", default=os.environ.get("KB_VERSION", ""),
+                   help="知识库版本号，写进 Milvus 用于版本隔离与回滚")
     s.set_defaults(func=cmd_index)
 
     s = sub.add_parser("search", help="检索调试台")

@@ -19,6 +19,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Iterable, Mapping
 
 # 与 milvus_store.MilvusConfig 保持一致，换后端时排序行为可比
 K1 = 1.2
@@ -54,6 +55,83 @@ def tokenize(text: str) -> list[str]:
     return tokens
 
 
+def idf(total: int, df: int) -> float:
+    """逆文档频率。加一平滑，避免 df 接近 total 时出现负 idf。
+
+    抽成模块级函数是刻意的：:class:`Bm25Index` 与 :class:`LexicalStats`
+    都要用它，而 ``lexical_support_min`` 这个阈值是照着这个公式量出来的。
+    两边各写一份的话，哪天有人只改了其中一处，同一个阈值在两个检索后端
+    下就是两个含义——而且不会有任何报错。
+    """
+    return math.log(1 + (total - df + 0.5) / (df + 0.5))
+
+
+def _coverage_of(
+    q_terms: Mapping[str, int],
+    q_idf: Mapping[str, float],
+    total_idf: float,
+    doc_terms: Mapping[str, int],
+) -> float:
+    """查询里的信息量，这篇文档命中了多少，0~1。
+
+    :class:`Bm25Index.coverage` 与 :class:`LexicalStats.coverage` 的公共内核。
+    """
+    if total_idf <= 0:
+        return 0.0
+    matched = sum(q_idf[t] * n for t, n in q_terms.items() if doc_terms.get(t))
+    return matched / total_idf
+
+
+@dataclass
+class LexicalStats:
+    """语料级词汇统计：只有 ``term -> df`` 和文档总数。
+
+    **为什么不直接用 Bm25Index。** ``Bm25Index`` 存了每篇文档的词频表
+    （``doc_tokens``），内存是 O(语料)。接上 Milvus 之后召回由 Milvus 做，
+    真正需要算覆盖率的只有它返回的那几十条命中——而这些命中的文本本来
+    就随结果一起回来了。所以这里只需要一张 ``term -> df`` 表，
+    内存是 O(词表)，与语料规模基本脱钩。
+
+    **为什么非要有这个类。** Milvus 的 ``hybrid_search`` 只返回融合后的
+    RRF 分，给不出分路分数，更给不出词汇覆盖率。而
+    ``graph.has_lexical_support`` 正是靠覆盖率决定「转人工」还是「澄清」。
+    照直接接，``lexical_overlap`` 缺失会让那道闸门退回 ``bm25 > 0``——
+    见 :meth:`Bm25Index.coverage` 的注释，那个判据近乎恒真、形同虚设。
+    换句话说：**不做这一步，接 Milvus 等于把已有的闸门拆了。**
+    """
+
+    total: int = 0
+    df: Counter[str] = field(default_factory=Counter)
+
+    @classmethod
+    def build(cls, texts: Iterable[str]) -> "LexicalStats":
+        stats = cls()
+        for text in texts:
+            stats.add(text)
+        return stats
+
+    def add(self, text: str) -> None:
+        self.total += 1
+        self.df.update(set(tokenize(text)))
+
+    @property
+    def size(self) -> int:
+        return self.total
+
+    def coverage(self, query: str, text: str) -> float:
+        """单篇文档对查询的词汇覆盖率。
+
+        语义与 :meth:`Bm25Index.coverage` 完全一致——同一语料、同一查询、
+        同一文档，两者必须给出同一个数（见 ``test_lexical_stats``）。
+        """
+        q_terms = Counter(tokenize(query))
+        if not q_terms or not self.total:
+            return 0.0
+        q_idf = {t: idf(self.total, self.df.get(t, 0)) for t in q_terms}
+        total_idf = sum(q_idf[t] * n for t, n in q_terms.items())
+        return _coverage_of(q_terms, q_idf, total_idf, Counter(tokenize(text)))
+
+
 @dataclass
 class Bm25Index:
     """内存 BM25 索引。几万条以内够用。"""
@@ -84,10 +162,7 @@ class Bm25Index:
         return len(self.doc_ids)
 
     def _idf(self, term: str) -> float:
-        n = self.size
-        df = self.df.get(term, 0)
-        # 加一平滑，避免 df 接近 n 时出现负 idf
-        return math.log(1 + (n - df + 0.5) / (df + 0.5))
+        return idf(self.size, self.df.get(term, 0))
 
     def coverage(self, query: str) -> dict[int, float]:
         """每篇文档命中了查询多少**信息量**，取值 0~1。
@@ -109,18 +184,16 @@ class Bm25Index:
         q_terms = Counter(tokenize(query))
         if not q_terms:
             return {}
-        idf = {t: self._idf(t) for t in q_terms}
-        total = sum(idf[t] * n for t, n in q_terms.items())
+        q_idf = {t: self._idf(t) for t in q_terms}
+        total = sum(q_idf[t] * n for t, n in q_terms.items())
         if total <= 0:
             return {}
 
         out: dict[int, float] = {}
         for i, counts in enumerate(self.doc_tokens):
-            matched = sum(
-                idf[t] * n for t, n in q_terms.items() if counts.get(t)
-            )
-            if matched > 0:
-                out[self.doc_ids[i]] = matched / total
+            score = _coverage_of(q_terms, q_idf, total, counts)
+            if score > 0:
+                out[self.doc_ids[i]] = score
         return out
 
     def search(self, query: str, top_k: int = 50) -> list[tuple[int, float]]:
