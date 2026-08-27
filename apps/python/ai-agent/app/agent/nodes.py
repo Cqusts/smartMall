@@ -22,7 +22,7 @@ from .tools import (
     ToolBox, ToolError, extract_order_no, render_order, render_size_chart,
     render_skus,
 )
-from .state import AgentState, Citation, HandoverReason, Intent
+from .state import AnswerAsset, AgentState, Citation, HandoverReason, Intent
 
 
 @dataclass
@@ -163,6 +163,7 @@ NODE_LABELS = {
     "tools": "调用业务工具",
     "generate": "生成答案",
     "postcheck": "出口合规检查",
+    "mount": "挂载素材",
     "handover": "转接人工",
     "emit": "收尾落库",
 }
@@ -195,6 +196,12 @@ def step_detail(name: str, state: AgentState) -> dict[str, Any]:
             if state.trace.tools_called else {"调用": "无"}
     if name == "postcheck":
         return {"合规": state.postcheck_flags or "通过"}
+    if name == "mount":
+        # 挂了 0 张是**正常结果**，不是失败：尺码题、售后题本来就不该配图。
+        # 所以这里要说清是哪一种，不然面板上永远是个 0，看不出闸门在不在工作
+        if state.assets:
+            return {"素材": [f"{a.kind}/{a.usage or a.source}" for a in state.assets]}
+        return {"素材": "不挂（非商品知识类问题，或没有审核通过的素材）"}
     if name == "handover":
         return {"原因": state.handover_reason.value if state.handover_reason else "-"}
     if name == "clarify":
@@ -669,6 +676,79 @@ def post_check(state: AgentState, deps: Deps) -> AgentState:
         # 这不是合规问题，是知识库缺内容——盲点统计要靠这个分类才准，
         # 记错了就永远补不上那块知识。
         state.to_handover(HandoverReason.NO_KNOWLEDGE)
+    return state
+
+
+#: 哪些意图挂图**有用**。
+#:
+#: 判据是「这个问题需不需要看」，不是「有没有图可挂」：
+#:
+#: * ``PRODUCT_KNOWLEDGE``（面料、颜色、版型、做工）—— 看一眼胜过一段话
+#: * ``SIZING`` —— 尺码问题要的是尺码表，甩一张商品图是噪音
+#: * ``AFTERSALE`` —— "七天无理由怎么退"配一张针织衫照片，完全不相干
+#:
+#: **不相干的图比没有图更糟。** 它不只是没帮上忙——用户会默认这张图
+#: 和刚才那句话有关系，然后自己脑补出一个并不存在的联系。
+_VISUAL_INTENTS = frozenset({Intent.PRODUCT_KNOWLEDGE})
+
+MAX_ANSWER_ASSETS = 3
+"""一条答案最多挂几张。聊天气泡里塞四张以上就从"补充"变成"刷屏"了。"""
+
+
+def mount_assets(state: AgentState, deps: Deps) -> AgentState:
+    """把素材挂到答案上。
+
+    **两条来源，判据不同：**
+
+    * 命中的知识**显式关联**的素材（``knowledge_item.asset_ids``）——
+      相关性由数据保证，任何意图下都挂。
+    * 这个商品审核通过的运营素材——相关性由意图保证，只在
+      :data:`_VISUAL_INTENTS` 里挂。
+
+    **URL 一律由程序取，不问模型要。** ``knowledge_item.asset_ids`` 的
+    字段注释写着"回答时由程序挂载 URL，不由模型决定"，原因是模型会编出
+    看着像样但并不存在的文件名——而用户是拿图当事实看的，文案编错了
+    还有规则能揪出来，图编错了揪不出来。
+
+    **只挂审核通过的**，闸门在 :meth:`ToolBox.answer_assets` 里。这里要是
+    开个口，商家后台那个"通过"按钮就被绕过去了：买家在商品页看不到的图，
+    从客服对话里看到了。
+    """
+    if not state.answer or state.handover or deps.tools is None:
+        return state
+
+    # 引用里带的素材 id。用 citations 而不是 hits——hits 是召回，
+    # citations 是**答案真的引用了的那几条**，挂没被引用的知识的图，
+    # 就是在给一句没说过的话配图
+    ids: list[int] = []
+    for c in state.citations:
+        for a in c.asset_ids:
+            if a not in ids:
+                ids.append(a)
+
+    product_id = (state.session.current_product_id
+                  if state.intent in _VISUAL_INTENTS else None)
+    if not ids and not product_id:
+        return state
+
+    try:
+        rows = deps.tools.answer_assets(
+            product_id=product_id, asset_ids=ids, limit=MAX_ANSWER_ASSETS)
+    except ToolError as exc:
+        # 挂不上图不该让整条回复失败——答案本身是好的，少的只是插图。
+        # 但要留痕，否则"图一直不出来"没人查得到
+        state.trace.notes.append(f"素材挂载失败：{exc}")
+        return state
+
+    state.assets = [
+        AnswerAsset(
+            asset_id=int(r["asset_id"]), kind=r.get("kind") or "image",
+            url=r.get("url") or "", usage=r.get("usage") or "",
+            ai_generated=bool(r.get("ai_generated")),
+            model=r.get("model") or "", source=r.get("source") or "product",
+        )
+        for r in rows if (r.get("url") or "").strip()
+    ]
     return state
 
 

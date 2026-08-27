@@ -49,6 +49,15 @@ def turn_result(state: AgentState) -> dict[str, Any]:
              "score": round(c.dense_score, 3)}
             for c in state.citations
         ],
+        # 挂在这条答案上的图/视频。**URL 由程序给**，模型碰不到它——
+        # 让模型写地址的话它会编出看着像样但不存在的文件名，
+        # 而用户是拿图当事实看的
+        "assets": [
+            {"asset_id": a.asset_id, "kind": a.kind, "url": a.url,
+             "usage": a.usage, "ai_generated": a.ai_generated,
+             "model": a.model, "source": a.source}
+            for a in state.assets
+        ],
         "handover": state.handover,
         "handover_reason": (
             state.handover_reason.value if state.handover_reason else ""
@@ -100,6 +109,8 @@ def shopping_result(state: Any) -> dict[str, Any]:
         "trace_id": state.trace.trace_id,
         "intent": "shopping",
         "citations": [],
+        # 导购不挂素材：它给的是商品卡片，图已经在卡片里了
+        "assets": [],
         "handover": False,
         "handover_reason": "",
         "handover_ticket_id": None,

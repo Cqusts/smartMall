@@ -94,6 +94,8 @@ class LocalRetriever:
                 dense_score=h.dense_score,
                 bm25_score=h.bm25_score,
                 lexical_overlap=h.lexical_overlap,
+                # 检索层一路带着它，到这里断掉的话答案就永远挂不上图
+                asset_ids=tuple(h.asset_ids),
             )
             for h in hits
             if h.dense_score >= self.min_similarity
@@ -145,6 +147,7 @@ class HttpRetriever:
                 # ai-rag 老版本不返这个字段。缺了就退回 bm25>0 的弱判据，
                 # 见 graph.has_lexical_support——那条路会明确记一笔
                 lexical_overlap=h.get("lexical_overlap", -1.0),
+                asset_ids=tuple(h.get("asset_ids") or ()),
             )
             for h in (resp.json().get("data") or {}).get("hits", [])
         ]

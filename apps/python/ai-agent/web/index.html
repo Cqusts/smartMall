@@ -1730,6 +1730,28 @@ function handle(ev){
   el.className = 'msg';
   el.textContent = ev.answer;
 
+  // 素材挂在正文与引用之间：它是答案的一部分，不是脚注。
+  // **URL 全部来自服务端**，正文里模型就算编了个文件名也变不出图来——
+  // 与推荐卡片同一条规矩
+  if (ev.assets?.length){
+    const box = document.createElement('div');
+    box.className = 'astrip';
+    ev.assets.forEach(a => {
+      const w = document.createElement('div');
+      w.className = 'ashot';
+      const url = '/' + String(a.url || '').replace(/^\/+/, '');
+      w.innerHTML = (a.kind === 'video'
+          ? `<video src="${esc(url)}" muted loop playsinline
+               onmouseover="this.play()" onmouseout="this.pause()"></video>`
+          : `<img src="${esc(url)}" alt="${esc(a.usage || '商品图')}" loading="lazy">`)
+        // 《标识办法》：生成内容要可识别。直播切片是真人录像，
+        // ai_generated 为 false，不该被打上这个角标
+        + (a.ai_generated ? '<span class="aitag">AI 生成</span>' : '');
+      box.appendChild(w);
+    });
+    el.appendChild(box);
+  }
+
   if (ev.citations?.length){
     const box = document.createElement('div');
     box.className = 'cite';

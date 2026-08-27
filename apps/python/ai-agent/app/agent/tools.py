@@ -77,6 +77,11 @@ class ToolBox(Protocol):
         self, product_id: int, kind: str = "similar"
     ) -> list[dict[str, Any]]: ...
 
+    def answer_assets(
+        self, *, product_id: int | None = None,
+        asset_ids: Sequence[int] = (), limit: int = 4,
+    ) -> list[dict[str, Any]]: ...
+
 
 @dataclass
 class MySqlToolBox:
@@ -439,6 +444,83 @@ class MySqlToolBox:
         )
 
 
+    # ------------------------------------------------------------ 素材
+
+    #: ``asset`` 表里算「可以给买家看」的状态。与 ``marketing_asset`` 的
+    #: ``review_status='approved'`` 是同一道闸门，只是那张表的状态机更细
+    #: （draft|reviewing|approved|online|offline|rejected|archived）。
+    #:
+    #: **白名单而不是补集。** 写成 ``not in ('rejected','draft')`` 的话，
+    #: 将来加一个状态就会默认落进"可展示"——而漏出去的是没审过的内容。
+    _SHOWABLE_ASSET_STATUS = ("approved", "online")
+
+    def answer_assets(
+        self, *, product_id: int | None = None,
+        asset_ids: Sequence[int] = (), limit: int = 4,
+    ) -> list[dict[str, Any]]:
+        """答案能挂的素材。两条来源，都过审核闸门。
+
+        1. ``asset_ids`` —— 命中的那条知识**显式关联**的素材，来自
+           ``knowledge_item.asset_ids``，落在 ``asset`` 表。它们与这条
+           知识是绑定的，所以相关性由数据保证。
+        2. ``product_id`` —— 这个商品审核通过的运营素材，落在
+           ``marketing_asset``。相关性由调用方的判据保证
+           （见 ``nodes.mount_assets``：只有商品知识类问题才挂）。
+
+        **两条都只取审核通过的。** 这里要是漏了，商家后台点"通过"这
+        整件事就被绕过去了——买家在商品页看不到的图，换个入口从客服
+        对话里看到了。
+        """
+        out: list[dict[str, Any]] = []
+
+        ids = [int(i) for i in asset_ids][:limit]
+        if ids:
+            marks = ",".join(f":a{n}" for n in range(len(ids)))
+            params: dict[str, Any] = {f"a{n}": v for n, v in enumerate(ids)}
+            sts = ",".join(f":s{n}" for n in range(len(self._SHOWABLE_ASSET_STATUS)))
+            params.update({f"s{n}": v
+                           for n, v in enumerate(self._SHOWABLE_ASSET_STATUS)})
+            try:
+                for r in self._rows(
+                        f"SELECT id, modality, scene, oss_key, cdn_url,"
+                        f" ai_generated, gen_model FROM asset"
+                        f" WHERE id IN ({marks}) AND deleted = 0"
+                        f" AND status IN ({sts})", params):
+                    url = (r.get("cdn_url") or r.get("oss_key") or "").strip()
+                    if not url:
+                        continue
+                    out.append({
+                        "asset_id": int(r["id"]),
+                        "kind": "video" if r["modality"] == "video" else "image",
+                        "url": url, "usage": r.get("scene") or "",
+                        "ai_generated": bool(r.get("ai_generated")),
+                        "model": r.get("gen_model") or "", "source": "knowledge",
+                    })
+            except ToolError as exc:
+                self.degraded.append(f"asset 表读不到，知识关联素材挂不上：{exc}")
+
+        if product_id and len(out) < limit:
+            try:
+                for r in self._rows(
+                        "SELECT id, kind, usage_tag, local_path, model"
+                        " FROM marketing_asset WHERE product_id = :pid"
+                        " AND review_status = 'approved' AND local_path <> ''"
+                        " ORDER BY id DESC LIMIT :n",
+                        {"pid": int(product_id), "n": limit - len(out)}):
+                    out.append({
+                        "asset_id": int(r["id"]),
+                        "kind": "video" if r["kind"] == "video" else "image",
+                        "url": r["local_path"], "usage": r.get("usage_tag") or "",
+                        # marketing_asset 里的都是 AI 生成的，表里写死 1
+                        "ai_generated": True,
+                        "model": r.get("model") or "", "source": "product",
+                    })
+            except ToolError as exc:
+                self.degraded.append(f"素材表读不到，答案挂不上图：{exc}")
+
+        return out[:limit]
+
+
 @dataclass
 class StubToolBox:
     """测试替身。"""
@@ -450,9 +532,16 @@ class StubToolBox:
     catalog: list[dict] = field(default_factory=list)
     """search_products 的候选池。测试直接给结果，不模拟 SQL 筛选——
     要验的是 Agent 拿到 0 条 / 很多条时怎么决策，不是 WHERE 拼得对不对。"""
+    assets: dict[int, list[dict]] = field(default_factory=dict)
+    """product_id → 已审核通过的素材。**替身里只放通过的**，
+    "没通过的会不会漏出去"要拿真 SQL 验（见 test_tools 的 TestAnswerAssets），
+    在替身上验等于验自己写的 if。"""
+    knowledge_assets: dict[int, dict] = field(default_factory=dict)
+    """asset_id → 知识显式关联的素材。"""
     fail: bool = False
     calls: list[str] = field(default_factory=list)
     permission_denials: list[str] = field(default_factory=list)
+    degraded: list[str] = field(default_factory=list)
     last_search: dict = field(default_factory=dict)
 
     def _check(self, name: str) -> None:
@@ -509,6 +598,15 @@ class StubToolBox:
     def recommend_products(self, product_id, kind="similar"):
         self._check("recommend_products")
         return []
+
+    def answer_assets(self, *, product_id=None, asset_ids=(), limit=4):
+        self._check("answer_assets")
+        out = [dict(self.knowledge_assets[i], source="knowledge")
+               for i in asset_ids if i in self.knowledge_assets]
+        if product_id and len(out) < limit:
+            out += [dict(a, source="product")
+                    for a in self.assets.get(product_id, [])][:limit - len(out)]
+        return out[:limit]
 
 
 # ---------------------------------------------------------------- 渲染

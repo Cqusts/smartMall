@@ -515,3 +515,149 @@ class TestLexicalSupport:
                             bm25_score=1.6, lexical_overlap=-1.0)]
         assert has_lexical_support(st, AgentConfig())
         assert any("lexical_overlap" in n for n in st.trace.notes)
+
+
+# ---------------------------------------------------------------- 素材回挂
+
+
+class TestMountAssets:
+    """把素材挂到答案上（M4）。
+
+    这一组要守的是两条线：**该挂的挂上了**，以及**不该挂的没挂上**。
+    只验前者的话，一个"永远挂"的实现也能全绿——而那正是要防的东西：
+    「七天无理由怎么退」配一张针织衫照片，用户会默认这张图和刚才那句话
+    有关系，然后自己脑补出一个并不存在的联系。
+    """
+
+    def _state(self, intent=Intent.PRODUCT_KNOWLEDGE, *, product_id=9001,
+               answer="是 100%羊毛的 [#1]", citations=None):
+        from app.agent.state import SessionContext
+
+        st = AgentState(message="什么面料",
+                        session=SessionContext(session_id="s1"))
+        st.session.current_product_id = product_id
+        st.intent = intent
+        st.answer = answer
+        st.citations = citations if citations is not None else [_hit()]
+        return st
+
+    def _tools(self, *, assets=True, knowledge=None):
+        from app.agent.tools import StubToolBox
+
+        box = StubToolBox()
+        if assets:
+            box.assets[9001] = [{
+                "asset_id": 1, "kind": "image", "url": "generated/a.png",
+                "usage": "white", "ai_generated": True, "model": "qwen-image",
+            }]
+        for aid, row in (knowledge or {}).items():
+            box.knowledge_assets[aid] = row
+        return box
+
+    def _run(self, state, box):
+        from app.agent import nodes
+
+        deps = Deps(llm=FakeLlmClient(), retriever=StubRetriever([]), tools=box)
+        return nodes.mount_assets(state, deps)
+
+    # ---- 该挂
+
+    def test_商品知识类问题挂图(self):
+        st = self._run(self._state(), self._tools())
+        assert [a.url for a in st.assets] == ["generated/a.png"]
+        assert st.assets[0].source == "product"
+
+    def test_挂上的带AI标识(self):
+        """《标识办法》要求生成内容可识别，标识跟着数据走。"""
+        st = self._run(self._state(), self._tools())
+        assert st.assets[0].ai_generated is True
+
+    def test_知识显式关联的素材任何意图都挂(self):
+        """相关性由数据保证——这条素材和这条知识是绑定的，
+        所以就算是售后问题也该挂。"""
+        cite = _hit()
+        cite.asset_ids = (77,)
+        st = self._state(Intent.AFTERSALE, citations=[cite])
+        box = self._tools(assets=False, knowledge={77: {
+            "asset_id": 77, "kind": "video", "url": "clips/x.mp4",
+            "usage": "clip", "ai_generated": False, "model": "",
+        }})
+        st = self._run(st, box)
+        assert [a.url for a in st.assets] == ["clips/x.mp4"]
+        assert st.assets[0].source == "knowledge"
+        assert st.assets[0].ai_generated is False, "直播切片是真人录像，不是 AI 生成"
+
+    # ---- 不该挂
+
+    @pytest.mark.parametrize("intent", [
+        Intent.SIZING, Intent.AFTERSALE, Intent.ORDER_LOGISTICS,
+        Intent.REALTIME_STOCK_PRICE, Intent.CHITCHAT,
+    ])
+    def test_非商品知识类问题不挂商品图(self, intent):
+        """**这条是这个判据存在的理由。**
+
+        尺码问题要的是尺码表；「七天无理由怎么退」配张商品图完全不相干。
+        不相干的图不只是没帮上忙——它会让用户脑补出一个不存在的联系。
+        """
+        st = self._run(self._state(intent), self._tools())
+        assert st.assets == [], f"{intent.value} 不该挂商品图"
+
+    def test_转人工不挂(self):
+        st = self._state()
+        st.handover = True
+        assert self._run(st, self._tools()).assets == []
+
+    def test_没有答案不挂(self):
+        assert self._run(self._state(answer=""), self._tools()).assets == []
+
+    def test_没有商品上下文就不挂商品图(self):
+        """裸聊天页没有当前商品。挂"某个商品"的图纯属乱来。"""
+        st = self._state(product_id=None)
+        assert self._run(st, self._tools()).assets == []
+
+    def test_只挂被引用的知识关联的素材(self):
+        """用 citations 不用 hits：hits 是召回，citations 是答案**真的
+        引用了**的那几条。给一句没说过的话配图，和配错图一样糟。"""
+        used, unused = _hit(1), _hit(2)
+        unused.asset_ids = (77,)
+        st = self._state(citations=[used])
+        st.hits = [used, unused]
+        box = self._tools(assets=False, knowledge={77: {
+            "asset_id": 77, "kind": "image", "url": "kb/x.png"}})
+        assert self._run(st, box).assets == []
+
+    # ---- 兜底
+
+    def test_工具挂了不影响回答(self):
+        """挂不上图不该让整条回复失败——答案本身是好的，少的只是插图。"""
+        from app.agent.tools import StubToolBox
+
+        st = self._run(self._state(), StubToolBox(fail=True))
+        assert st.assets == []
+        assert st.answer, "答案必须还在"
+        assert any("素材" in n for n in st.trace.notes), "但要留痕"
+
+    def test_没有工具层不炸(self):
+        from app.agent import nodes
+
+        deps = Deps(llm=FakeLlmClient(), retriever=StubRetriever([]), tools=None)
+        assert nodes.mount_assets(self._state(), deps).assets == []
+
+    def test_空url的素材不挂(self):
+        """视频还在跑时 local_path 是空的。挂上去就是一张裂图。"""
+        from app.agent.tools import StubToolBox
+
+        box = StubToolBox()
+        box.assets[9001] = [{"asset_id": 1, "kind": "image", "url": ""}]
+        assert self._run(self._state(), box).assets == []
+
+    def test_数量有上限(self):
+        from app.agent.nodes import MAX_ANSWER_ASSETS
+        from app.agent.tools import StubToolBox
+
+        box = StubToolBox()
+        box.assets[9001] = [
+            {"asset_id": i, "kind": "image", "url": f"g/{i}.png"}
+            for i in range(10)]
+        st = self._run(self._state(), box)
+        assert 0 < len(st.assets) <= MAX_ANSWER_ASSETS

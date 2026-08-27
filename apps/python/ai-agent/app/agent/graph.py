@@ -192,13 +192,7 @@ def run_turn(message: str, state: AgentState, deps: Deps) -> AgentState:
         if step == "emit":
             return nodes.run_node("emit", nodes.emit, state, deps)
         if step == "generate":
-            state = nodes.run_node("generate", nodes.generate, state, deps)
-            if route_after_generate(state) == "handover":
-                return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
-            state = nodes.run_node("postcheck", nodes.post_check, state, deps)
-            if route_after_postcheck(state) == "handover":
-                return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
-            return nodes.run_node("emit", nodes.emit, state, deps)
+            return _finish_answer(state, deps)
 
     # 检索 →（必要时改写重试一次）→ 打分分流
     state = nodes.run_node("retrieve", nodes.retrieve, state, deps)
@@ -216,6 +210,17 @@ def run_turn(message: str, state: AgentState, deps: Deps) -> AgentState:
             return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
         return nodes.run_node("emit", nodes.emit, state, deps)
 
+    return _finish_answer(state, deps)
+
+
+def _finish_answer(state: AgentState, deps: Deps) -> AgentState:
+    """生成 → 合规检查 → 挂素材 → 收尾。
+
+    **抽出来是因为它有两个调用点**（工具链路上的"尺码表 + 知识库一起用"，
+    和主检索链路），而这段以前是抄了两份。抄两份的代价不是重复几行，
+    是往里加一步时会漏掉一处——漏掉的那条路照样出答案，只是少了素材，
+    看起来完全正常。
+    """
     state = nodes.run_node("generate", nodes.generate, state, deps)
     if route_after_generate(state) == "handover":
         return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
@@ -224,6 +229,9 @@ def run_turn(message: str, state: AgentState, deps: Deps) -> AgentState:
     if route_after_postcheck(state) == "handover":
         return nodes.run_node("emit", nodes.emit, nodes.run_node("handover", nodes.handover, state, deps), deps)
 
+    # 素材必须挂在合规检查**之后**：被拦下改写的答案不该还带着图，
+    # 那等于让被拦的内容换个形式又出去了
+    state = nodes.run_node("mount", nodes.mount_assets, state, deps)
     return nodes.run_node("emit", nodes.emit, state, deps)
 
 

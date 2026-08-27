@@ -568,3 +568,100 @@ class TestOrderNoBoundary:
     def test_still_rejects_longer_digit_runs(self):
         """25 位以上不是订单号，别把一串乱码当单号去查。"""
         assert extract_order_no("1" * 30) is None
+
+
+class TestAnswerAssets:
+    """答案能挂哪些素材。
+
+    **这一组必须跑真 SQL。** 要验的正是"没审核通过的会不会漏出去"，
+    而那是 WHERE 条件的事——拿替身验等于验自己写的那个 if。
+    """
+
+    def test_只挂审核通过的(self, box):
+        """商家后台点"通过"那件事，在这里也必须生效。
+
+        这里要是开个口，买家在商品页看不到的图，换个入口从客服对话里
+        看到了——同一道闸门守两个出口，漏一个等于没守。
+        """
+        got = box.answer_assets(product_id=9001)
+        assert [a["url"] for a in got] == ["generated/9001-w.png"], (
+            f"只有 approved 且有文件的那条该出来，实际 {got}")
+
+    def test_没有素材的商品挂不出东西(self, box):
+        assert box.answer_assets(product_id=9002) == []
+
+    def test_不传商品也不传ids就是空(self, box):
+        assert box.answer_assets() == []
+
+    def test_挂上的都带AI标识(self, box):
+        """《标识办法》：标识跟着数据走，不靠展示层记得加。"""
+        assert all(a["ai_generated"] for a in box.answer_assets(product_id=9001))
+
+    def test_知识显式关联的素材走asset表(self, box):
+        """knowledge_item.asset_ids 指向 asset 表，与商品素材是两条来源。"""
+        from sqlalchemy import text
+
+        with box.engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE asset (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " asset_no TEXT, modality TEXT, scene TEXT, oss_key TEXT,"
+                " cdn_url TEXT, ai_generated INTEGER DEFAULT 0,"
+                " gen_model TEXT, status TEXT, deleted INTEGER DEFAULT 0)"))
+            for no, st, key in (("a-1", "approved", "clips/a1.mp4"),
+                                ("a-2", "draft", "clips/a2.mp4"),
+                                ("a-3", "online", "clips/a3.mp4"),
+                                ("a-4", "rejected", "clips/a4.mp4")):
+                conn.execute(text(
+                    "INSERT INTO asset (asset_no, modality, scene, oss_key,"
+                    " status) VALUES (:n,'video','clip',:k,:s)"),
+                    {"n": no, "k": key, "s": st})
+
+        got = box.answer_assets(asset_ids=[1, 2, 3, 4])
+        assert sorted(a["url"] for a in got) == ["clips/a1.mp4", "clips/a3.mp4"], (
+            f"只有 approved / online 能挂，draft 与 rejected 不行，实际 {got}")
+        assert all(a["source"] == "knowledge" for a in got)
+        assert all(a["kind"] == "video" for a in got)
+
+    def test_直播切片不该被标成AI生成(self, box):
+        """切片是真人录像的片段。标错的话会给它加上本不该有的角标，
+        那是另一种意义上的不实标注。"""
+        from sqlalchemy import text
+
+        with box.engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE asset (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " asset_no TEXT, modality TEXT, scene TEXT, oss_key TEXT,"
+                " cdn_url TEXT, ai_generated INTEGER DEFAULT 0,"
+                " gen_model TEXT, status TEXT, deleted INTEGER DEFAULT 0)"))
+            conn.execute(text(
+                "INSERT INTO asset (asset_no, modality, oss_key, status,"
+                " ai_generated) VALUES ('a-1','video','clips/a.mp4',"
+                "'approved', 0)"))
+        assert box.answer_assets(asset_ids=[1])[0]["ai_generated"] is False
+
+    def test_知识素材排在商品素材前面(self, box):
+        """显式关联的相关性更强——它和这条知识是绑定的，
+        而商品素材只是"这个商品的图"。"""
+        from sqlalchemy import text
+
+        with box.engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE asset (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " asset_no TEXT, modality TEXT, scene TEXT, oss_key TEXT,"
+                " cdn_url TEXT, ai_generated INTEGER DEFAULT 0,"
+                " gen_model TEXT, status TEXT, deleted INTEGER DEFAULT 0)"))
+            conn.execute(text(
+                "INSERT INTO asset (asset_no, modality, oss_key, status)"
+                " VALUES ('a-1','image','kb/a.png','approved')"))
+        got = box.answer_assets(product_id=9001, asset_ids=[1])
+        assert [a["source"] for a in got] == ["knowledge", "product"]
+
+    def test_限制数量(self, box):
+        assert len(box.answer_assets(product_id=9001, limit=1)) <= 1
+
+    def test_asset表不存在时降级但留痕(self, box):
+        """asset 表是 02_asset.sql 建的，可能没跑。挂不上图不该让
+        整条回复失败，但也不能装成"这条知识本来就没关联素材"。"""
+        got = box.answer_assets(asset_ids=[1, 2])
+        assert got == []
+        assert box.degraded and "asset" in box.degraded[0]

@@ -353,6 +353,17 @@ class TestWebPage:
         missing = sorted(called - defined - {"scrollTo"})
         assert not missing, f"{path} 调了但没定义：{missing}"
 
+    def test_chat_bubble_renders_mounted_assets(self):
+        """客服答案里的图由 done 事件带来，页面只负责画。
+
+        **URL 全部来自服务端**——正文里模型就算编了个文件名，
+        页面也变不出图来（与推荐卡片同一条规矩）。
+        """
+        text = self._client().get("/").text
+        script = text[text.index("<script>"):]
+        assert "ev.assets" in script, "done 事件里的 assets 要被渲染"
+        assert "a.ai_generated" in script, "角标由数据决定，不能写死"
+
     def test_ai_assets_carry_the_required_label(self):
         """《人工智能生成合成内容标识办法》要求生成内容可识别。
 
@@ -891,3 +902,70 @@ class TestMerchantPage:
         """
         text = self._text()
         assert "不能整行按逗号切" in text
+
+
+class TestTurnResultAssets:
+    """``turn_result`` 里的 assets 字段。
+
+    形状对不上前端就画不出来，而那种故障在后端测试里完全看不见——
+    页面上只是"图一直不出来"。
+    """
+
+    def _state(self, assets):
+        from app.agent.state import AgentState, SessionContext
+
+        st = AgentState(message="什么面料", session=SessionContext(session_id="s"))
+        st.answer = "是羊毛的"
+        st.assets = assets
+        return st
+
+    def test_字段名与前端读的键一致(self):
+        from app.agent.state import AnswerAsset
+        from app.agent.streaming import turn_result
+
+        out = turn_result(self._state([AnswerAsset(
+            asset_id=7, kind="image", url="generated/a.png", usage="white",
+            ai_generated=True, model="qwen-image", source="product")]))
+        assert out["assets"] == [{
+            "asset_id": 7, "kind": "image", "url": "generated/a.png",
+            "usage": "white", "ai_generated": True, "model": "qwen-image",
+            "source": "product"}]
+
+    def test_没挂素材时是空列表不是缺键(self):
+        """缺键的话前端 ``ev.assets?.length`` 虽然不炸，但排查时
+        分不清"没挂"和"后端根本没这个字段"。"""
+        from app.agent.streaming import turn_result
+
+        assert turn_result(self._state([]))["assets"] == []
+
+    def test_导购的结果形状也带这个键(self):
+        """两个 Agent 的 done 事件前端共用一套渲染，缺一个键就得写分支。"""
+        from app.agent.streaming import shopping_result
+
+        class _S:
+            answer = "给您挑了两件"
+            outcome = "recommended"
+            candidates: list = []
+            recommended: list = []
+            relaxed: list = []
+            asked: list = []
+
+            class need:
+                @staticmethod
+                def as_dict():
+                    return {}
+
+                @staticmethod
+                def describe():
+                    return ""
+
+            class session:
+                session_id = "s"
+
+            class trace:
+                trace_id = "t"
+                tools_called: list = []
+                latency_ms: dict = {}
+                error = ""
+
+        assert shopping_result(_S())["assets"] == []

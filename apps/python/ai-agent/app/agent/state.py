@@ -74,6 +74,12 @@ class Citation:
     score: float = 0.0
     dense_score: float = 0.0
     bm25_score: float = 0.0
+    asset_ids: tuple[int, ...] = ()
+    """这条知识显式关联的素材（``knowledge_item.asset_ids``）。
+
+    回答时由**程序**按它挂 URL，不问模型要——模型会编出看着像样
+    但并不存在的文件名，而图这种东西一旦挂错，用户是拿它当事实看的。
+    """
     lexical_overlap: float = 0.0
     """查询里有区分度的词匹配上了多少，0~1（IDF 加权）。
 
@@ -84,6 +90,30 @@ class Citation:
     @property
     def marker(self) -> str:
         return f"[#{self.item_id}]"
+
+
+@dataclass
+class AnswerAsset:
+    """挂在答案上的一条素材（图或视频）。
+
+    **URL 由程序给，模型碰不到。** 让模型写图片地址的话它会编出
+    看着像样但并不存在的文件名，而用户是拿图当事实看的——文案编错了
+    还能被规则揪出来，图编错了揪不出来。
+    """
+
+    asset_id: int
+    kind: str
+    """image | video"""
+    url: str
+    usage: str = ""
+    """white | scene | detail | clip……展示层拿它做说明文字。"""
+    ai_generated: bool = False
+    """《人工智能生成合成内容标识办法》要求生成内容可识别。
+    **跟着数据走**，不由展示层记得加。直播切片是真人录像，这里是 False。"""
+    model: str = ""
+    source: str = "product"
+    """``product``：这个商品审核通过的素材。
+    ``knowledge``：命中的那条知识显式关联的素材。"""
 
 
 @dataclass
@@ -212,6 +242,8 @@ class AgentState:
     # ---- 输出 ----
     answer: str = ""
     citations: list[Citation] = field(default_factory=list)
+    assets: list["AnswerAsset"] = field(default_factory=list)
+    """挂在这条答案上的素材。见 ``nodes.mount_assets``。"""
     clarify_question: str = ""
     handover: bool = False
     handover_reason: HandoverReason | None = None
