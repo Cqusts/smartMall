@@ -237,6 +237,16 @@ button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
 .dtop .dpic{background:var(--cream-2);border-radius:9px;overflow:hidden;
             aspect-ratio:4/5}
 .dtop .dpic img{width:100%;height:100%;object-fit:cover;display:block}
+/* AI 素材条。审核通过的才会出现在这里——判断在后端，见 assetStrip */
+.astrip{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.ashot{position:relative;width:74px;height:92px;border-radius:6px;
+       overflow:hidden;background:var(--cream-2)}
+.ashot img,.ashot video{width:100%;height:100%;object-fit:cover;display:block}
+/* 《标识办法》要的显式标识。压在图上而不是放在图外——
+   图被单独保存或截屏时标识要跟着走 */
+.aitag{position:absolute;left:0;bottom:0;right:0;text-align:center;
+       font-size:10px;line-height:15px;color:#fff;background:rgba(0,0,0,.55);
+       letter-spacing:.3px}
 .dtop h3{margin:0 0 6px;font-size:23px;line-height:1.4;font-weight:500;
          font-family:var(--serif)}
 .dtop .sub{color:var(--ink-3);font-size:13px;margin-bottom:18px}
@@ -1174,7 +1184,7 @@ function openDetail(id){
   $('#detail').innerHTML = `
     <button class="x" onclick="closeDetail()">×</button>
     <div class="dtop">
-      <div class="dpic">${tileOf(p, true)}</div>
+      <div><div class="dpic">${tileOf(p, true)}</div>${assetStrip(p)}</div>
       <div>
         <h3>${esc(p.name)}</h3>
         <div class="sub">${esc(p.subtitle || p.category || '')}</div>
@@ -1209,6 +1219,37 @@ function openDetail(id){
   // 只有一个可选规格时直接替用户选上——多一次点击没有信息量
   const only = (p.skus || []).filter(s => s.in_stock);
   if (only.length === 1) pickSku(only[0].sku_no);
+}
+
+/**
+ * 商品详情里那条 AI 素材。
+ *
+ * **只画后端给了什么，这里不做任何过滤。** 「哪些能露出」的判断在
+ * `list_catalog` 的 `review_status = 'approved'` 上——放在前端过滤等于
+ * 把闸门交给一个 curl 就能绕过的地方，而且商家后台点"通过"之后，
+ * 真正生效的必须是同一个判断。
+ *
+ * 《人工智能生成合成内容标识办法》要求生成内容可识别，所以每张都带
+ * 角标。标识跟着数据走（后端的 ai_generated），不靠这里记得加。
+ */
+function assetStrip(p){
+  const list = (p.assets || []).filter(a => a.path);
+  if (!list.length) return '';
+  const one = a => {
+    const url = '/' + a.path;
+    const tag = a.ai_generated
+      ? '<span class="aitag">AI 生成</span>' : '';
+    return a.kind === 'video'
+      ? `<div class="ashot"><video src="${esc(url)}" muted loop
+           onmouseover="this.play()" onmouseout="this.pause()"></video>${tag}</div>`
+      : `<div class="ashot"><img src="${esc(url)}" alt="${esc(usageCn(a.usage))}"
+           loading="lazy">${tag}</div>`;
+  };
+  return `<div class="astrip">${list.map(one).join('')}</div>`;
+}
+
+function usageCn(u){
+  return ({white:'白底主图', scene:'场景图', detail:'细节图'})[u] || '商品图';
 }
 
 /**

@@ -179,7 +179,7 @@ ClickHouse 全家桶）是另一条路，本地开发用不到，见
 | **M0 基础设施** | ✅ 已完成 | monorepo 骨架、11 个服务、compose 三件套、30 张表、Kafka 契约、健康探针 |
 | **M1 数据中台 + RAG** | 🟡 核心已完成 | 四道清洗关卡、`knowledge_item`、混合检索、发版门禁、覆盖度矩阵、3 个 DAG（434 测试）、ai-rag `/search` 接通 Milvus（含跑在 Milvus Lite 上的集成测试）<br/>待接真实环境：JDDC 导入、Label Studio 项目配置、bge-reranker |
 | **M2 文本 AI 客服** | ✅ 已完成 | LangGraph 状态机、七类意图分流、引用溯源、转人工、Trace 落库、点赞点踩、知识盲点回流、只读业务工具（含越权校验）、WebSocket 流式、店铺前台与客服浮窗、评测集与门禁<br/>待做：Redis 会话（多实例部署才需要） |
-| **M3 运营 Agent + 素材** | 🟡 核心已完成 | 文案生产（卖点溯源 + 广告法合规拦截）、商品图与宣传视频生成（云 API）、素材一律待审、《标识办法》要求的 AI 生成标识<br/>未做：CosyVoice2 口播、ComfyUI 工作流版本化、虚拟试穿 |
+| **M3 运营 Agent + 素材** | 🟡 核心已完成 | 文案生产（卖点溯源 + 广告法合规拦截）、商品图与宣传视频生成（云 API）、素材一律待审、**人工审核闭环**（通过后买家页才看得到）、《标识办法》要求的 AI 生成标识<br/>未做：CosyVoice2 口播、ComfyUI 工作流版本化、虚拟试穿 |
 | **M4 多模态客服** | 🟡 核心已完成 | 图片理解入口（qwen-vl-max）、图片 PII 脱敏（失败关闭）、单据/商品图分流<br/>未做：把素材作为答案挂载回去 |
 | **M2.5 商城底座** | ✅ 已完成 | JWT 鉴权、商品/SKU CRUD、订单全生命周期、防超卖与幂等、退款审核、商家后台<br/>促销与权限模块仍是**零代码**，别当成已有 |
 | **M2.6 Agent 集群** | ✅ 已完成 | `agent_task` 跨 Agent 派活：客服 → 知识运维 → 运营，去重、优先级、原子认领、重试与 needs_human 分离 |
@@ -679,7 +679,7 @@ HTTP 形态：`POST /chat`，返回 `answer` / `citations` / `trace_id` / `hando
 
 ### 评测
 
-**测试与评测不是一回事。** 1196 个单测证明的是「代码按我写的那样跑」；
+**测试与评测不是一回事。** 1259 个单测证明的是「代码按我写的那样跑」；
 评测回答的是「这套系统在真实输入上到底行不行」。对 AI 系统来说后者才是
 更重要的主张，而它只能靠标注数据支撑。
 
@@ -823,6 +823,7 @@ http://127.0.0.1:9002/merchant
 ```bash
 mysql -u root -p smartmall < deploy/sql/migrations/010_auth.sql
 mysql -u root -p smartmall < deploy/sql/migrations/011_marketing_asset.sql
+mysql -u root -p smartmall < deploy/sql/migrations/014_asset_review.sql
 ```
 
 上架前有四道自检，缺什么说什么（「没有可售 SKU，上架了也买不了」「没有结构化
@@ -830,6 +831,27 @@ mysql -u root -p smartmall < deploy/sql/migrations/011_marketing_asset.sql
 
 **页面不做权限判断**，判定在 `mall-product` 的 `@RequireMerchant` 上——
 前端藏按钮是体验不是安全，藏了照样能 curl。
+
+#### 素材审核
+
+「AI 素材」页每条都有**通过 / 驳回**。这道闸门唯一真正起作用的地方在
+`list_catalog`：只有 `review_status = 'approved'` 且有文件的素材才会进
+商品详情页。**审核前买家什么都看不到，驳回之后又会撤下来**——两侧都有
+用例盯着，只验一侧的话，一个恒真的过滤器也能蒙混过关。
+
+三条判据，每条都会真的挡住东西：
+
+- **驳回必须写原因。** 不说为什么的驳回，对生成方等价于"再随便试一次"；
+  而这些原因是回流数据，哪类提示词老被驳是运营 Agent 该学的东西。
+- **没有文件的素材不许通过。** 视频还在跑或跑失败时 `local_path` 是空的，
+  这时候点通过，商品页会挂出一张裂图而库里写着"已审核通过"。
+- **结论只认 approved / rejected。** 白名单——拼错一个词写进库里的话，
+  它既不是待审也不是通过，列表页永远显示"待审"，查不出为什么点了没反应。
+
+审核人取自令牌**不从请求体读**（能传 `reviewerId` 就等于能冒名），
+并且审核能力**不在 `deps.asset_store` 上**：那是运营 Agent 手里的对象，
+把方法挂上去就等于给生成方发了一枚自己的图章。隔离靠对象图不靠约定，
+有三条用例盯着（`TestReview` 的「能力隔离」一组）。
 
 ### 生成商品图与宣传视频
 
@@ -881,9 +903,9 @@ smartmall-agent media --poll                               # 取跑完的视频�
 
 ```bash
 # Python 三个包（不需要 MySQL、不需要 API Key）
-cd pipelines            && pytest -q     # 426
-cd apps/python/ai-rag   && pytest -q     #  36
-cd apps/python/ai-agent && pytest -q     # 627
+cd pipelines            && pytest -q     # 434
+cd apps/python/ai-rag   && pytest -q     #  65  （含 28 条真跑 Milvus Lite）
+cd apps/python/ai-agent && pytest -q     # 653
 
 # Java（H2 内存库）
 cd apps/java && ./mvnw test              # 107
@@ -892,6 +914,6 @@ cd apps/java && ./mvnw test              # 107
 .\smartmall.ps1 verify
 ```
 
-合计 1196 个。**但测试与评测不是一回事**，见上面的[评测](#评测)一节——
-1196 个单测证明的是「代码按我写的那样跑」，评测才回答「这套系统在真实输入上
+合计 1259 个。**但测试与评测不是一回事**，见上面的[评测](#评测)一节——
+1259 个单测证明的是「代码按我写的那样跑」，评测才回答「这套系统在真实输入上
 到底行不行」。

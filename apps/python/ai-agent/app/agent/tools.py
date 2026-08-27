@@ -92,6 +92,12 @@ class MySqlToolBox:
     """越权尝试。不返回给用户，但要留痕——
     有人拿别人的订单号来试，这本身就是需要告警的信号。"""
 
+    degraded: list[str] = field(default_factory=list)
+    """这次查询里**降级掉的部分**。
+
+    有些数据缺了不该让整页挂掉（比如素材表还没建），但降级必须留下痕迹：
+    "查失败了"和"本来就没有"长得一样的话，一条漏跑的迁移可以躲很久。"""
+
     @classmethod
     def from_env(cls) -> "MySqlToolBox":
         from smartmall_pipeline.repository import DwsRepository
@@ -255,7 +261,7 @@ class MySqlToolBox:
         }
 
     def list_catalog(self, limit: int = 600) -> list[dict[str, Any]]:
-        """店铺列表要的全部数据，**一共四次查询**。
+        """店铺列表要的全部数据，**一共七次查询**（其中五次是 IN 批量）。
 
         原先店铺页是这么拼的：先拿 ID 列表，再对每个商品分别查详情、
         查属性、查 SKU、查尺码表 —— 每个商品四次往返。12 个商品时
@@ -263,7 +269,7 @@ class MySqlToolBox:
         **2317 次查询 / 597ms**，而那还是 SQLite 这种进程内的库。
         MySQL 走 TCP，每次往返按 0.2ms 算就是四百多毫秒起步。
 
-        这里换成四次 IN 查询然后在内存里归拢。**不是提前优化**：
+        这里换成 IN 批量查询然后在内存里归拢。**不是提前优化**：
         它是加完 500 个商品之后量出来的，量之前谁也不知道差多少。
         """
         import json
@@ -280,7 +286,7 @@ class MySqlToolBox:
             f"SELECT {self._BASE_COLS}, p.main_image, p.category_id FROM product p "
             "LEFT JOIN category c ON c.id = p.category_id "
             f"WHERE p.id IN ({marks}) AND p.deleted = 0", params)
-        items = {int(r["id"]): dict(r, attrs={}, skus=[], size_chart=None)
+        items = {int(r["id"]): dict(r, attrs={}, skus=[], size_chart=None, assets=[])
                  for r in rows}
 
         for r in self._rows(
@@ -337,6 +343,34 @@ class MySqlToolBox:
             cid = detail_rows.get(pid, {}).get("category_id")
             item["root_category"] = (
                 root_of.get(int(cid)) if cid else None) or item.get("category") or ""
+
+        # AI 素材。**只取 review_status='approved'**——这是那道审核闸门
+        # 唯一真正起作用的地方。写成 != 'rejected' 之类的补集就废了：
+        # 新加一个审核状态会默认落进"可展示"，而没人会注意到。
+        #
+        # 表可能还没建（011/014 是后加的迁移）。这时候让整个店铺页 500
+        # 是过度反应——商品本身是好的，缺的只是素材。但**降级不能装成
+        # 正常**：捞失败与"这个商品没有素材"长得一模一样的话，
+        # 迁移漏跑了没有任何人会发现。所以记一笔到 degraded，
+        # /api/products 会把它带出去。
+        try:
+            for r in self._rows(
+                    "SELECT product_id, kind, usage_tag, local_path, model"
+                    f" FROM marketing_asset WHERE product_id IN ({marks})"
+                    " AND review_status = 'approved' AND local_path <> ''"
+                    " ORDER BY id", params):
+                item = items.get(int(r["product_id"]))
+                if item is None:
+                    continue
+                item["assets"].append({
+                    "kind": r["kind"], "usage": r["usage_tag"] or "",
+                    "path": r["local_path"],
+                    # 《人工智能生成合成内容标识办法》：生成内容必须可识别。
+                    # 标识跟着数据走，不靠展示层记得加
+                    "ai_generated": True, "model": r["model"] or "",
+                })
+        except ToolError as exc:
+            self.degraded.append(f"素材表读不到，商品页不显示 AI 素材：{exc}")
 
         # 顺序按 ID，与 list_on_sale_product_ids 一致
         return [items[i] for i in ids if i in items]

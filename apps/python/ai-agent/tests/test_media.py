@@ -447,6 +447,12 @@ class TestClient:
 #: 而线上那条 UPDATE 里有 CASE WHEN、有重复的绑定参数、有 lastrowid——
 #: 这三样每一样都栽过（``LAST_INSERT_ID()`` 那次就是 MySQL 方言在
 #: SQLite 上直接炸）。所以这一组跑真的引擎。
+#: 与 011 + 014 两个迁移的列**必须一致**，由
+#: ``test_测试用的建表语句没有落后于迁移`` 盯着。
+#:
+#: 这个项目已经在"测试自己编一份最小表"上栽过三次：少一列，被测代码
+#: 里那一列的行为就永远测不到，而测试是绿的——真正发现它的是线上或者
+#: 手动跑。所以这里不靠人记得同步，靠一条断言。
 _ASSET_DDL = """
 CREATE TABLE marketing_asset (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -457,9 +463,45 @@ CREATE TABLE marketing_asset (
   task_id TEXT, task_status TEXT DEFAULT 'succeeded',
   error TEXT DEFAULT '', model TEXT DEFAULT '',
   ai_generated INTEGER DEFAULT 1, review_status TEXT DEFAULT 'pending',
+  review_note TEXT NOT NULL DEFAULT '',
   reviewer_id INTEGER, reviewed_at TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP)
 """
+
+
+def _migration_columns() -> set[str]:
+    """从迁移文件里抠出 marketing_asset 的全部列名。"""
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[4] / "deploy/sql/migrations"
+    cols: set[str] = set()
+
+    create = (root / "011_marketing_asset.sql").read_text(encoding="utf-8")
+    body = create[create.index("CREATE TABLE"):]
+    body = body[:body.index("PRIMARY KEY")]
+    cols |= set(re.findall(r"^\s*`(\w+)`\s+\w", body, re.M))
+
+    alter = (root / "014_asset_review.sql").read_text(encoding="utf-8")
+    cols |= set(re.findall(r"ADD COLUMN\s+`(\w+)`", alter))
+    return cols
+
+
+def test_测试用的建表语句没有落后于迁移():
+    """**这条是被同一个坑绊了三次之后加的。**
+
+    测试里手搓一份"最小表"很方便，代价是它会悄悄落后于真实的迁移：
+    014 加了 review_note，而这里的 DDL 不动的话，审核那段代码在测试里
+    是跑不到的——SQLite 会在 UPDATE 时报 no such column，
+    但更常见的情况是那一列压根没被 SELECT 到，测试照样全绿。
+    """
+    import re
+
+    # 一行可能声明多列（``kind TEXT NOT NULL, usage_tag TEXT``），
+    # 所以不能锚在行首
+    declared = set(re.findall(r"(\w+)\s+(?:INTEGER|TEXT)\b", _ASSET_DDL))
+    missing = _migration_columns() - declared
+    assert not missing, f"测试用的 marketing_asset 少了迁移里的列：{sorted(missing)}"
 
 
 @pytest.fixture
@@ -662,3 +704,154 @@ class TestTrace:
         assert {e["node"] for e in exits} >= {"load", "prompt", "check", "generate"}
         # 光有节点名说明不了问题——"拼提示词"跑完了，拼成什么样？
         assert all(e["detail"] for e in exits)
+
+
+# ---------------------------------------------------------------- 审核
+
+
+class TestReview:
+    """素材审核。
+
+    **这是这条链上唯一一处「机器不能自己做」的动作。** 011 migration 的
+    文件头写着"机器给自己盖章等于没有审核"，生成侧把 review_status 写死
+    成 pending 是那条的一半；另一半是这里：状态只能从这一个带鉴权的口
+    改，而且必须落到具体的人头上。
+    """
+
+    def _setup(self, monkeypatch, *, role="merchant", user_id=1):
+        pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+
+        from app.agent.marketing.store import (StubAssetReviewStore,
+                                               StubAssetStore)
+        from app.main import app
+        from app.routers import media as router
+
+        assets = StubAssetStore()
+        assets.stage_asset(product_id=9001, kind="image", usage_tag="white",
+                           local_path="generated/a.png", task_status="succeeded")
+        reviews = StubAssetReviewStore(assets=assets)
+
+        async def fake_principal(request):
+            if not request.headers.get("Authorization"):
+                return None
+            return {"userId": user_id, "username": "u", "role": role}
+
+        monkeypatch.setattr(router, "_principal", fake_principal)
+        monkeypatch.setattr(router, "review_store", lambda: reviews)
+        return TestClient(app), assets, reviews
+
+    #: 上面 stage_asset 造出来的那条的 id（StubAssetStore 从 800 开始自增）
+    AID = 801
+
+    def _post(self, client, body, *, token=True):
+        headers = {"Authorization": "Bearer x"} if token else {}
+        return client.post(f"/api/admin/media/{self.AID}/review",
+                           json=body, headers=headers).json()
+
+    # ---- 鉴权
+
+    def test_不带令牌不能审核(self, monkeypatch):
+        client, assets, _ = self._setup(monkeypatch)
+        body = self._post(client, {"decision": "approved"}, token=False)
+        assert body["code"] == 1401
+        assert assets.staged[0]["review_status"] == "pending", "状态不该被动过"
+
+    def test_买家不能审核(self, monkeypatch):
+        client, assets, _ = self._setup(monkeypatch, role="customer")
+        body = self._post(client, {"decision": "approved"})
+        assert body["code"] == 1403
+        assert assets.staged[0]["review_status"] == "pending"
+
+    def test_审核人取自令牌而不是请求体(self, monkeypatch):
+        """能传 reviewerId 就等于能冒名——那样审计记录一文不值。"""
+        client, assets, _ = self._setup(monkeypatch, user_id=7)
+        body = self._post(client, {"decision": "approved", "reviewerId": 999})
+        assert body["code"] == 0
+        assert assets.staged[0]["reviewer_id"] == 7
+
+    # ---- 判据
+
+    def test_通过之后买家侧才看得到(self, monkeypatch):
+        client, assets, _ = self._setup(monkeypatch)
+        assert self._post(client, {"decision": "approved"})["code"] == 0
+        assert assets.staged[0]["review_status"] == "approved"
+
+    def test_驳回必须写原因(self, monkeypatch):
+        """不说为什么的驳回，对生成方等价于"再随便试一次"。"""
+        client, assets, _ = self._setup(monkeypatch)
+        body = self._post(client, {"decision": "rejected"})
+        assert body["code"] == 1409
+        assert "原因" in body["message"]
+        assert assets.staged[0]["review_status"] == "pending", "没判成就别改状态"
+
+    def test_驳回写了原因就能过(self, monkeypatch):
+        client, assets, _ = self._setup(monkeypatch)
+        body = self._post(client, {"decision": "rejected", "note": "模特手挡住了logo"})
+        assert body["code"] == 0
+        assert assets.staged[0]["review_status"] == "rejected"
+        assert assets.staged[0]["review_note"] == "模特手挡住了logo"
+
+    def test_没文件的素材不许通过(self, monkeypatch):
+        """视频还在跑、或者跑失败了，local_path 是空的。这时候点通过，
+        商品页上会挂出一张裂图，而库里写着"已审核通过"。"""
+        client, assets, _ = self._setup(monkeypatch)
+        assets.staged[0]["local_path"] = ""
+        body = self._post(client, {"decision": "approved"})
+        assert body["code"] == 1409 and "裂图" in body["message"]
+        assert assets.staged[0]["review_status"] == "pending"
+
+    def test_没生成成功的不许通过(self, monkeypatch):
+        client, assets, _ = self._setup(monkeypatch)
+        assets.staged[0]["task_status"] = "running"
+        body = self._post(client, {"decision": "approved"})
+        assert body["code"] == 1409
+        assert assets.staged[0]["review_status"] == "pending"
+
+    def test_未知结论一律拒(self, monkeypatch):
+        """白名单而不是"不是 rejected 就当通过"。拼错一个词就写进库里的话，
+        它既不是待审也不是通过，列表页永远显示"待审"，查不出为什么。"""
+        client, assets, _ = self._setup(monkeypatch)
+        for bad in ("", "approve", "ok", "pending", "APPROVED", "已通过"):
+            body = self._post(client, {"decision": bad})
+            assert body["code"] == 1409, f"{bad!r} 不该被接受"
+        assert assets.staged[0]["review_status"] == "pending"
+
+    def test_素材不存在(self, monkeypatch):
+        client, _, _ = self._setup(monkeypatch)
+        body = client.post("/api/admin/media/999999/review",
+                           json={"decision": "approved"},
+                           headers={"Authorization": "Bearer x"}).json()
+        assert body["code"] == 1409
+
+    # ---- 能力隔离
+
+    def test_运营Agent手里那份东西上没有审核方法(self):
+        """**靠对象图，不靠约定。** 只要审核方法挂在 deps.asset_store 上，
+        生成方就带着一枚自己的图章——今天没人调不代表明天没人调，
+        而那种调用读起来完全正常（"生成完顺手标一下"）。
+        """
+        deps = build()
+        assert deps.asset_store is not None
+        for name in ("review", "approve", "set_review_status"):
+            assert not hasattr(deps.asset_store, name), (
+                f"asset_store 上不该有 {name}——那等于给生成方发了图章")
+
+    def test_审核通道不从deps里取(self):
+        """路由用的是自己的工厂。走 get_deps() 的话，上面那条隔离就白做了。
+
+        看字节码引用的名字而不是源码文本——源码里的注释正好解释了
+        "为什么不用 get_deps"，按文本匹配会被自己的注释绊倒。
+        """
+        from app.routers import media as router
+
+        names = set(router.review_store.__code__.co_names)
+        assert "get_deps" not in names, f"review_store 引用了 {names}"
+        assert "MySqlAssetReviewStore" in names, (
+            "这条断言得真的看到了函数体，否则上一句等于没验")
+
+    def test_协议里也没有审核方法(self):
+        """AssetStore 协议是给实现看的规范。写进协议，下一个实现就会照着做。"""
+        from app.agent.marketing.store import AssetStore
+
+        assert not hasattr(AssetStore, "review")

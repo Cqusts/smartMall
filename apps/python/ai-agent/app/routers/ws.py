@@ -105,7 +105,12 @@ async def products() -> dict[str, Any]:
             )
             detail["in_stock"] = any(s["in_stock"] for s in skus)
             items.append(detail)
-        return {"ok": True, "items": items}
+        # 降级掉的部分要跟着出去。整页没挂但少了一块，和什么都没少
+        # 长得一样的话，一条漏跑的迁移能躲很久（见 MySqlToolBox.degraded）
+        out: dict[str, Any] = {"ok": True, "items": items}
+        if box.degraded:
+            out["degraded"] = list(box.degraded)
+        return out
     except BaseException as exc:  # noqa: BLE001
         # 商品挂了不该让整个页面白屏——前端会退化成只有客服入口。
         #

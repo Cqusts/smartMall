@@ -542,10 +542,55 @@ async function loadAssets(){
             ${a.error ? `<div class="blockers">${esc(a.error)}</div>` : ''}</td>
         <td class="num">${esc(a.model || '—')}
             ${a.aiGenerated ? '<div class="hint">AI 生成</div>' : ''}</td>
-        <td><span class="tag ${a.reviewStatus === 'approved' ? 'on_sale' : 'draft'}">
-            ${a.reviewStatus === 'approved' ? '已通过' : '待审'}</span></td>
+        <td>${reviewCell(a)}</td>
       </tr>`).join('')}
   </table>`;
+}
+
+//: 审核状态的显示与可做的动作。
+//:
+//: **通过与驳回都留着，不管当前是什么状态**——事后发现问题要能把
+//: 一张已通过的图撤下来，而这里是唯一能改状态的地方。只在当前状态上
+//: 隐藏对应按钮，避免点了没变化。
+function reviewCell(a){
+  const st = a.reviewStatus;
+  const tag = st === 'approved' ? ['on_sale','已通过']
+            : st === 'rejected' ? ['off_shelf','已驳回'] : ['draft','待审'];
+  const note = a.reviewNote
+    ? `<div class="blockers">${esc(a.reviewNote)}</div>` : '';
+  const btns = [];
+  if (st !== 'approved')
+    btns.push(`<button class="btn" onclick="reviewAsset(${a.id},'approved')">通过</button>`);
+  if (st !== 'rejected')
+    btns.push(`<button class="btn" onclick="reviewAsset(${a.id},'rejected')">驳回</button>`);
+  return `<span class="tag ${tag[0]}">${tag[1]}</span>${note}
+          <div style="margin-top:6px;display:flex;gap:6px">${btns.join('')}</div>`;
+}
+
+async function reviewAsset(id, decision){
+  let note = '';
+  if (decision === 'rejected'){
+    // 驳回必须写原因——后端也拦，但让人在这里就写完，
+    // 比提交一次被拒再重来少一步
+    note = prompt('驳回原因（生成方要靠它知道改哪里）：') || '';
+    if (!note.trim()) return;
+  } else {
+    note = prompt('审核意见（可留空）：') || '';
+  }
+  const d = await api(`/api/admin/media/${id}/review`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({decision, note}),
+  });
+  if (d.code !== 0){
+    // 后端的话原样显示。换成"操作失败"的话，
+    // "没文件不能通过"这种能自己解决的问题就变成了一次报障
+    say('err', d.message || '审核失败');
+    return;
+  }
+  say('ok', decision === 'approved'
+      ? `素材 #${id} 已通过，现在买家在商品页能看到它了`
+      : `素材 #${id} 已驳回`);
+  loadAssets();
 }
 
 function usageCn(u){

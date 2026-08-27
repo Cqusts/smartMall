@@ -48,6 +48,9 @@ _DDL = [
         spec TEXT, quantity INTEGER, amount REAL, status TEXT,
         express_company TEXT, express_no TEXT, tracks TEXT,
         created_at TEXT, shipped_at TEXT)""",
+    """CREATE TABLE marketing_asset (id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id INTEGER, kind TEXT, usage_tag TEXT, local_path TEXT,
+        model TEXT, review_status TEXT DEFAULT 'pending')""",
 ]
 
 _SEED = [
@@ -89,6 +92,16 @@ _SEED = [
     "INSERT INTO mall_order (order_no,user_id,product_id,spec,quantity,amount,"
     "status,express_company,express_no,tracks) VALUES "
     "('2026080400004',10087,9001,'白 L',1,899.0,'shipped','京东','JD99',NULL)",
+    # 素材三条：通过的、待审的、通过但没文件的。三条都要有，
+    # 只放一条通过的话「只显示 approved」这条断言等于没验
+    "INSERT INTO marketing_asset (product_id,kind,usage_tag,local_path,model,"
+    "review_status) VALUES (9001,'image','white','generated/9001-w.png',"
+    "'qwen-image','approved')",
+    "INSERT INTO marketing_asset (product_id,kind,usage_tag,local_path,model,"
+    "review_status) VALUES (9001,'image','scene','generated/9001-s.png',"
+    "'qwen-image','pending')",
+    "INSERT INTO marketing_asset (product_id,kind,usage_tag,local_path,model,"
+    "review_status) VALUES (9001,'video','','','wan2.7','approved')",
 ]
 
 
@@ -282,8 +295,42 @@ class TestListCatalog:
     def test_查询次数不随商品数增长(self, box):
         items, n = self._count_queries(box, lambda: box.list_catalog())
         assert len(items) >= 2
-        # ID 列表 + 商品 + 属性 + SKU + 尺码表 + 类目表 = 6
-        assert n <= 6, f"用了 {n} 次查询，说明又退回逐个商品查了"
+        # ID 列表 + 商品 + 属性 + SKU + 尺码表 + 类目表 + 素材 = 7
+        assert n <= 7, f"用了 {n} 次查询，说明又退回逐个商品查了"
+
+    def test_只带出审核通过且有文件的素材(self, box):
+        """**这是那道审核闸门唯一真正起作用的地方。**
+
+        后台点"通过"如果只是把徽章翻个色、买家侧照旧什么都看不到，
+        那个按钮就是装饰。反过来，这里漏掉过滤，审核就白做了——
+        待审的素材会直接挂到商品详情页上。
+        """
+        item = {i["id"]: i for i in box.list_catalog()}[9001]
+        paths = [a["path"] for a in item["assets"]]
+        assert paths == ["generated/9001-w.png"], (
+            "只有 approved 且有文件的那条该出来；"
+            f"实际：{paths}（pending 的漏出来了，或者没文件的也带出来了）"
+        )
+        assert item["assets"][0]["ai_generated"] is True, (
+            "《标识办法》要求生成内容可识别，标识跟着数据走")
+        assert box.degraded == []
+
+    def test_没有素材的商品是空列表不是缺键(self, box):
+        """缺键的话页面上 ``p.assets.map`` 直接抛异常，整块不渲染。"""
+        item = {i["id"]: i for i in box.list_catalog()}[9002]
+        assert item["assets"] == []
+
+    def test_素材表读不到时降级但留痕(self, box):
+        """表没建（迁移漏跑）不该让整个店铺页挂掉，但也不能装成
+        "这些商品本来就没有素材"——那样漏跑的迁移能躲很久。"""
+        from sqlalchemy import text
+
+        with box.engine.begin() as conn:
+            conn.execute(text("DROP TABLE marketing_asset"))
+        items = box.list_catalog()
+        assert len(items) >= 2, "商品还得出得来"
+        assert all(i["assets"] == [] for i in items)
+        assert box.degraded and "素材" in box.degraded[0], "降级必须留痕"
 
     def test_一次给全页面要的东西(self, box):
         item = {i["id"]: i for i in box.list_catalog()}[9001]

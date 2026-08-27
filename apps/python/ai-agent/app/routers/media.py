@@ -177,9 +177,73 @@ async def list_assets(request: Request, product_id: int | None = None,
         "error": r.get("error") or "",
         "model": r.get("model") or "",
         "reviewStatus": r.get("review_status"),
+        "reviewNote": r.get("review_note") or "",
         "aiGenerated": bool(r.get("ai_generated", 1)),
         "createdAt": str(r.get("created_at") or ""),
     } for r in rows])
+
+
+# ---------------------------------------------------------------- 审核
+
+
+def review_store() -> Any:
+    """审核通道。
+
+    **单独一个工厂，不走 get_deps()。** ``Deps`` 是运营 Agent 拿在手里的
+    那份东西；把审核能力放进去，就等于给生成方发了一枚它自己的图章
+    （见 ``marketing/store.py`` 里 MySqlAssetReviewStore 的注释）。
+    试跑与测试替换这个函数即可。
+    """
+    from ..agent.marketing.store import MySqlAssetReviewStore
+
+    return MySqlAssetReviewStore.from_env()
+
+
+@router.post("/api/admin/media/{asset_id}/review", summary="审核素材（商家）")
+async def review(asset_id: int, payload: dict[str, Any],
+                 request: Request) -> dict[str, Any]:
+    """人来判这条素材能不能挂出去。
+
+    **这里可以传 review_status，而生成接口不行**——两者不矛盾，恰恰是同
+    一条规则的两面：状态只能由**这一个**入口改，而这个入口要求一个通过
+    鉴权的人、记下他是谁、什么时候、以及驳回的理由。生成接口那边一旦
+    开口，这些就全没了（见 011 migration 的文件头）。
+
+    审核人取自令牌，**不从 body 里读**：能传 reviewerId 就等于能冒名。
+    """
+    denied = await _denied(request)
+    if denied:
+        return denied
+
+    who = await _principal(request)
+    reviewer_id = int((who or {}).get("userId") or 0)
+    if reviewer_id <= 0:
+        # 盖章必须落到具体的人头上。落不到就不盖——一条查不到审核人的
+        # "已通过"，出事时和没审过是一样的
+        return _fail(1401, "拿不到审核人身份，请重新登录")
+
+    decision = str(payload.get("decision") or "").strip()
+    note = str(payload.get("note") or "")
+
+    from ..agent.marketing.store import AssetReviewError
+
+    try:
+        row = await asyncio.to_thread(
+            review_store().review, asset_id,
+            decision=decision, reviewer_id=reviewer_id, note=note)
+    except AssetReviewError as exc:
+        # 1409：请求本身没毛病，是这条素材当前的状态不允许这么判。
+        # 页面要把这句话原样显示出来，不然商家只知道"失败了"
+        return _fail(1409, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _fail(9503, f"审核写库失败：{type(exc).__name__}")
+
+    return _ok({
+        "id": row.get("id"),
+        "reviewStatus": row.get("review_status"),
+        "reviewNote": row.get("review_note") or "",
+        "reviewerId": row.get("reviewer_id"),
+    })
 
 
 # ---------------------------------------------------------------- 取文件

@@ -321,7 +321,15 @@ class TestWebPage:
             "客服窗口必须把当前商品带过去"
         )
 
-    def test_page_defines_what_it_calls(self):
+    @pytest.mark.parametrize("path,extra", [
+        ("/", {"loadAuth", "switchIdentity", "authFetch", "loadProducts",
+               "connect", "renderGrid", "buildHero", "assetStrip"}),
+        # 商家后台一直没被这条盯着——加审核按钮时才发现。
+        # 同一个事故换个页面重演一遍，代价一模一样
+        ("/merchant", {"loadAssets", "reviewAsset", "reviewCell",
+                       "ensureMerchant", "loadProducts"}),
+    ])
+    def test_page_defines_what_it_calls(self, path, extra):
         """页面里调到的全局函数必须真的定义了。
 
         **这条是被一个真的事故逼出来的**：改版前的页面调了
@@ -330,18 +338,52 @@ class TestWebPage:
         ``loadProducts()`` 和 ``connect()`` 一起带走，于是整页既没有商品
         也连不上客服，而**报错只在控制台里**。页面看着像"接口挂了"，
         症状离病因隔了三层，光看页面永远查不到。
+
+        ``extra`` 里是不从 ``onclick=`` 走、正则扫不到的调用（启动脚本、
+        模板里的函数）。手工列是没办法的事，但漏列只会漏检、不会误报。
+        """
+        import re
+
+        text = self._client().get(path).text
+        script = text[text.index("<script>"):]
+        defined = set(re.findall(r"function\s+([A-Za-z_]\w*)", script))
+        defined |= set(re.findall(r"(?:const|let|var)\s+([A-Za-z_]\w*)\s*=", script))
+        called = set(re.findall(r'on\w+="([A-Za-z_]\w*)\(', text))
+        called |= extra
+        missing = sorted(called - defined - {"scrollTo"})
+        assert not missing, f"{path} 调了但没定义：{missing}"
+
+    def test_ai_assets_carry_the_required_label(self):
+        """《人工智能生成合成内容标识办法》要求生成内容可识别。
+
+        标识跟着数据走（后端的 ``ai_generated``），页面只负责画出来——
+        写死在模板里的话，将来混进非 AI 素材就会被误标。
+        """
+        text = self._client().get("/").text
+        assert "aitag" in text and "AI 生成" in text
+        assert "a.ai_generated" in text, "角标要由数据决定，不能写死"
+
+    def test_the_page_does_not_filter_assets_itself(self):
+        """**「哪些素材能露出」的判断只能在后端。**
+
+        前端按 ``review_status`` 过滤等于把闸门放在一个 curl 就能绕过的
+        地方；更糟的是商家后台点"通过"之后真正生效的会是另一套判断，
+        两边迟早对不上。所以页面里根本不该出现这个字段。
         """
         import re
 
         text = self._client().get("/").text
         script = text[text.index("<script>"):]
-        defined = set(re.findall(r"function\s+([A-Za-z_]\w*)", script))
-        defined |= set(re.findall(r"(?:const|let|var)\s+([A-Za-z_]\w*)\s*=", script))
-        called = set(re.findall(r'on\w+="([A-Za-z_]\w*)\(', text))
-        called |= {"loadAuth", "switchIdentity", "authFetch", "loadProducts",
-                   "connect", "renderGrid", "buildHero"}
-        missing = sorted(called - defined - {"scrollTo"})
-        assert not missing, f"页面调了但没定义：{missing}"
+        # 注释要剔掉再看。解释"为什么不在这里过滤"的那段注释本身就写着
+        # review_status，按原文匹配会被自己的注释绊倒（同样的事在
+        # test_审核通道不从deps里取 上也发生过一次）
+        code = re.sub(r"/\*.*?\*/", "", script, flags=re.S)
+        code = re.sub(r"^\s*//.*$", "", code, flags=re.M)
+        for bad in ("review_status", "reviewStatus", "approved"):
+            assert bad not in code, (
+                f"店铺页里出现了 {bad}——过滤该在 list_catalog 那一层")
+        # 剔注释不能把代码也剔没了，否则这条断言等于没验
+        assert "assetStrip" in code and len(code) > len(script) * 0.5
 
     def test_page_uses_no_emoji_icons(self):
         """图标走内联 SVG，不用 emoji。

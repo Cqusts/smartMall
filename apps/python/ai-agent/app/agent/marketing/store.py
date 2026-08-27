@@ -179,8 +179,8 @@ class MySqlAssetStore:
         from sqlalchemy import text
 
         sql = ("SELECT id, product_id, kind, usage_tag, local_path,"
-               " task_status, error, model, review_status, ai_generated,"
-               " created_at FROM marketing_asset")
+               " task_status, error, model, review_status, review_note,"
+               " ai_generated, created_at FROM marketing_asset")
         params: dict[str, Any] = {"n": int(limit)}
         if product_id is not None:
             sql += " WHERE product_id = :pid"
@@ -189,6 +189,135 @@ class MySqlAssetStore:
         with self.engine.connect() as conn:
             rows = conn.execute(text(sql), params).mappings().all()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------- 素材审核
+
+#: 审核结论。只有这两个，没有"待定"——待定就是不点。
+REVIEW_DECISIONS = frozenset({"approved", "rejected"})
+
+
+class AssetReviewError(RuntimeError):
+    """审核没做成。带一句能直接显示给人看的话。"""
+
+
+@dataclass
+class MySqlAssetReviewStore:
+    """素材审核。
+
+    **为什么它不在 :class:`AssetStore` 协议里，也不进 Deps。**
+    011 migration 的文件头写着「机器给自己盖章等于没有审核」，而
+    ``stage_asset`` 把 ``review_status`` 写死成 pending 就是这条的落实。
+    但只要审核方法挂在同一个对象上，运营 Agent 手里的 ``deps.asset_store``
+    就带着一个能盖章的能力——今天没人调，不代表明天没人调，而且那种调用
+    读起来完全正常（"生成完顺手标一下"）。
+
+    所以这里做成一个**独立的类**：Agent 拿到的那个对象上根本没有这个方法。
+    这不是靠约定，是靠对象图——``Deps`` 里没有它，就没有任何一条从 Agent
+    代码走到这里的路径。审核入口只有一个，就是商家后台那个带鉴权的路由。
+    """
+
+    engine: Any
+
+    @classmethod
+    def from_env(cls) -> "MySqlAssetReviewStore":
+        from smartmall_pipeline.repository import DwsRepository
+
+        return cls(engine=DwsRepository.from_env().engine)
+
+    def get(self, asset_id: int) -> dict[str, Any] | None:
+        from sqlalchemy import text
+
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT id, product_id, kind, usage_tag, local_path,"
+                " task_status, review_status, review_note, reviewer_id"
+                " FROM marketing_asset WHERE id = :id"),
+                {"id": int(asset_id)}).mappings().first()
+        return dict(row) if row else None
+
+    def review(self, asset_id: int, *, decision: str, reviewer_id: int,
+               note: str = "") -> dict[str, Any]:
+        """把一条素材判为通过或驳回。返回更新后的行。
+
+        三条判据，每条都会真的挡住东西：
+
+        * **结论只能是 approved / rejected** —— 白名单。拼错一个词就写进
+          库里的话，它既不是待审也不是通过，而列表页按 ``=== 'approved'``
+          渲染，看起来永远是"待审"，查不出为什么点了没反应。
+        * **驳回必须写理由** —— 见 014 migration。
+        * **没有文件的素材不许通过** —— 视频任务失败、或者还在跑，
+          ``local_path`` 是空的。这时候点通过，商品页上会挂出一张裂图，
+          而库里状态是"已审核通过"，事后查起来会以为是展示层的 bug。
+        """
+        from sqlalchemy import text
+
+        if decision not in REVIEW_DECISIONS:
+            raise AssetReviewError(f"未知的审核结论：{decision}")
+
+        note = (note or "").strip()
+        if decision == "rejected" and not note:
+            raise AssetReviewError("驳回要写明原因，否则生成方不知道该改什么")
+
+        row = self.get(asset_id)
+        if row is None:
+            raise AssetReviewError(f"素材 #{asset_id} 不存在")
+
+        if decision == "approved":
+            if row.get("task_status") != "succeeded":
+                raise AssetReviewError(
+                    f"这条素材还没生成成功（{row.get('task_status')}），不能通过")
+            if not (row.get("local_path") or "").strip():
+                raise AssetReviewError("这条素材没有文件，通过了商品页也只会是裂图")
+
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE marketing_asset SET review_status = :st,"
+                " review_note = :note, reviewer_id = :who,"
+                " reviewed_at = CURRENT_TIMESTAMP WHERE id = :id"),
+                {"st": decision, "note": note[:256],
+                 "who": int(reviewer_id), "id": int(asset_id)})
+
+        updated = self.get(asset_id)
+        assert updated is not None
+        return updated
+
+
+@dataclass
+class StubAssetReviewStore:
+    """测试替身。背后就是 :class:`StubAssetStore` 的那份列表。"""
+
+    assets: "StubAssetStore"
+
+    def get(self, asset_id: int) -> dict[str, Any] | None:
+        for row in self.assets.staged:
+            if row.get("id") == asset_id:
+                return dict(row)
+        return None
+
+    def review(self, asset_id: int, *, decision: str, reviewer_id: int,
+               note: str = "") -> dict[str, Any]:
+        # 判据与 MySqlAssetReviewStore 一字不差地重复一遍是有意的：
+        # 替身放宽任何一条，测试就会在一个真实环境里挡得住的输入上通过
+        if decision not in REVIEW_DECISIONS:
+            raise AssetReviewError(f"未知的审核结论：{decision}")
+        note = (note or "").strip()
+        if decision == "rejected" and not note:
+            raise AssetReviewError("驳回要写明原因，否则生成方不知道该改什么")
+        for row in self.assets.staged:
+            if row.get("id") != asset_id:
+                continue
+            if decision == "approved":
+                if row.get("task_status") != "succeeded":
+                    raise AssetReviewError(
+                        f"这条素材还没生成成功（{row.get('task_status')}），不能通过")
+                if not (row.get("local_path") or "").strip():
+                    raise AssetReviewError("这条素材没有文件，通过了商品页也只会是裂图")
+            row["review_status"] = decision
+            row["review_note"] = note[:256]
+            row["reviewer_id"] = reviewer_id
+            return dict(row)
+        raise AssetReviewError(f"素材 #{asset_id} 不存在")
 
 
 @dataclass
