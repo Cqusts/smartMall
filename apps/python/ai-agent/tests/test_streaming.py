@@ -396,6 +396,23 @@ class TestWebPage:
         # 剔注释不能把代码也剔没了，否则这条断言等于没验
         assert "assetStrip" in code and len(code) > len(script) * 0.5
 
+    def test_nav_items_are_wired_and_look_clickable(self):
+        """导航项是 onclick 的 <a>，没有 href 就不会自动变手型——
+        「看起来不能点」和「点了没反应」对用户是同一种坏。
+        """
+        text = self._client().get("/").text
+        for fn in ("goTop()", "goShop(", "goCats()"):
+            assert fn in text, f"导航少了 {fn}"
+        assert ".nav a{" in text and "cursor:pointer" in text.split(".nav a{")[1][:120], (
+            "导航项要有 cursor:pointer")
+
+    def test_removed_entries_are_gone(self):
+        """删掉的两处不能剩下残留：联系我们（右下角浮窗已经是同一个入口）、
+        以及优惠券卡片上的「问问客服怎么用」。"""
+        text = self._client().get("/").text
+        assert "联系我们" not in text
+        assert "问问客服怎么用" not in text
+
     def test_page_uses_no_emoji_icons(self):
         """图标走内联 SVG，不用 emoji。
 
@@ -875,8 +892,20 @@ class TestMerchantPage:
         """演示环境常常没有外网，"打不开"比"不好看"严重得多。"""
         assert not re.findall(r"https?://[^\"'\s<]*", self._text())
 
-    def test_storefront_links_to_it(self):
-        assert 'href="/merchant"' in self._text("/")
+    def test_storefront_links_to_it_but_only_for_merchants(self):
+        """入口在，但默认收起来——切到商家身份才显示。
+
+        **藏按钮是体验不是安全**：藏了照样能直接敲 /merchant。真正的判定
+        在 mall-product 的 @RequireMerchant 与 media.py 的 _denied 上，
+        那两处有各自的用例。这里只钉住"买家看不到一个点了会 403 的入口"。
+        """
+        text = self._text("/")
+        assert 'href="/merchant"' in text
+        # 初始 HTML 里必须是 hidden 的：默认可见的话，未登录访客也看得到
+        nav = text[text.index('href="/merchant"'):][:200]
+        assert "hidden" in nav, "商家后台入口默认要收起来"
+        # 而且得有地方会把它打开，否则商家永远也看不到
+        assert "navMerchant" in text and "role === 'merchant'" in text
 
     def test_it_sends_the_token(self):
         """不带令牌的话每个请求都是 401，看起来像"功能坏了"。"""

@@ -63,7 +63,9 @@ button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
 .logo b{font-weight:800}
 .logo span{color:var(--sand)}
 .nav{display:flex;gap:30px;font-size:14.5px;color:var(--ink-2)}
-.nav a{position:relative;padding:4px 0}
+/* cursor 不能少：这几项是 onclick 的 <a>，没有 href 就不会自动变手型，
+   看起来跟死链一模一样——「点了没反应」和「看起来不能点」是同一种坏 */
+.nav a{position:relative;padding:4px 0;cursor:pointer}
 .nav a:hover{color:var(--ink)}
 .nav a.on{color:var(--ink);font-weight:600}
 .nav a.on::after{content:"";position:absolute;left:0;right:0;bottom:-26px;
@@ -495,11 +497,14 @@ footer code{background:#f2efec;padding:1px 6px;border-radius:3px}
 <header class="hd"><div class="wrap">
   <div class="logo">smart<span>Mall</span>.</div>
   <nav class="nav">
-    <a class="on">首页</a>
-    <a onclick="pickCat('全部')">全部商品</a>
-    <a onclick="scrollTo(0, document.querySelector('.shop').offsetTop - 90)">分类</a>
-    <a href="/merchant">商家后台</a>
-    <a onclick="openChat()">联系我们</a>
+    <a class="on" onclick="goTop()">首页</a>
+    <a onclick="goShop('全部')">全部商品</a>
+    <a onclick="goCats()">分类</a>
+    <!-- 商家后台默认藏起来，切到商家身份才显示（见 renderAcct）。
+         **这是体验不是安全**：藏了照样能直接敲 /merchant，
+         真正的判定在 mall-product 的 @RequireMerchant 与
+         media.py 的 _denied 上。 -->
+    <a href="/merchant" id="navMerchant" hidden>商家后台</a>
   </nav>
   <span class="sp"></span>
   <form class="sbox" onsubmit="searchAsk(event)">
@@ -553,7 +558,6 @@ footer code{background:#f2efec;padding:1px 6px;border-radius:3px}
         <em>新用户专享</em>
         <div class="cd">距结束
           <i id="cdH">00</i>时<i id="cdM">00</i>分<i id="cdS">00</i>秒</div>
-        <a class="go" onclick="openChat()">问问客服怎么用</a>
       </div>
     </div>
   </section>
@@ -744,6 +748,11 @@ function renderAcct(){
   }).join('');
 
   $('#userBtn').title = auth ? `${cur}（点击切换账号）` : '点击登录';
+
+  // 商家后台只对商家显示。**这是体验不是安全**——藏了照样能直接敲
+  // /merchant，那一端有 @RequireMerchant 与 media.py 的 _denied 把着。
+  // 放在这里而不是登录时做一次：身份是能来回切的，切回买家要跟着收起来
+  $('#navMerchant').hidden = !(auth && auth.role === 'merchant');
 }
 
 function toggleAcct(e){
@@ -934,6 +943,46 @@ function pickCat(c){
   $('#favBtn').classList.remove('on');
   renderCats();
   renderGrid();
+}
+
+/* ---------------------------------------------------------------- 导航
+
+   店铺是单页，所以导航是**滚动定位**而不是路由跳转。写成 <a href="#..">
+   会往地址栏塞锚点，刷新后停在半截页面上；用 scrollIntoView 干净些。
+
+   ``smooth`` 之外还要顶掉 90px：header 是 sticky 的，不减掉的话
+   目标区块的标题会正好被它盖住——看起来像滚过头了。            */
+
+function _scrollTo(sel){
+  const el = document.querySelector(sel);
+  if (!el) return;
+  scrollTo({top: el.getBoundingClientRect().top + window.scrollY - 90,
+            behavior: 'smooth'});
+}
+
+function navOn(label){
+  document.querySelectorAll('.nav a').forEach(a =>
+    a.classList.toggle('on', a.textContent.trim() === label));
+}
+
+function goTop(){
+  navOn('首页');
+  scrollTo({top: 0, behavior: 'smooth'});
+}
+
+function goShop(c){
+  // 先切类目再滚：顺序反过来的话，滚到的是上一个类目的列表，
+  // 滚动动画结束时内容才突然换掉
+  pickCat(c);
+  navOn('全部商品');
+  _scrollTo('.shop');
+}
+
+function goCats(){
+  navOn('分类');
+  // 窄屏下侧栏在网格上面，滚到 .cats 与滚到 .shop 是同一个位置；
+  // 宽屏下两者也只差几像素。指到侧栏是因为语义对得上
+  _scrollTo('.cats');
 }
 
 function imgFor(p){
