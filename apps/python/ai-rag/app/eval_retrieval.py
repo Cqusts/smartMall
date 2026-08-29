@@ -283,6 +283,173 @@ def split_stratified(samples: Sequence[dict], seed: int = 20260829
     return train, test
 
 
+# ---------------------------------------------------------------- 兜底闸门
+
+
+#: 闸门阈值，与 ai-agent 的 ``AgentConfig`` 默认值一一对应。
+#:
+#: **这里是一份副本，而副本会漂。** 第一版写成"try 从 app.agent.nodes 导入，
+#: 导不到退回硬编码"，看着像是从源头取值——实际上永远走不到 try 分支：
+#: 两个服务的顶层包**都叫 app**，``app.agent`` 在 ai-rag 进程里解析的是
+#: ai-rag 自己的包，必然 ModuleNotFoundError。也就是说那段导入是死代码，
+#: 值一直来自下面这三行，而且不会有任何提示。
+#:
+#: 所以不装那个样子了：明写成常量，另配一条**按路径读 nodes.py** 的漂移
+#: 测试（``test_gate_thresholds_match_the_agent``）。那边一改数字，测试就挂。
+GATE_HANDOVER_BELOW = 0.30
+GATE_CLARIFY_BELOW = 0.55
+GATE_LEXICAL_SUPPORT_MIN = 0.15
+
+
+def gate_thresholds() -> tuple[float, float, float]:
+    return GATE_HANDOVER_BELOW, GATE_CLARIFY_BELOW, GATE_LEXICAL_SUPPORT_MIN
+
+
+@dataclass
+class GateReport:
+    """闸门的两端。
+
+    **只报一端等于没报。** 漏放率可以靠"全部转人工"刷到 0，
+    误转率可以靠"全部硬答"刷到 0——两个数必须一起看。
+    """
+
+    handover_below: float
+    clarify_below: float
+    lexical_support_min: float
+
+    #: 出口 → 条数，正负样本各一份
+    pos: dict[str, int] = field(default_factory=dict)
+    neg: dict[str, int] = field(default_factory=dict)
+    misfires: list[dict] = field(default_factory=list)
+
+    @property
+    def positives(self) -> int:
+        return sum(self.pos.values())
+
+    @property
+    def negatives(self) -> int:
+        return sum(self.neg.values())
+
+    @property
+    def handover_rate(self) -> float:
+        """转人工率：全部问题里有多少最终交给人。**不含澄清**。"""
+        total = self.positives + self.negatives
+        n = self.pos.get("转人工", 0) + self.neg.get("转人工", 0)
+        return 0.0 if not total else n / total
+
+    @property
+    def leak_rate(self) -> float:
+        """漏放率：知识库答不了的问题里，有多少被直接答了。"""
+        return 0.0 if not self.negatives else self.neg.get("直答", 0) / self.negatives
+
+    @property
+    def false_handover_rate(self) -> float:
+        """误转率：答得了的问题里，有多少被白白弹给人工（澄清不算）。"""
+        return 0.0 if not self.positives else \
+            self.pos.get("转人工", 0) / self.positives
+
+    @property
+    def direct_answer_rate(self) -> float:
+        """答得了的问题里有多少直接答了——闸门的产出面。"""
+        return 0.0 if not self.positives else self.pos.get("直答", 0) / self.positives
+
+
+def _route(hits: Sequence[Any], thresholds: tuple[float, float, float]) -> str:
+    """复刻 ``graph.route_after_retrieve`` 的三个出口：直答 / 澄清 / 转人工。
+
+    **三个出口不能压成两个。** 澄清是"再问你一句"，转人工是"交给人"——
+    对用户是两种体验，对排班是两件事。压成"没直答"之后，兜底率里就混进了
+    一批其实只是追问了一句的会话，那个数字不能拿去估人力。
+
+    **只判走哪条路，不判答得对不对。** 后者要 LLM；闸门本身是纯阈值逻辑，
+    为了量它去付一次模型调用，既慢又会把两种失败（闸门判错 / 模型答错）
+    混进同一个数。
+    """
+    handover_below, clarify_below, lex_min = thresholds
+    if not hits:
+        return "转人工"
+    score = max(h.dense_score for h in hits)
+    if score < handover_below:
+        # 实现里会先改写一次再转；改写用的是 LLM，这里量不到，
+        # 按"最终会转人工"记——改写救回来的那部分会让真实兜底率略低于此
+        return "转人工"
+    if score < clarify_below:
+        has_support = any(h.lexical_overlap >= lex_min for h in hits)
+        return "澄清" if has_support else "转人工"
+    return "直答"
+
+
+def run_gate(
+    store: MilvusStore,
+    provider: EmbeddingProvider,
+    positives: Sequence[dict],
+    negatives: Sequence[dict],
+    *,
+    search,
+    progress: Callable[[int, int], None] | None = None,
+) -> GateReport:
+    """把两批问题都过一遍闸门。
+
+    ``search`` 传 :class:`~app.search.SearchService` 的实例——闸门吃的是
+    ``dense_score`` 与 ``lexical_overlap``，这两个判据由它补齐，
+    ``store.recall()`` 给不出来（那一层只有 Milvus 的原始分）。
+    """
+    th = gate_thresholds()
+    rep = GateReport(*th)
+    total = len(positives) + len(negatives)
+    seen = 0
+
+    for group, answerable in ((positives, True), (negatives, False)):
+        for s in group:
+            hits = search.search(s["text"])
+            route = _route(hits, th)
+            bucket = rep.pos if answerable else rep.neg
+            bucket[route] = bucket.get(route, 0) + 1
+
+            top = max((h.dense_score for h in hits), default=0.0)
+            cov = max((h.lexical_overlap for h in hits), default=0.0)
+            bad = (route == "转人工") if answerable else (route == "直答")
+            if bad:
+                rep.misfires.append({
+                    "kind": "误转" if answerable else "漏放",
+                    "text": s["text"], "why": s.get("why", ""),
+                    "score": round(top, 3), "overlap": round(cov, 3)})
+            seen += 1
+            if progress:
+                progress(seen, total)
+    return rep
+
+
+def render_gate(rep: GateReport) -> str:
+    def row(label, d, n):
+        return (f"  {label:<8}" + "".join(
+            f"{k} {d.get(k, 0):>3}（{d.get(k, 0) / n:.3f}）　"
+            for k in ("直答", "澄清", "转人工")))
+
+    return "\n".join([
+        "",
+        "兜底闸门（低置信度转人工）",
+        f"  阈值 handover<{rep.handover_below} / clarify<{rep.clarify_below}"
+        f" / 词汇支撑≥{rep.lexical_support_min}",
+        "",
+        f"  {'':<8}三个出口各多少（复刻 graph.route_after_retrieve）",
+        row(f"答得了", rep.pos, rep.positives) + f"　共 {rep.positives} 条",
+        row(f"答不了", rep.neg, rep.negatives) + f"　共 {rep.negatives} 条",
+        "",
+        f"  转人工率　{rep.handover_rate:.3f}"
+        f"（{rep.positives + rep.negatives} 条里 "
+        f"{rep.pos.get('转人工', 0) + rep.neg.get('转人工', 0)} 条交给人，澄清不计）",
+        f"  漏放率　　{rep.leak_rate:.3f}"
+        f"（答不了的 {rep.negatives} 条里直答了 {rep.neg.get('直答', 0)} 条）"
+        f"　← 危险的那一端",
+        f"  误转率　　{rep.false_handover_rate:.3f}"
+        f"（答得了的 {rep.positives} 条里白弹给人工 "
+        f"{rep.pos.get('转人工', 0)} 条）　← 纯损失的那一端",
+        "",
+        "  两端必须一起看：全部转人工能把漏放率刷成 0，全部直答能把误转率刷成 0。",
+    ])
+
+
 def render_sweep(swept: dict[float, ChannelReport],
                  baseline: ChannelReport) -> str:
     """稀疏权重扫描表。

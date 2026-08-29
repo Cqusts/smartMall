@@ -376,6 +376,16 @@ def embed_query(provider: EmbeddingProvider, query: str) -> list[float]:
     """
     fn = getattr(provider, "embed_query", None)
     vec = [fn(query)] if callable(fn) else provider.embed([query])
-    if not vec or len(vec[0]) != DIM:
-        raise RuntimeError(f"向量维度异常：期望 {DIM}")
+
+    # 维度对照的是**这个 provider 自己声明的 dim**，不是全局常量 DIM。
+    # 写死 1024 的那一版把"维度不是 1024"和"provider 坏了"混成一件事：
+    # 接一个 512 维的模型（评测用的 bge-small 就是）会在这里抛
+    # "向量维度异常：期望 1024"，而它其实完全正常。这道判据要拦的是
+    # provider 返回了它自己都没承诺的长度，那才是真的坏了。
+    want = getattr(provider, "dim", DIM)
+    if not vec or len(vec[0]) != want:
+        got = len(vec[0]) if vec else 0
+        raise RuntimeError(
+            f"{getattr(provider, 'name', provider)} 声明 dim={want}，"
+            f"实际返回 {got} 维")
     return vec[0]

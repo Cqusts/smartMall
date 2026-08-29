@@ -21,9 +21,12 @@ from smartmall_pipeline.rag.embedding import build_provider
 from smartmall_pipeline.rag.milvus import MilvusConfig
 
 from .eval_retrieval import (
-    index_corpus, load_jsonl, render, render_sweep, run_retrieval,
+    index_corpus, load_jsonl, render, render_gate, render_sweep,
+    run_gate, run_retrieval,
 )
 from .milvus_store import MilvusStore
+from .retrieval import RetrievalConfig
+from .search import SearchService
 
 
 def _holdout(store, provider, samples, sweep, args) -> str:
@@ -91,6 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=0, help="只跑前 N 条查询，试水用")
     p.add_argument("--show-misses", type=int, default=8,
                    help="打印几条 R@5 没命中的错例")
+    p.add_argument("--gate", action="store_true",
+                   help="连兜底闸门一起量：答得了的问题里误转了多少、"
+                        "答不了的问题里漏放了多少")
     args = p.parse_args(argv)
 
     corpus = load_jsonl("retrieval-corpus.jsonl")
@@ -142,6 +148,27 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.holdout and sweep:
             print(_holdout(store, provider, samples, sweep, args))
+
+        if args.gate:
+            negatives = load_jsonl("retrieval-negative.jsonl")
+            service = SearchService(
+                store=store, provider=provider,
+                config=RetrievalConfig(kb_version=""),
+            )
+            # IDF 表要先建起来，否则 lexical_overlap 恒为 0，
+            # 中间地带那道词汇支撑判据等于永远不通过——兜底率会虚高
+            service.refresh_stats()
+            gate = run_gate(store, provider, samples, negatives,
+                            search=service,
+                            progress=lambda i, n: tick(i, n, "过闸门"))
+            print("\r" + " " * 30 + "\r", end="")
+            print(render_gate(gate))
+            if args.show_misses:
+                print("\n  判错的（漏放优先看）：")
+                for m in sorted(gate.misfires,
+                                key=lambda m: m["kind"] != "漏放")[:args.show_misses]:
+                    print(f"    [{m['kind']}]「{m['text']}」"
+                          f" score={m['score']} overlap={m['overlap']}")
 
         if args.show_misses:
             print("\n  融合这一路 R@5 没命中的（改哪里看这里，不是看总分）：")

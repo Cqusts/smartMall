@@ -329,3 +329,90 @@ class TestNeedsRewrite:
 
     def test_complete_query_does_not_need_rewrite(self):
         assert not needs_rewrite("100%羊毛的针织衫会不会起球以及如何避免")
+
+
+class TestGateThresholds:
+    """兜底闸门的阈值副本不能漂。
+
+    ``eval_retrieval`` 里的三个阈值是 ai-agent ``AgentConfig`` 的副本。
+    不能靠 import 保持同步——两个服务的顶层包**都叫 app**，
+    ``from app.agent.nodes import ...`` 在 ai-rag 进程里必然
+    ModuleNotFoundError，第一版就是这么写的，于是"从源头取值"是死代码。
+    改成按路径读文件，那边一改数字这里就挂。
+    """
+
+    def _agent_nodes_source(self):
+        from pathlib import Path
+
+        for parent in Path(__file__).resolve().parents:
+            p = parent / "ai-agent" / "app" / "agent" / "nodes.py"
+            if p.is_file():
+                return p.read_text(encoding="utf-8")
+        pytest.skip("找不到 ai-agent/app/agent/nodes.py")
+
+    def test_gate_thresholds_match_the_agent(self):
+        import re
+
+        from app.eval_retrieval import gate_thresholds
+
+        src = self._agent_nodes_source()
+        want = {}
+        for field in ("handover_below", "clarify_below", "lexical_support_min"):
+            m = re.search(rf"^\s*{field}:\s*float\s*=\s*([\d.]+)", src, re.M)
+            assert m, f"nodes.py 里找不到 {field} 的默认值——" \
+                      "字段改名了的话这条测试要跟着改，不能直接删"
+            want[field] = float(m.group(1))
+
+        got = gate_thresholds()
+        assert got == (want["handover_below"], want["clarify_below"],
+                       want["lexical_support_min"]), (
+            f"闸门阈值漂了：评测用 {got}，ai-agent 实际是 "
+            f"{tuple(want.values())}。评测报出来的兜底率对应的就不是线上那道闸门了")
+
+    def test_route_reproduces_the_three_exits(self):
+        """三个出口的判定要和 graph.route_after_retrieve 一致。
+
+        澄清和转人工**不能压成一个**：前者是再问一句，后者是交给人，
+        对用户是两种体验、对排班是两件事。
+        """
+        from app.eval_retrieval import _route, gate_thresholds
+
+        th = gate_thresholds()
+        low, mid, lex = th
+
+        def hit(score, overlap):
+            # _route 只读这两个字段。用 ScoredHit 的话得填满十来个
+            # 无关字段，读的人分不清哪些是判据、哪些是凑数的
+            class _S:
+                dense_score = score
+                lexical_overlap = overlap
+            return _S()
+
+        assert _route([], th) == "转人工"
+        assert _route([hit(low - 0.01, 0.9)], th) == "转人工"
+        # 中间地带：有词汇支撑走澄清，没有就转人工
+        assert _route([hit(mid - 0.01, lex)], th) == "澄清"
+        assert _route([hit(mid - 0.01, lex - 0.01)], th) == "转人工"
+        assert _route([hit(mid, 0.0)], th) == "直答"
+
+    def test_leak_and_false_handover_are_both_reported(self):
+        """两端都要有数。只报一端的话，把阈值调到极端就能刷出满分。"""
+        from app.eval_retrieval import GateReport
+
+        # 全部转人工：漏放率 0，但误转率 100%
+        r = GateReport(0.3, 0.55, 0.15,
+                       pos={"转人工": 10}, neg={"转人工": 10})
+        assert r.leak_rate == 0.0 and r.false_handover_rate == 1.0
+
+        # 全部直答：误转率 0，但漏放率 100%
+        r = GateReport(0.3, 0.55, 0.15, pos={"直答": 10}, neg={"直答": 10})
+        assert r.false_handover_rate == 0.0 and r.leak_rate == 1.0
+
+    def test_clarify_is_not_counted_as_handover(self):
+        """澄清不计入转人工率——它没有占用人力。"""
+        from app.eval_retrieval import GateReport
+
+        r = GateReport(0.3, 0.55, 0.15,
+                       pos={"直答": 5, "澄清": 5}, neg={"转人工": 10})
+        assert r.handover_rate == 0.5      # 只有那 10 条负样本
+        assert r.false_handover_rate == 0.0
