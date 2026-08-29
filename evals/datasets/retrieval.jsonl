@@ -1,0 +1,115 @@
+{"text":"这件针织衫是什么材质做的","gold":[1],"hard":"plain"}
+{"text":"云朵那款含多少羊毛","gold":[1],"hard":"plain"}
+{"text":"针织衫洗完会不会变小一圈","gold":[3],"hard":"lexical","why":"库里写的是「尺寸变化」「毡化收缩」，用户说的是「变小一圈」，没有一个词对得上"}
+{"text":"这个毛衣能不能扔洗衣机","gold":[2],"hard":"lexical","why":"库里是「羊毛专用程序」，用户问的是「扔洗衣机」"}
+{"text":"针织衫穿几次会不会有小球球","gold":[4],"hard":"lexical","why":"「起球」在库里是术语，「小球球」是口语"}
+{"text":"178 的身高针织衫拍多大","gold":[5],"hard":"exact","why":"178 这个数字直接出现在库里，是词面线索"}
+{"text":"云朵针织衫米白色是偏黄的那种吗","gold":[6],"hard":"plain"}
+{"text":"针织衫在哪生产的","gold":[7],"hard":"plain"}
+{"text":"针织衫的执行标准是 GB/T 22849 吗","gold":[7],"hard":"exact","why":"标准号是精确串，向量会糊掉"}
+{"text":"针织衫肩膀多宽袖子多长","gold":[94],"hard":"plain"}
+{"text":"针织衫能用熨斗吗","gold":[83],"hard":"plain"}
+{"text":"我对羊毛过敏这件能穿吗","gold":[82],"hard":"lexical","why":"库里讲的是「含动物纤维、过敏慎拍」，用户是从自己的角度问"}
+{"text":"针织衫现在多少钱","gold":[64],"hard":"plain"}
+{"text":"工装夹克是纯棉的吗","gold":[8],"hard":"plain"}
+{"text":"这件夹克第一次洗会不会掉色","gold":[9],"hard":"plain"}
+{"text":"工装夹克版型偏大还是偏小","gold":[10],"hard":"lexical","why":"库里说「落肩宽松，大一码」，用户问的是偏大偏小"}
+{"text":"夹克有几个兜","gold":[11],"hard":"lexical","why":"库里写「贴袋」「斜插袋」，用户说「兜」"}
+{"text":"夹克拉链是什么牌子的","gold":[11],"hard":"exact","why":"YKK 是精确品牌词"}
+{"text":"工装夹克冬天穿冷不冷","gold":[81],"hard":"lexical","why":"库里是「无内胆无填充、定位春秋」，没有「冷」字"}
+{"text":"工装夹克能送去干洗店吗","gold":[99],"hard":"plain"}
+{"text":"工装夹克现在什么价","gold":[65],"hard":"plain"}
+{"text":"T恤用的什么棉","gold":[12],"hard":"plain"}
+{"text":"新疆长绒棉那件T恤克重多少","gold":[12],"hard":"exact","why":"「新疆长绒棉」是精确成分词"}
+{"text":"纯棉T恤能机洗吗","gold":[13],"hard":"plain"}
+{"text":"T恤洗了会缩水吗","gold":[14],"hard":"plain"}
+{"text":"我平时穿 M 码 T恤该拍什么码","gold":[15],"hard":"plain"}
+{"text":"T恤都有什么颜色可选","gold":[16],"hard":"plain"}
+{"text":"白色T恤会不会走光","gold":[93],"hard":"lexical","why":"库里说的是「透光」「可单穿」，用户说「走光」"}
+{"text":"T恤领子被撑大了还能恢复吗","gold":[84],"hard":"lexical","why":"库里是「变形」「氨纶断裂」，用户说「撑大」"}
+{"text":"跑鞋一只多重","gold":[17],"hard":"plain"}
+{"text":"这双鞋中底是什么材料","gold":[17],"hard":"plain"}
+{"text":"跑鞋要买大半码吗","gold":[18],"hard":"plain"}
+{"text":"我脚长 250 穿几码","gold":[76],"hard":"exact","why":"250 这个数字只在鞋码对照表里出现，向量分不出 76 和 18"}
+{"text":"跑鞋脏了能丢洗衣机洗吗","gold":[19],"hard":"plain"}
+{"text":"这双鞋能打篮球穿吗","gold":[20],"hard":"lexical","why":"库里是「不建议用于竞速或横向变向运动」，没有「篮球能不能穿」的字面"}
+{"text":"跑鞋试了不合脚可以退吗","gold":[77],"hard":"plain"}
+{"text":"洁面的主要成分是什么","gold":[21],"hard":"plain"}
+{"text":"敏感肌能用这个洗面奶吗","gold":[21],"hard":"lexical","why":"库里把肤质写在成分描述末尾，主体是 pH 与表活"}
+{"text":"洗面奶一次挤多少合适","gold":[22],"hard":"plain"}
+{"text":"洗面奶开封后多久要用完","gold":[23],"hard":"plain"}
+{"text":"洗面奶上写的 12M 是什么意思","gold":[23],"hard":"exact","why":"12M 是精确标识符"}
+{"text":"怀孕了能用这个洁面吗","gold":[24],"hard":"plain"}
+{"text":"这支洗面奶多少克","gold":[91],"hard":"plain"}
+{"text":"洗完脸干得难受是不是不适合我","gold":[92],"hard":"lexical","why":"库里说的是「紧绷」，用户说「干得难受」"}
+{"text":"每日坚果里都有什么","gold":[25],"hard":"plain"}
+{"text":"坚果一盒多少包","gold":[25],"hard":"plain"}
+{"text":"坚果能放多久","gold":[26],"hard":"plain"}
+{"text":"坚果生产日期印在哪","gold":[26],"hard":"plain"}
+{"text":"花生过敏的人能吃这个坚果吗","gold":[27],"hard":"exact","why":"「花生」只在过敏原那条里出现一次"}
+{"text":"一小包坚果多少卡路里","gold":[28],"hard":"lexical","why":"库里写的是「千焦」「千卡」，用户说「卡路里」"}
+{"text":"坚果放软了还能不能吃","gold":[78],"hard":"lexical","why":"库里是「受潮变软」「油脂氧化」，用户说「放软了」"}
+{"text":"吃的东西收到不想要了可以退吗","gold":[79],"hard":"lexical","why":"用户完全不说「食品」两个字"}
+{"text":"付完钱几天发货","gold":[29],"hard":"plain"}
+{"text":"你们发什么快递","gold":[30],"hard":"plain"}
+{"text":"能指定用京东发吗","gold":[30],"hard":"lexical","why":"库里只说「不支持指定快递」，没有出现京东"}
+{"text":"从下单到收到大概几天","gold":[31],"hard":"lexical","why":"和 29 号「什么时候发货」构成干扰对，差别在「发出」与「送达」"}
+{"text":"寄到乌鲁木齐要多久","gold":[31],"hard":"exact","why":"库里写的是「新疆」，乌鲁木齐要靠语义补上"}
+{"text":"满多少钱不要邮费","gold":[32],"hard":"lexical","why":"库里是「包邮」「运费」，用户说「不要邮费」"}
+{"text":"我在西藏是不是要另外加钱","gold":[32],"hard":"plain"}
+{"text":"地址写错了还能改吗","gold":[33],"hard":"plain"}
+{"text":"快递好几天没动静了","gold":[34],"hard":"lexical","why":"库里是「物流信息无更新」「滞留」，用户说「没动静」"}
+{"text":"显示签收了可是我没拿到","gold":[35],"hard":"plain"}
+{"text":"能寄到美国吗","gold":[36],"hard":"lexical","why":"库里只说「不支持境外直邮」，没有出现美国"}
+{"text":"两件商品能分两次寄吗","gold":[37],"hard":"plain"}
+{"text":"能不能约周末送","gold":[71],"hard":"lexical","why":"库里是「预约配送时间段」，用户说「约周末」"}
+{"text":"可以让快递放菜鸟驿站吗","gold":[72],"hard":"exact","why":"「驿站」是精确词，同时和 71 号构成干扰"}
+{"text":"箱子压坏了要不要签","gold":[89],"hard":"lexical","why":"库里是「外箱破损」「拒收」，用户说「压坏了要不要签」"}
+{"text":"过年期间还发货吗","gold":[95],"hard":"exact","why":"「春节」在库里，「过年」是口语同义"}
+{"text":"能加钱让你们先发吗","gold":[90],"hard":"lexical","why":"库里是「加急」「按付款顺序排单」"}
+{"text":"七天无理由是从哪天开始算","gold":[38],"hard":"plain"}
+{"text":"退货来回运费谁出","gold":[39],"hard":"plain"}
+{"text":"吊牌剪了还能退吗","gold":[40],"hard":"exact","why":"「吊牌」是精确词，且 77 号讲鞋子试穿也涉及退货条件"}
+{"text":"退款一般几天到卡里","gold":[41],"hard":"plain"}
+{"text":"尺码不合适想换个大的","gold":[42],"hard":"lexical","why":"库里是「申请换货」「更换尺码或颜色」"}
+{"text":"衣服有线头开缝了怎么办","gold":[43],"hard":"lexical","why":"库里是「质量问题」「脱线」，用户描述的是现象"}
+{"text":"少发了一件东西","gold":[44],"hard":"plain"}
+{"text":"退货往哪个地址寄","gold":[45],"hard":"plain"}
+{"text":"买了两个月发现拉链坏了还保修吗","gold":[46],"hard":"lexical","why":"库里是「三包」「90 天」「拉链失效」，用户说「保修」"}
+{"text":"我买完就降价了能退差价吗","gold":[47],"hard":"lexical","why":"库里是「价格保护」「补退差价」"}
+{"text":"东西不想退回去只想退钱行吗","gold":[48],"hard":"lexical","why":"库里是「仅退款」"}
+{"text":"退回去好几天了钱还没到","gold":[73],"hard":"plain"}
+{"text":"你们不给我退说我用过了","gold":[74],"hard":"lexical","why":"库里是「质检不通过」「申诉」，用户在描述遭遇"}
+{"text":"过了七天但是东西真的有毛病","gold":[96],"hard":"plain"}
+{"text":"退货的时候赠品要寄回去吗","gold":[88],"hard":"plain"}
+{"text":"新用户有什么优惠","gold":[49],"hard":"plain"}
+{"text":"两张券能一起用吗","gold":[50],"hard":"lexical","why":"库里是「叠加使用」"}
+{"text":"券过期了还能给我补一张吗","gold":[51],"hard":"plain"}
+{"text":"会员打几折","gold":[52],"hard":"plain"}
+{"text":"黑卡需要消费多少","gold":[52],"hard":"exact","why":"「黑卡」是精确等级名"}
+{"text":"积分怎么抵钱","gold":[53],"hard":"plain"}
+{"text":"赠品没收到能补吗","gold":[87],"hard":"plain"}
+{"text":"预售的定金能退吗","gold":[98],"hard":"plain"}
+{"text":"大促买的还能价保吗","gold":[80],"hard":"exact","why":"「大促」「价保」都在库里，与 47 号构成干扰对"}
+{"text":"支持花呗分期吗","gold":[54],"hard":"exact","why":"「花呗」只在支付方式那条出现一次"}
+{"text":"能货到付款吗","gold":[54],"hard":"plain"}
+{"text":"下单多久不付会自动关掉","gold":[55],"hard":"plain"}
+{"text":"报销要票，你们给开吗","gold":[56],"hard":"lexical","why":"库里是「电子普通发票」「申请开票」，用户说的是「报销要票」"}
+{"text":"要开专票需要提前说吗","gold":[56],"hard":"exact","why":"「专票」是精确简称"}
+{"text":"发票公司名字打错了","gold":[57],"hard":"lexical","why":"库里是「抬头填错」「重开」"}
+{"text":"你们有实体店吗","gold":[58],"hard":"lexical","why":"库里是「线下门店」「专柜」"}
+{"text":"晚上十一点还有人吗","gold":[59],"hard":"lexical","why":"库里给的是「9:00-22:00」，要靠语义推出十一点不在服务时间"}
+{"text":"下错规格了能改吗","gold":[60],"hard":"plain"}
+{"text":"我想把账号删了","gold":[61],"hard":"lexical","why":"库里是「注销」"}
+{"text":"你们会把我手机号给别人吗","gold":[62],"hard":"lexical","why":"库里是「个人信息」「不向第三方出售」"}
+{"text":"有人打电话说给我退款要验证码","gold":[63],"hard":"plain"}
+{"text":"量三围的时候要不要收着肚子","gold":[66],"hard":"lexical","why":"库里是「自然呼吸不要收腹」，用户问的是要不要收肚子"}
+{"text":"实际尺寸和尺码表差了两厘米算不算问题","gold":[67],"hard":"exact","why":"「2-3cm 公差」是精确数值"}
+{"text":"刚拆开有点气味是不是有问题","gold":[68],"hard":"lexical","why":"库里是「残留气味」「通风晾晒」"}
+{"text":"深色的会不会把白色染了","gold":[69],"hard":"lexical","why":"库里是「浮色」「串色」"}
+{"text":"图片和收到的颜色不一样","gold":[70],"hard":"lexical","why":"库里是「色差」「显示器色域」"}
+{"text":"卖完了什么时候还有","gold":[75],"hard":"lexical","why":"库里是「补货」「返单」"}
+{"text":"结算的时候说没货了","gold":[97],"hard":"lexical","why":"库里是「库存不足」「加入购物车不锁定库存」"}
+{"text":"能给我看下质检报告吗","gold":[85],"hard":"plain"}
+{"text":"公司要买五十件能便宜吗","gold":[86],"hard":"exact","why":"「50 件」是精确门槛数"}
+{"text":"评价发出去还能改吗","gold":[100],"hard":"plain"}

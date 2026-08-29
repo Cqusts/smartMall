@@ -1,15 +1,20 @@
 """向量化。
 
-两种实现，同一个协议：
+三种实现，同一个协议：
 
 * :class:`DashScopeEmbedding` —— 走 API，不用下模型、不吃显存，
   728 条知识的成本是几分钱。**默认选择**，尤其适合没有 GPU 的开发机。
 * :class:`LocalBgeEmbedding` —— 本地 bge-m3，数据不出域，但要下 ~2GB
   模型且装 torch。生产环境或数据敏感时用。
+* :class:`OnnxBgeEmbedding` —— 本地 bge-small-zh，91MB ONNX，
+  **不要 torch 也不要 API key**。给评测与 CI 用：检索评测必须能在
+  一台刚 clone 完的机器上跑出数来，否则那份指标没人复现得了，
+  简历上那个数字也就没有出处。质量弱于前两者，别拿它跑生产索引。
 
-两者输出都是 1024 维并做 L2 归一化，因此可以互换而不需要重建索引
-（前提是同一批数据用同一个实现向量化——混用会让相似度失去意义，
-:class:`~smartmall_pipeline.rag.store.LocalVectorStore` 会记录 provider 名做校验）。
+输出都做 L2 归一化，使内积等价于余弦。**但维度不同**（前两者 1024，
+ONNX 那个 512），换实现就要重建索引——
+:class:`~smartmall_pipeline.rag.store.LocalVectorStore` 记录 provider 名做校验，
+混用会让相似度失去意义。
 """
 
 from __future__ import annotations
@@ -260,6 +265,107 @@ class LocalBgeEmbedding:
         return [l2_normalize(v.tolist()) for v in result]
 
 
+class OnnxBgeEmbedding:
+    """本地 bge-small-zh-v1.5，走 ONNX Runtime。
+
+    **存在的理由是可复现。** 检索评测的结论（"混合比单路好多少"）只有在
+    别人也能跑出同一组数时才算数，而前两个后端一个要 API key、一个要
+    2GB 模型加 torch——都不是 ``git clone`` 完就有的东西。这个后端
+    91MB、纯 CPU、装两个轮子就能跑，评测因此能进 CI。
+
+    **不要用它建生产索引。** 512 维的小模型，中文语义质量明显弱于
+    bge-m3 与 text-embedding-v4；而且维度不同，索引不能与那两者混用。
+
+    模型文件不进仓库（91MB）。默认从 ``EMBEDDING_ONNX_DIR`` 指的目录读，
+    需要 ``model.onnx`` 与 ``tokenizer.json`` 两个文件。
+    """
+
+    name = "onnx/bge-small-zh-v1.5"
+    dim = 512
+    max_batch = 32
+
+    #: BGE 系列用 [CLS] 位做句向量，不是均值池化。
+    #: 用错池化方式不会报错，只会让相似度整体变钝——而那种退化
+    #: 在单测里看不出来，只有评测分数会莫名其妙低一截。
+    POOLING = "cls"
+
+    #: bge 官方建议检索时给查询加的前缀。文档侧不加。
+    QUERY_PREFIX = "为这个句子生成表示以用于检索相关文章："
+
+    def __init__(self, model_dir: str | None = None,
+                 max_length: int = 512, query_prefix: str | None = None) -> None:
+        self.model_dir = model_dir or os.environ.get("EMBEDDING_ONNX_DIR", "")
+        if not self.model_dir:
+            raise EmbeddingError(
+                "缺少 EMBEDDING_ONNX_DIR。\n"
+                "  下载 91MB 的 ONNX 模型到任意目录：\n"
+                "    huggingface.co/Xenova/bge-small-zh-v1.5 的 onnx/model.onnx"
+                " 与 tokenizer.json\n"
+                "  然后 EMBEDDING_ONNX_DIR=<那个目录>"
+            )
+        self.max_length = max_length
+        self.query_prefix = (
+            self.QUERY_PREFIX if query_prefix is None else query_prefix
+        )
+        self._session = None
+        self._tok = None
+
+    def _load(self):
+        if self._session is None:
+            try:
+                import onnxruntime as ort
+                from tokenizers import Tokenizer
+            except ImportError as exc:
+                raise EmbeddingError(
+                    "ONNX 向量化需要：pip install onnxruntime tokenizers"
+                ) from exc
+            d = os.path.join
+            self._session = ort.InferenceSession(
+                d(self.model_dir, "model.onnx"),
+                providers=["CPUExecutionProvider"],
+            )
+            self._tok = Tokenizer.from_file(d(self.model_dir, "tokenizer.json"))
+            self._tok.enable_truncation(max_length=self.max_length)
+            self._tok.enable_padding()
+            # 输入名要从模型读，不能写死：不同导出版本有的带
+            # token_type_ids 有的不带，写死会在 run() 时报
+            # "invalid input name"，而那个报错离原因很远
+            self._inputs = {i.name for i in self._session.get_inputs()}
+        return self._session
+
+    def _encode(self, texts: Sequence[str]) -> list[list[float]]:
+        import numpy as np
+
+        session = self._load()
+        encs = self._tok.encode_batch(list(texts))
+        feed = {
+            "input_ids": np.array([e.ids for e in encs], dtype=np.int64),
+            "attention_mask": np.array(
+                [e.attention_mask for e in encs], dtype=np.int64),
+        }
+        if "token_type_ids" in self._inputs:
+            feed["token_type_ids"] = np.array(
+                [e.type_ids for e in encs], dtype=np.int64)
+        last_hidden = session.run(None, feed)[0]
+        return [l2_normalize(v.tolist()) for v in last_hidden[:, 0, :]]
+
+    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        texts = list(texts)
+        for i in range(0, len(texts), self.max_batch):
+            out.extend(self._encode(texts[i:i + self.max_batch]))
+        return out
+
+    def embed_query(self, text: str) -> list[float]:
+        """查询侧加 bge 的检索前缀。
+
+        **加不加是个真实的差别**，不是仪式：bge 训练时查询侧带这个前缀，
+        推理时不加会让查询向量落在与文档略微不同的空间上。文档侧则
+        不能加——两边都加等于没加，还白付了 token。
+        """
+        return self._encode([self.query_prefix + text])[0]
+
+
 # ---------------------------------------------------------------- 工厂
 
 
@@ -269,4 +375,7 @@ def build_provider(kind: str = "dashscope", **kwargs) -> EmbeddingProvider:
         return DashScopeEmbedding(**kwargs)
     if kind in ("local", "bge", "bge-m3"):
         return LocalBgeEmbedding(**kwargs)
-    raise EmbeddingError(f"未知的向量化后端: {kind}（可选 dashscope / local）")
+    if kind in ("onnx", "bge-small", "eval"):
+        return OnnxBgeEmbedding(**kwargs)
+    raise EmbeddingError(
+        f"未知的向量化后端: {kind}（可选 dashscope / local / onnx）")

@@ -138,21 +138,42 @@ def reciprocal_rank_fusion(
     *rankings: Iterable[Hit],
     k: int = 60,
     top_k: int | None = None,
+    weights: Sequence[float] | None = None,
 ) -> list[Hit]:
     """Reciprocal Rank Fusion。
 
-    score(d) = Σ_r 1 / (k + rank_r(d))
+    score(d) = Σ_r wᵣ / (k + rank_r(d))
 
     只用排名不用原始分数，因此天然免疫两路分数量纲不一致的问题。
     同一文档被两路都召回时得分叠加——这正是我们想要的信号：
     既语义相关又关键词匹配的结果应该排最前。
+
+    ---------------------------------------------------------------- 为什么要有权重
+
+    ``weights`` 缺省是等权，也就是教科书里的 RRF。**等权有一个具体的
+    失效模式**，评测里量到过：当两路质量差得多时，融合会比强的那一路还差。
+
+    机理：一条只被强路召回、且排第 3 的文档，得分 1/(60+3)=0.0159；
+    一条两路都平庸、各排 20 与 15 的文档，得分 1/80+1/75=0.0258，反而更高。
+    于是**"两边都还行"压过了"一边非常对"**。实测那条「晚上十一点还有人吗」
+    就是这样：向量排第 3，BM25 根本召不回（库里写的是 9:00-22:00），
+    等权融合把它压到第 13。
+
+    给弱的那一路一个小于 1 的权重就能把这种压制拉回来。权重不是拍的，
+    要在评测集上扫出来——见 ``eval_cli --sweep``。
     """
+    ws = list(weights) if weights is not None else [1.0] * len(rankings)
+    if len(ws) != len(rankings):
+        raise ValueError(
+            f"weights 有 {len(ws)} 个，但传进来 {len(rankings)} 路——"
+            "多一路少一个权重会让那一路静默变成 0 权，等于没融合")
+
     fused: dict[int, float] = {}
     best: dict[int, Hit] = {}
 
-    for ranking in rankings:
+    for w, ranking in zip(ws, rankings):
         for rank, hit in enumerate(ranking, start=1):
-            fused[hit.chunk_id] = fused.get(hit.chunk_id, 0.0) + 1.0 / (k + rank)
+            fused[hit.chunk_id] = fused.get(hit.chunk_id, 0.0) + w / (k + rank)
             # 保留首次出现的 Hit 对象作为元数据载体
             best.setdefault(hit.chunk_id, hit)
 

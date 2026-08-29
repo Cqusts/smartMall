@@ -191,6 +191,82 @@ class TestRrf:
         assert fused[0].asset_ids == (7, 8)
 
 
+class TestRrfWeights:
+    """等权 RRF 的失效模式，以及权重怎么把它救回来。
+
+    这一组钉的是评测里真实量到的现象（见 evals/README.md 的检索一节）：
+    **等权融合的 R@5 低于纯向量**，MRR 从 0.903 掉到 0.824。
+    """
+
+    def test_mediocre_in_both_beats_excellent_in_one(self):
+        """等权时，"两边都平庸"会压过"一边非常对"。
+
+        这不是 RRF 实现有 bug，是等权的固有性质，也正是它在两路质量
+        悬殊时失效的原因。先把这个机理钉住，下一条才说得清权重在修什么。
+        """
+        # 强路把 42 号排第 3，弱路根本没召回它
+        dense = [_hit(i, 1.0) for i in (10, 11, 42)]
+        # 另一篇两路都平庸：一路第 20、一路第 15
+        dense += [_hit(i, 0.5) for i in range(12, 32)]      # 77 落在第 23 位
+        sparse = [_hit(i, 1.0) for i in range(50, 65)] + [_hit(77, 1.0)]
+        dense[19] = _hit(77, 0.5)                            # 强路第 20 位
+
+        fused = reciprocal_rank_fusion(dense, sparse, k=60)
+        order = [h.chunk_id for h in fused]
+        assert order.index(77) < order.index(42), (
+            "等权 RRF 下，两路都平庸的 77 应当压过只被一路命中的 42——"
+            "这条要是反了，说明融合权重的语义变了，下一条测试也就不成立了")
+
+    def test_down_weighting_the_weak_channel_restores_the_strong_hit(self):
+        """给弱路降权之后，"一边非常对"重新排到前面。
+
+        评测里扫出来的最优稀疏权重是 0.10，这里用同一个量级。
+        """
+        dense = [_hit(i, 1.0) for i in (10, 11, 42)]
+        dense += [_hit(i, 0.5) for i in range(12, 32)]
+        sparse = [_hit(i, 1.0) for i in range(50, 65)] + [_hit(77, 1.0)]
+        dense[19] = _hit(77, 0.5)
+
+        fused = reciprocal_rank_fusion(dense, sparse, k=60, weights=(1.0, 0.1))
+        order = [h.chunk_id for h in fused]
+        assert order.index(42) < order.index(77)
+
+    def test_default_is_still_equal_weight(self):
+        """不传 weights 时行为与加权参数出现之前一致。
+
+        这一条挡的是"加了个可选参数顺手改了默认行为"——那种改动不会
+        报错，只会让线上排序悄悄变一版。
+        """
+        dense = [_hit(1, 0.9), _hit(2, 0.8)]
+        sparse = [_hit(2, 20.0), _hit(3, 10.0)]
+        a = reciprocal_rank_fusion(dense, sparse, k=60)
+        b = reciprocal_rank_fusion(dense, sparse, k=60, weights=(1.0, 1.0))
+        assert [(h.chunk_id, round(h.score, 12)) for h in a] == \
+               [(h.chunk_id, round(h.score, 12)) for h in b]
+
+    def test_weight_count_must_match_ranking_count(self):
+        """权重个数与路数对不上要当场报错。
+
+        少给一个权重时静默按 0 处理的话，那一路等于被关掉——
+        表现是"融合突然退化成单路"，而没有任何报错。
+        """
+        with pytest.raises(ValueError, match="weights"):
+            reciprocal_rank_fusion([_hit(1, 0.9)], [_hit(2, 0.8)],
+                                   weights=(1.0,))
+
+    def test_zero_weight_disables_a_channel(self):
+        """权重 0 就是把那一路关掉，等价于只用另一路。
+
+        评测里的"纯向量"那一档就是这么算的，两条路径必须一致，
+        否则表里的基线和扫描表的第一行对不上。
+        """
+        dense = [_hit(1, 0.9), _hit(2, 0.8)]
+        sparse = [_hit(3, 20.0), _hit(4, 10.0)]
+        fused = reciprocal_rank_fusion(dense, sparse, k=60, weights=(1.0, 0.0))
+        assert [h.chunk_id for h in fused[:2]] == [1, 2]
+        assert all(h.score == 0.0 for h in fused if h.chunk_id in (3, 4))
+
+
 class TestDedupByItem:
     def test_keeps_highest_scoring_chunk_per_item(self):
         """政策文档切 5 块全命中会占满 Top-5，把其他知识挤掉。"""
