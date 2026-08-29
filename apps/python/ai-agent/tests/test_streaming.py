@@ -924,6 +924,46 @@ class TestMerchantPage:
             "页面注释里要写明权限判定在哪一端"
         )
 
+    def test_product_list_shows_thumbnails(self):
+        """列表必须有图。
+
+        ``mainImage`` 后端一直在返（``ProductAdminView`` 里有），只是这张
+        表从来没画过它——所以看起来像"没有图"，其实是没渲染。商家扫一眼
+        列表要认出是哪件商品，而「复古工装夹克」和「复古水洗飞行员夹克」
+        在文字上分不开。
+        """
+        text = self._text()
+        assert "<th>图</th>" in text, "商品表要有图这一列"
+        assert "thumb(p)" in text and "function thumb(" in text
+        assert "/img/" in text, "缩略图要指到 /img"
+        # 没配图时给占位而不是碎图：<img src=""> 会显示成裂图图标，
+        # 那看起来像"图挂了"，而真相是这个商品还没配图
+        assert "未配图" in text and "onerror" in text
+
+    def test_shares_the_storefront_palette(self):
+        """商家后台与店铺页用同一套调色板。
+
+        **不一致的代价不是"不好看"**——商家在两个页面之间来回切，
+        配色一换会让人以为跳到了别的系统。改版前这里是一套橙色
+        （#ff5000），和店铺页的 cream/sand 完全是两个东西。
+
+        逐个 token 比对而不是只看"有没有 :root"：少同步一个变量，
+        页面上就是一处突兀的颜色，而那种差异肉眼很难在两个标签页
+        之间对出来。
+        """
+        import re
+
+        shop = self._text("/")
+        mch = self._text()
+        for token in ("--ink:#1a1a1a", "--line:#e9e5e0", "--sand:#b08d6f",
+                      "--cream-2:#f2efea", "--ok:#2f7d5b", "--err:#b4413c"):
+            assert token.replace(" ", "") in shop.replace(" ", ""), f"店铺页少了 {token}"
+            assert token.replace(" ", "") in mch.replace(" ", ""), f"商家后台少了 {token}"
+        # 标题字体也得是同一套衬线栈
+        assert "Noto Serif SC" in mch and "Noto Serif SC" in shop
+        # 改版前那个橙不该再出现
+        assert not re.search(r"#ff5000", mch, re.I), "还留着旧的橙色主题色"
+
     def test_sku_line_parser_handles_json_commas(self):
         """规格 JSON 里有逗号，整行按逗号切会把它切成两半。
 

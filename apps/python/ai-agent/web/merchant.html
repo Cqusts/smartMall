@@ -17,82 +17,108 @@
   藏了照样能用 curl 调，所以真正的判定必须在服务端。
 -->
 <style>
+/* 与店铺页（index.html）同一套视觉语言：同样的调色板、同样的衬线标题、
+   同样的黑色主按钮。**两边不一致的代价不是"不好看"**——商家在两个页面
+   之间来回切，配色一换会让人以为跳到了别的系统。 */
 :root{
-  --orange:#ff5000; --ink:#333; --ink-2:#666; --ink-3:#999;
-  --line:#e8e8e8; --bg:#f5f5f5; --ok:#00a870; --warn:#b78103;
+  --ink:#1a1a1a; --ink-2:#5c5c5c; --ink-3:#9a9a9a;
+  --line:#e9e5e0; --line-2:#f0ece7;
+  --cream:#ede6dd; --cream-2:#f2efea;
+  --sand:#b08d6f; --sand-soft:#f7f1e9;
+  --ok:#2f7d5b; --warn:#9a6b1f; --err:#b4413c;
+  --serif:Georgia,"Times New Roman","Noto Serif SC","Source Han Serif SC",
+          "Songti SC",STSong,"SimSun",serif;
 }
 *{margin:0;padding:0;box-sizing:border-box}
-body{font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
-     color:var(--ink);background:var(--bg)}
+body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+     "Hiragino Sans GB","Microsoft YaHei",sans-serif;
+     color:var(--ink);background:#faf9f8;-webkit-font-smoothing:antialiased}
 button,input,select,textarea{font:inherit;color:inherit}
 button{cursor:pointer;border:none;background:none}
 a{color:inherit;text-decoration:none}
 
-.top{background:#fff;border-bottom:2px solid var(--orange);padding:0 20px;
-     display:flex;align-items:center;gap:20px;height:56px;position:sticky;top:0;z-index:10}
-.top .logo{font-size:19px;font-weight:700;color:var(--orange);letter-spacing:-.5px}
-.top .logo span{color:var(--ink);font-weight:400;font-size:14px;margin-left:8px}
+.top{background:#fff;border-bottom:1px solid var(--line-2);padding:0 28px;
+     display:flex;align-items:center;gap:20px;height:76px;position:sticky;top:0;z-index:20}
+.top .logo{font-size:23px;font-weight:800;letter-spacing:-.6px;white-space:nowrap}
+.top .logo span{color:var(--sand);font-weight:400;font-size:14px;margin-left:10px;
+                letter-spacing:0}
 .top .sp{flex:1}
 .top .who{font-size:13px;color:var(--ink-2)}
 .top .who b{color:var(--ink)}
-.top a.back{font-size:13px;color:var(--ink-2);border:1px solid var(--line);
-            padding:5px 12px;border-radius:3px}
-.top a.back:hover{border-color:var(--orange);color:var(--orange)}
+.top a.back{font-size:13.5px;color:var(--ink-2);border:1px solid var(--line);
+            padding:8px 18px;border-radius:6px}
+.top a.back:hover{border-color:var(--ink);color:var(--ink)}
 
-.tabs{background:#fff;padding:0 20px;display:flex;gap:2px;border-bottom:1px solid var(--line)}
-.tabs button{padding:11px 20px;font-size:14px;color:var(--ink-2);
-             border-bottom:2px solid transparent}
-.tabs button.on{color:var(--orange);border-bottom-color:var(--orange);font-weight:600}
+.tabs{background:#fff;padding:0 28px;display:flex;gap:30px;
+      border-bottom:1px solid var(--line-2)}
+.tabs button{position:relative;padding:14px 0;font-size:14.5px;color:var(--ink-2)}
+.tabs button:hover{color:var(--ink)}
+.tabs button.on{color:var(--ink);font-weight:600}
+/* 与店铺页导航同一种选中态：2px 黑线，不是橙色块 */
+.tabs button.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;
+                       height:2px;background:var(--ink)}
 
-.wrap{max-width:1180px;margin:16px auto;padding:0 20px}
+.wrap{max-width:1240px;margin:20px auto;padding:0 28px}
 .panel{display:none}
 .panel.on{display:block}
 
-.card{background:#fff;border:1px solid var(--line);border-radius:4px;
-      padding:16px;margin-bottom:14px}
-.card h3{font-size:15px;margin-bottom:12px;font-weight:600}
+.card{background:#fff;border:1px solid var(--line);border-radius:9px;
+      padding:20px 22px;margin-bottom:16px}
+.card h3{font-family:var(--serif);font-size:18px;margin-bottom:14px;font-weight:600}
 
 table{width:100%;border-collapse:collapse;background:#fff;font-size:13px}
-th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;
+th,td{padding:12px 12px;border-bottom:1px solid var(--line-2);text-align:left;
       vertical-align:top}
-th{background:#fafafa;color:var(--ink-2);font-weight:600;white-space:nowrap}
-td.num{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+th{background:#fbfaf9;color:var(--ink-3);font-weight:600;white-space:nowrap;
+   font-size:12px;letter-spacing:.5px}
+tr:hover td{background:#fdfcfb}
+td.num{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--ink-2)}
 
-.tag{display:inline-block;padding:1px 7px;border-radius:2px;font-size:12px}
-.tag.draft{background:#f0f0f0;color:var(--ink-2)}
-.tag.on_sale{background:#e8f7f0;color:var(--ok)}
-.tag.off_shelf{background:#fff1f0;color:#c0392b}
-.tag.pending_payment{background:#fff8e6;color:var(--warn)}
-.tag.paid{background:#e8f4ff;color:#1668dc}
-.tag.shipped,.tag.delivered{background:#e8f7f0;color:var(--ok)}
-.tag.completed{background:#f0f0f0;color:var(--ink-2)}
-.tag.cancelled{background:#f0f0f0;color:var(--ink-3)}
-.tag.refunding{background:#fff1f0;color:#c0392b}
-.tag.refunded{background:#f0f0f0;color:var(--ink-3)}
+/* 商品缩略图。**列表必须有图**——商家扫一眼列表要认出是哪件商品，
+   而"复古工装夹克"和"复古水洗飞行员夹克"在文字上分不开 */
+.thumb{width:52px;height:65px;border-radius:5px;background:var(--cream-2);
+       overflow:hidden;flex:none}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb.none{display:flex;align-items:center;justify-content:center;
+            font-size:10px;color:var(--ink-3);text-align:center;line-height:1.3}
 
-.btn{border:1px solid var(--line);border-radius:3px;padding:4px 11px;font-size:12.5px;
+.tag{display:inline-block;padding:2px 9px;border-radius:3px;font-size:12px}
+.tag.draft{background:#f4f2f0;color:var(--ink-2)}
+.tag.on_sale{background:#eaf4ef;color:var(--ok)}
+.tag.off_shelf{background:#fbeeed;color:var(--err)}
+.tag.pending_payment{background:var(--sand-soft);color:var(--warn)}
+.tag.paid{background:#eef3f8;color:#4a6b8a}
+.tag.shipped,.tag.delivered{background:#eaf4ef;color:var(--ok)}
+.tag.completed{background:#f4f2f0;color:var(--ink-2)}
+.tag.cancelled{background:#f4f2f0;color:var(--ink-3)}
+.tag.refunding{background:#fbeeed;color:var(--err)}
+.tag.refunded{background:#f4f2f0;color:var(--ink-3)}
+
+.btn{border:1px solid var(--line);border-radius:6px;padding:6px 14px;font-size:13px;
      color:var(--ink-2);background:#fff}
-.btn:hover{border-color:var(--orange);color:var(--orange)}
-.btn.primary{background:var(--orange);border-color:var(--orange);color:#fff}
-.btn.primary:hover{opacity:.9;color:#fff}
+.btn:hover{border-color:var(--ink);color:var(--ink)}
+/* 主按钮跟店铺页一致用黑，不用橙——那是这个项目里唯一的强调色位置 */
+.btn.primary{background:var(--ink);border-color:var(--ink);color:#fff}
+.btn.primary:hover{background:#000;color:#fff}
 .btn:disabled{opacity:.45;cursor:not-allowed}
-.btn+.btn{margin-left:5px}
+.btn+.btn{margin-left:6px}
 
-.field{margin-bottom:10px}
-.field label{display:block;font-size:12.5px;color:var(--ink-2);margin-bottom:3px}
+.field{margin-bottom:12px}
+.field label{display:block;font-size:12.5px;color:var(--ink-2);margin-bottom:5px}
 .field input,.field textarea,.field select{width:100%;border:1px solid var(--line);
-  border-radius:3px;padding:6px 9px}
-.field textarea{min-height:60px;resize:vertical}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 14px}
+  border-radius:6px;padding:9px 11px;background:#fff}
+.field input:focus,.field textarea:focus{outline:none;border-color:var(--sand)}
+.field textarea{min-height:64px;resize:vertical}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 16px}
 
-.msg{padding:9px 12px;border-radius:3px;font-size:13px;margin-bottom:12px;display:none}
+.msg{padding:11px 15px;border-radius:6px;font-size:13.5px;margin-bottom:14px;display:none}
 .msg.on{display:block}
-.msg.ok{background:#e8f7f0;color:var(--ok)}
-.msg.err{background:#fff1f0;color:#c0392b}
+.msg.ok{background:#eaf4ef;color:var(--ok)}
+.msg.err{background:#fbeeed;color:var(--err)}
 .hint{color:var(--ink-3);font-size:12.5px}
-.blockers{color:var(--warn);font-size:12px;margin-top:3px}
-.empty{padding:36px;text-align:center;color:var(--ink-3);background:#fff;
-       border:1px solid var(--line);border-radius:4px}
+.blockers{color:var(--warn);font-size:12px;margin-top:4px}
+.empty{padding:44px;text-align:center;color:var(--ink-3);background:#fff;
+       border:1px solid var(--line);border-radius:9px}
 </style>
 </head>
 <body>
@@ -330,10 +356,12 @@ async function loadProducts(){
     return;
   }
   $('#productList').innerHTML = `<table>
-    <tr><th>ID</th><th>编号</th><th>商品</th><th>状态</th><th>规格 / 库存</th><th>属性</th><th>操作</th></tr>
+    <tr><th>ID</th><th>图</th><th>编号</th><th>商品</th><th>状态</th>
+        <th>规格 / 库存</th><th>属性</th><th>操作</th></tr>
     ${items.map(p => `
       <tr>
         <td class="num">${p.id}</td>
+        <td>${thumb(p)}</td>
         <td class="num">${esc(p.productNo)}</td>
         <td>${esc(p.name)}<br><span class="hint">${esc(p.subtitle || '')}</span></td>
         <td><span class="tag ${p.status}">${statusCn(p.status)}</span>
@@ -360,6 +388,25 @@ async function loadProducts(){
             </div></td>
       </tr>`).join('')}
   </table>`;
+}
+
+/**
+ * 商品缩略图。
+ *
+ * ``mainImage`` 后端一直在返（``ProductAdminView`` 里有），只是这张表
+ * 从来没画过它——所以列表看起来"没有图"，其实是没渲染。
+ *
+ * 没有主图时给一块占位而不是碎图：``<img src="">`` 在多数浏览器里会
+ * 显示成裂图图标，那看起来像"图挂了"，而真相是这个商品还没配图。
+ */
+function thumb(p){
+  const name = (p.mainImage || '').trim();
+  return name
+    ? `<div class="thumb"><img src="/img/${encodeURIComponent(name)}"
+         alt="${esc(p.name)}" loading="lazy"
+         onerror="this.parentNode.className='thumb none';
+                  this.parentNode.textContent='图片\\n找不到'"></div>`
+    : '<div class="thumb none">未配图</div>';
 }
 
 function statusCn(s){
