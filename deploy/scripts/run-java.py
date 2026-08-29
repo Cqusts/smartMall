@@ -109,8 +109,37 @@ def log_file(svc: str) -> Path:
     return LOG_DIR / f"{svc}.log"
 
 
+def _alive(pid: int) -> bool:
+    """这个 pid 现在还存在吗。**与「它是不是我们那个服务」分开问。**
+
+    分开是因为踩过一次：``_cmdline`` 对一个**已经死掉**的 pid 返回空字符串，
+    而 :func:`running_pid` 里那条「Windows 上取不到命令行就姑且认了」的兜底
+    把空字符串当成了「取不到」，于是死进程被判成还在跑——``up`` 打一句
+    「已在跑」就跳过启动，接着等 90 秒超时。**症状离病因隔得很远**：
+    日志里最后一次启动是十几个小时前而且是成功的，端口上什么都没有，
+    而脚本每次都说它在跑。
+    """
+    try:
+        if IS_WINDOWS:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=10).stdout
+            # 查不到时 tasklist 往 stdout 打一句「没有运行的任务…」，
+            # 而不是空输出——所以判据是「输出里有没有这个 pid」，
+            # 不能是「输出空不空」。这句提示还随系统语言变，更不能拿来匹配
+            return f'"{pid}"' in out
+        os.kill(pid, 0)                       # 不发信号，只探存活
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _cmdline(pid: int) -> str:
-    """尽力取到进程的命令行，用于确认「这个 pid 还是当初那个服务」。"""
+    """尽力取到进程的命令行，用于确认「这个 pid 还是当初那个服务」。
+
+    取不到返回空字符串。**调用方必须先用 :func:`_alive` 确认进程存在**——
+    「取不到命令行」和「进程根本不在」在这里是同一个返回值。
+    """
     try:
         if IS_WINDOWS:
             out = subprocess.run(
@@ -134,9 +163,15 @@ def _cmdline(pid: int) -> str:
 def running_pid(svc: str) -> int | None:
     """读 pid 文件，并确认那个进程真的还是这个服务。
 
-    **不能只看「pid 存在」。**进程退出后 pid 会被系统回收给别的程序，
-    照着旧 pid 去 kill，杀掉的是无关进程。所以要比对命令行里有没有这个
-    服务的 jar 名字；比对不上就当作没在跑，并把过期的 pid 文件清掉。
+    两步，顺序不能反：
+
+    1. **进程还在吗**（:func:`_alive`）——不在就直接清掉 pid 文件。
+    2. **是不是这个服务**——比对命令行里有没有 jar 名。进程退出后 pid 会被
+       系统回收给别的程序，照着旧 pid 去 kill 会杀掉无关进程。
+
+    第 2 步在 Windows 上可能取不到命令行（没有 wmic 时 tasklist 只给进程名），
+    那时姑且认了——但**前提是第 1 步已经确认进程存在**。少了第 1 步，
+    这条兜底会把所有死掉的服务都报成「已在跑」。
     """
     f = pid_file(svc)
     if not f.is_file():
@@ -144,6 +179,9 @@ def running_pid(svc: str) -> int | None:
     try:
         pid = int(f.read_text().strip())
     except ValueError:
+        f.unlink(missing_ok=True)
+        return None
+    if not _alive(pid):
         f.unlink(missing_ok=True)
         return None
     cmd = _cmdline(pid)

@@ -86,9 +86,9 @@ verify: ## 对真库复核订单链路（状态机 + 防超卖），需先 make 
 	$(PY) deploy/scripts/verify-orders.py
 
 .PHONY: test
-test: ## 跑 Java 与 ai-agent 测试
+test: ## 跑 Java 与 Python 测试
 	cd apps/java && ./mvnw -B test
-	$(PY) -m pytest -q apps/python/ai-agent/tests
+	$(PY) -m pytest -q apps/python/ai-agent/tests deploy/tests
 
 .PHONY: check
 check: check-compose check-contracts ## 全部静态校验

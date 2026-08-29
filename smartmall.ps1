@@ -85,7 +85,11 @@ function Task-Serve {
 function Task-Test {
     Push-Location (Join-Path $Root 'apps/java')
     try { Invoke-Checked '.\mvnw.cmd' @('-B', 'test') } finally { Pop-Location }
-    Invoke-Checked (Get-Python) @('-m', 'pytest', '-q', 'apps/python/ai-agent/tests')
+    # deploy/tests 盯的是启动脚本本身。**它必须跟着跑**——
+    # 那里出问题的表现是「服务起不来而且脚本说它在跑」，
+    # 是所有故障里最难查的一类
+    Invoke-Checked (Get-Python) @('-m', 'pytest', '-q',
+        'apps/python/ai-agent/tests', 'deploy/tests')
 }
 
 switch ($Task) {
