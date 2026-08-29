@@ -403,9 +403,23 @@ smartmall-agent serve          # → http://127.0.0.1:9002/
 错了用户完全看不出发生了什么，只觉得"它答非所问"。页签是用户自己选的，
 选错了他自己知道怎么改回来。
 
-右上角头像切换演示身份（演示买家 / 另一位买家 / 店铺管理员），背后是真的
-重新登录换一枚令牌——**订单归属只认令牌里的身份**，改浏览器里的任何字段
-都越权不了。商家后台在 [/merchant](#商家后台)。
+**逛和搜不用登录，下单 / 客服 / 收藏要登录。** 一进门就拦着登录的站点，
+人直接就走了；要拦的只有会产生归属的动作——订单要绑 `user_id`，客服会话
+要能查"我的订单"，收藏是"我的"。
+
+登录与注册在 [`/login`](http://127.0.0.1:9002/login)，商家走
+[`/merchant/login`](http://127.0.0.1:9002/merchant/login)。
+**注册只能注册出买家**：`RegisterRequest` 上没有 `role` 字段，
+`AuthService.register` 里角色写死 `customer`。商家账号只从种子数据或 DBA
+来——开源之后任何人 clone 下来都能打到注册接口，能自助开通商家就等于
+附赠一个后台入口。
+
+演示账号 `demo` / `buyer2` / `merchant`，密码统一 `smartmall123`
+（见 `010_auth.sql`）。**这是公开的演示口令，别在任何真实环境里用这份种子。**
+
+令牌存在浏览器里，但**它只是凭证，不是身份本身**——订单归属只认令牌里
+签好的那个身份，改浏览器里的任何字段都越权不了。商家后台在
+[/merchant](#商家后台)。
 
 ### 启动
 
@@ -675,6 +689,19 @@ SQL 里 `NOW()` 写的列走 MySQL 会话时区。两者不一致时，一笔订
   `mall-product:8081`，只在网关拦等于没拦。
 - ThreadLocal 的身份上下文在 `finally` 里清——Tomcat 复用线程，不清就是随机的
   跨请求身份泄漏，而这种 bug 在低并发下永远复现不出来。
+- **注册接口不接受角色参数。** `POST /api/product/auth/register` 的
+  `RegisterRequest` 上只有 `username / password / nickname`，角色在
+  `AuthService.register` 里写死 `customer`。请求体里塞 `role: merchant`
+  会被静默忽略——签出来的令牌里仍然是 `customer`（`AuthServiceTest`
+  里有一条真发 HTTP 请求的用例钉着它）。商家账号只能由种子数据或 DBA 建。
+- **用户名按小写存、按小写查。** MySQL 默认排序规则不分大小写、H2 分，
+  不归一的话同一份代码在两个库上是两种行为：测试全绿、上线报重复键。
+
+```
+公开（不需要令牌）                    需要令牌
+POST /api/product/auth/login          GET /api/product/auth/me
+POST /api/product/auth/register
+```
 
 **做成店铺而不是裸聊天页是有理由的**：当前商品是客服最重要的上下文——
 它决定检索的过滤范围、决定查哪个 SKU 的库存。从商品详情页点「联系客服」
@@ -852,8 +879,10 @@ mysql -u root -p smartmall < deploy/sql/migrations/014_asset_review.sql
 上架前有四道自检，缺什么说什么（「没有可售 SKU，上架了也买不了」「没有结构化
 属性，运营 Agent 无法生成文案」），而不是一句"参数错误"。
 
-**页面不做权限判断**，判定在 `mall-product` 的 `@RequireMerchant` 上——
-前端藏按钮是体验不是安全，藏了照样能 curl。
+没有商家令牌打开这一页会被送去 `/merchant/login`；拿买家账号登也进不来。
+**但那只是体验**：绕开页面直接 curl 那些接口照样打得到，判定在
+`mall-product` 的 `@RequireMerchant` 与 `media.py` 的 `_denied` 上。前端
+藏按钮、跳登录页做的事只有一件——别让人对着一屏 403 猜自己是谁。
 
 #### 素材审核
 

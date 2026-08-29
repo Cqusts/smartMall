@@ -1,0 +1,130 @@
+/* smartMall 公共视觉层。
+ *
+ * 店铺页、商家后台、两个登录页共用这一份。**不是为了少写几行 CSS**——
+ * 是因为调色板一旦有四份副本，改一次就得记得改四处，而漏掉的那处不会
+ * 报错，只会让用户在页面之间跳的时候觉得"这好像是另一个系统"。
+ *
+ * 分工：这里放**跨页面的东西**（设计变量、reset、品牌字、按钮）；只有
+ * 一个页面用得到的（商品卡、聊天气泡、后台表格）留在各自的 <style> 里。
+ * 规矩是：搬进来之前先数一下有几个页面在用，只有一个就别搬——公共文件
+ * 里躺着只服务一个页面的规则，下次别人改它的时候不知道会影响谁。
+ *
+ * **加全局类名之前先 grep 一遍各页面。** .field 和 .msg 这两个名字在
+ * 商家后台和店铺页里早就有人用了，含义还不一样（.msg 在店铺页是聊天
+ * 气泡）。所以它们在这里限定在 .authpage 下面，只服务两个登录页。
+ *
+ * 由 ws.py 的 /base.css 提供。同源、无外部请求（见
+ * test_page_has_no_external_dependencies）。
+ */
+
+:root{
+  --ink:#1a1a1a; --ink-2:#5c5c5c; --ink-3:#9a9a9a;
+  --line:#e9e5e0; --line-2:#f0ece7;
+  --cream:#ede6dd;        /* 首屏底色 */
+  --cream-2:#f2efea;      /* 商品图底色 */
+  --sand:#b08d6f;         /* 点缀色，只用在小面积上 */
+  --sand-soft:#f7f1e9;
+  --ok:#2f7d5b; --warn:#9a6b1f; --err:#b4413c;
+  /* 标题用衬线。**中西文分开挑，不能只写 Georgia**：Georgia 没有汉字，
+     浏览器会按字逐个回退，回退到哪个字体完全看系统装了什么——
+     在只有黑体的机器上，整句标题就变成了黑体，衬线的意思一点没剩。
+     所以后面把三大平台的中文衬线依次列全：思源宋体 / 宋体-简 / 宋体。 */
+  --serif:Georgia,"Times New Roman","Noto Serif SC","Source Han Serif SC",
+          "Songti SC",STSong,"SimSun",serif;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+         "Hiragino Sans GB","Microsoft YaHei",sans-serif;
+}
+
+*{box-sizing:border-box}
+a{color:inherit;text-decoration:none}
+button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
+.ico{width:1em;height:1em;fill:currentColor;vertical-align:-.14em}
+.serif{font-family:var(--serif)}
+
+/* ---------------------------------------------------------------- 品牌字 */
+.logo{font-size:23px;font-weight:800;letter-spacing:-.6px;white-space:nowrap}
+.logo span{color:var(--sand)}
+
+/* ---------------------------------------------------------------- 按钮
+ *
+ * 主按钮是黑底白字，点缀色 --sand 只用在小面积上。反过来（大面积的
+ * 沙色按钮）在这套米白配色里会糊成一片，主次就没了。 */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;
+     height:42px;padding:0 20px;border-radius:6px;font-size:14px;
+     border:1px solid var(--line);background:#fff;color:var(--ink);
+     transition:background .15s,border-color .15s,color .15s}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);border-color:var(--ink);color:#fff;font-weight:600}
+.btn.primary:hover{background:#000}
+.btn.block{width:100%}
+.btn.lg{height:46px;font-size:15px}
+/* 忙碌态用 cursor:progress 而不是把按钮变灰：变灰读起来像"这个功能不可用" */
+.btn:disabled{opacity:.55;cursor:progress}
+
+/* ---------------------------------------------------------------- 表单
+ *
+ * 限定在 .authpage 里。**不是洁癖**：商家后台早就有自己的 .field，
+ * index.html 的 .msg 是聊天气泡——一个全局的 .msg{display:none} 会把
+ * 整条对话变成空白，而且没有任何报错。公共文件只该管到它真正拥有的地方。 */
+.authpage .field{margin-bottom:16px}
+.authpage .field label{display:block;font-size:12.5px;color:var(--ink-2);margin-bottom:7px}
+.authpage .field .inp{width:100%;height:46px;padding:0 14px;border-radius:6px;
+            border:1px solid var(--line);background:#fff;color:var(--ink);
+            font:15px/1.6 var(--sans);outline:none;transition:border-color .15s}
+.authpage .field .inp:focus{border-color:var(--ink)}
+.authpage .field .inp::placeholder{color:var(--ink-3)}
+/* 校验没过的那一栏要自己标出来。只在顶上给一句"信息有误"，用户得逐栏猜 */
+.authpage .field.bad .inp{border-color:var(--err)}
+.authpage .field .tip{margin-top:6px;font-size:11.5px;color:var(--ink-3);line-height:1.7}
+.authpage .field.bad .tip{color:var(--err)}
+
+/* ---------------------------------------------------------------- 提示条 */
+.authpage .msg{display:none;padding:11px 14px;border-radius:6px;font-size:13px;
+     line-height:1.7;margin-bottom:16px}
+.authpage .msg.on{display:block}
+.authpage .msg.err{background:#fdf2f1;color:var(--err);border:1px solid #f3d9d7}
+.authpage .msg.ok{background:#f1f8f4;color:var(--ok);border:1px solid #d4e8dd}
+.authpage .msg.warn{background:#fdf8ee;color:var(--warn);border:1px solid #f0e3c8}
+
+/* ---------------------------------------------------------------- 登录页
+ *
+ * 两个登录页（买家 /login、商家 /merchant/login）共用这套版式。
+ * 商家页只是换了文案和一条 .authpage--merchant 的边饰——**版式相同是有意的**：
+ * 长得完全不同的两个登录页会让人怀疑自己进错了站点。 */
+.authpage{min-height:100vh;display:flex;align-items:center;justify-content:center;
+          padding:40px 20px;background:var(--cream-2)}
+.authcard{width:100%;max-width:400px;background:#fff;border:1px solid var(--line);
+          border-radius:12px;padding:36px 34px 30px;
+          box-shadow:0 14px 40px rgba(0,0,0,.06)}
+.authcard .logo{text-align:center;margin-bottom:6px}
+.authcard .sub{text-align:center;font-size:12.5px;color:var(--ink-3);
+               margin-bottom:26px;letter-spacing:.5px}
+.authcard h1{font-family:var(--serif);font-size:23px;font-weight:400;
+             margin:0 0 22px;text-align:center}
+
+/* 登录/注册切换。与店铺页导航、后台标签同一种选中态：2px 黑线 */
+.authtabs{display:flex;gap:26px;justify-content:center;margin-bottom:24px;
+          border-bottom:1px solid var(--line-2)}
+.authtabs button{position:relative;padding:0 2px 12px;font-size:14.5px;color:var(--ink-3)}
+.authtabs button:hover{color:var(--ink-2)}
+.authtabs button.on{color:var(--ink);font-weight:600}
+.authtabs button.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;
+                           height:2px;background:var(--ink)}
+
+.authfoot{margin-top:22px;padding-top:18px;border-top:1px solid var(--line-2);
+          font-size:12px;color:var(--ink-3);line-height:1.9;text-align:center}
+.authfoot a{color:var(--ink-2);border-bottom:1px solid var(--line)}
+.authfoot a:hover{color:var(--ink);border-color:var(--ink)}
+
+/* 演示账号提示。**是提示不是按钮**：点一下就登进去的话，这个页面
+   又变回了"演示切换器"，而这次要做的正是把那个东西换掉 */
+.authhint{margin-top:18px;padding:12px 14px;border-radius:6px;
+          background:var(--sand-soft);font-size:11.5px;color:#8a6f57;line-height:1.9}
+.authhint b{color:#6d5642}
+.authhint code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+               font-size:11px;background:#fff;padding:1px 5px;border-radius:3px;
+               border:1px solid #ecdfd0}
+
+/* 商家登录页的区分标记。只有一条沙色顶边——差异要小到"还是同一个站"，
+   又要大到"这不是买家那个页面" */
+.authcard--merchant{border-top:3px solid var(--sand)}

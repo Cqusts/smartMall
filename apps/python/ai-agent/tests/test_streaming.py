@@ -322,12 +322,18 @@ class TestWebPage:
         )
 
     @pytest.mark.parametrize("path,extra", [
-        ("/", {"loadAuth", "switchIdentity", "authFetch", "loadProducts",
-               "connect", "renderGrid", "buildHero", "assetStrip"}),
+        ("/", {"loadAuth", "loadFavs", "requireLogin", "authFetch",
+               "loadProducts", "connect", "renderGrid", "buildHero",
+               "assetStrip", "favKey", "matches", "navOn", "_scrollTo"}),
         # 商家后台一直没被这条盯着——加审核按钮时才发现。
         # 同一个事故换个页面重演一遍，代价一模一样
         ("/merchant", {"loadAssets", "reviewAsset", "reviewCell",
-                       "ensureMerchant", "loadProducts"}),
+                       "requireMerchant", "loadProducts"}),
+        # 两个登录页。它们是**现在唯一的入口**：这里一个 ReferenceError
+        # 就等于整站登不进去，比店铺页少一块严重得多
+        ("/login", {"nextUrl", "say", "bad", "clearBad", "saveAuth",
+                    "post", "explain"}),
+        ("/merchant/login", {"nextUrl", "say", "bad"}),
     ])
     def test_page_defines_what_it_calls(self, path, extra):
         """页面里调到的全局函数必须真的定义了。
@@ -941,28 +947,42 @@ class TestMerchantPage:
         assert "未配图" in text and "onerror" in text
 
     def test_shares_the_storefront_palette(self):
-        """商家后台与店铺页用同一套调色板。
+        """四个页面用同一套调色板，而且**只有一份定义**。
 
-        **不一致的代价不是"不好看"**——商家在两个页面之间来回切，
-        配色一换会让人以为跳到了别的系统。改版前这里是一套橙色
-        （#ff5000），和店铺页的 cream/sand 完全是两个东西。
+        **不一致的代价不是"不好看"**——用户在页面之间来回切，配色一换
+        会让人以为跳到了别的系统。改版前商家后台是一套橙色（#ff5000），
+        和店铺页的 cream/sand 完全是两个东西。
 
-        逐个 token 比对而不是只看"有没有 :root"：少同步一个变量，
-        页面上就是一处突兀的颜色，而那种差异肉眼很难在两个标签页
-        之间对出来。
+        原先这条是"逐个 token 在每页里比对"。那能挡住"两边不一样"，
+        挡不住"两边各存了一份、以后各改各的"——而那正是漂移的来源。
+        现在调色板只在 /base.css 里定义一次，所以这里改成钉两件事：
+        每页都引它，且**没有任何页面自己再开一个 :root**。
         """
         import re
 
-        shop = self._text("/")
-        mch = self._text()
+        pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        client = TestClient(app)
+
+        css = client.get("/base.css")
+        assert css.status_code == 200
+        flat = css.text.replace(" ", "")
         for token in ("--ink:#1a1a1a", "--line:#e9e5e0", "--sand:#b08d6f",
                       "--cream-2:#f2efea", "--ok:#2f7d5b", "--err:#b4413c"):
-            assert token.replace(" ", "") in shop.replace(" ", ""), f"店铺页少了 {token}"
-            assert token.replace(" ", "") in mch.replace(" ", ""), f"商家后台少了 {token}"
-        # 标题字体也得是同一套衬线栈
-        assert "Noto Serif SC" in mch and "Noto Serif SC" in shop
-        # 改版前那个橙不该再出现
-        assert not re.search(r"#ff5000", mch, re.I), "还留着旧的橙色主题色"
+            assert token.replace(" ", "") in flat, f"base.css 少了 {token}"
+        assert "Noto Serif SC" in css.text, "衬线栈也该只有一份"
+
+        for path in ("/", "/merchant", "/login", "/merchant/login"):
+            page = client.get(path).text
+            assert '"/base.css"' in page, f"{path} 没有引 /base.css"
+            # 自己再开一个 :root 就等于把调色板又抄了一份，改一处会漏三处
+            assert ":root{" not in page.replace(" ", ""), \
+                f"{path} 自己又定义了一套 :root，调色板要留在 base.css 里"
+            # 改版前那个橙不该再出现
+            assert not re.search(r"#ff5000", page, re.I), f"{path} 还留着旧的橙色"
 
     def test_sku_line_parser_handles_json_commas(self):
         """规格 JSON 里有逗号，整行按逗号切会把它切成两半。
@@ -971,6 +991,226 @@ class TestMerchantPage:
         """
         text = self._text()
         assert "不能整行按逗号切" in text
+
+
+class TestAuthPages:
+    """登录页，以及它替掉的那个演示用身份切换器。
+
+    在这之前，"登录"是假的：店铺页里写着三个账号和明文口令，点头像就
+    换人；商家后台更直接——打开页面自动拿 merchant/smartmall123 登一次。
+    演示够用，但这个项目要开源，而**一个自动登录的后台等于把门开着**。
+
+    这一组盯的是那两样东西真的没了，以及新的入口没有把老问题换个地方
+    重来一遍（最典型的是 ?redirect= 变成开放重定向）。
+    """
+
+    def _client(self):
+        pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        return TestClient(app)
+
+    def _text(self, path):
+        return self._client().get(path).text
+
+    def _web(self, name):
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parents[1] / "web" / name) \
+            .read_text(encoding="utf-8")
+
+    # ------------------------------------------------------------ 页面在
+
+    @pytest.mark.parametrize("path,marker", [
+        ("/login", "买家中心"),
+        ("/merchant/login", "商家后台"),
+    ])
+    def test_pages_are_served(self, path, marker):
+        r = self._client().get(path)
+        assert r.status_code == 200 and marker in r.text
+
+    @pytest.mark.parametrize("path", ["/login", "/merchant/login", "/base.css"])
+    def test_no_external_dependencies(self, path):
+        """演示环境常常没有外网，"打不开"比"不好看"严重得多。
+
+        登录页尤其不能有：它是**唯一的入口**，样式或脚本卡在一个连不上的
+        CDN 上，用户看到的就是一个白页面，连个能点的按钮都没有。
+        """
+        assert not re.findall(r"https?://[^\"'\s<);]*", self._text(path))
+
+    # ------------------------------------------- 商家不能自助注册
+
+    def test_only_the_buyer_page_can_register(self):
+        """买家页能注册，商家页不能。
+
+        **这不是"商家页还没做注册"。** 开源之后任何人 clone 下来都能打到
+        注册接口，能自助开通商家就等于附赠一个后台：发货、审退款、审素材
+        全开。判定在后端（RegisterRequest 上没有 role 字段、
+        AuthService.register 里角色写死 customer），这里钉的是前端没有
+        反过来暗示用户"应该能注册个商家"。
+        """
+        buyer = self._text("/login")
+        merchant = self._text("/merchant/login")
+
+        assert "/api/auth/register" in buyer, "买家页应该能注册"
+        assert "/api/auth/register" not in merchant, \
+            "商家页不能有注册入口——那等于自助开通后台"
+        # 而且要说清楚为什么没有，否则下一个人会以为是漏做了，顺手补上
+        assert "不开放注册" in merchant
+
+    def test_register_form_has_no_role_field(self):
+        """注册表单里不能出现账号类型 / 角色这一栏。
+
+        后端那边已经挡住了（传 role 会被忽略，见 AuthServiceTest），
+        这条挡的是另一头：表单上先长出一个"账号类型"下拉框，然后总会有人
+        觉得"既然界面上有，后端接一下呗"。
+        """
+        buyer = self._web("login.html")
+        form = buyer[buyer.index('id="formReg"'):buyer.index("</form>",
+                                                            buyer.index('id="formReg"'))]
+        for word in ("role", "角色", "账号类型", "身份"):
+            assert word not in form, f"注册表单里不该出现「{word}」"
+
+    # ------------------------------------------- 演示口令不再是登录方式
+
+    def test_storefront_no_longer_ships_a_hardcoded_password(self):
+        """店铺页里不能再写死口令。
+
+        改版前这里是 ``const PASSWORD = 'smartmall123'`` 加三个账号名，
+        点一下就登进去——那是演示控件，不是登录。
+        """
+        shop = self._web("index.html")
+        assert "smartmall123" not in shop
+        assert "switchIdentity" not in shop and "IDENTITIES" not in shop
+        # 换上来的必须是真的入口，而不是把切换器改个名字
+        assert "/login" in shop and "logout" in shop
+
+    def test_merchant_console_no_longer_logs_itself_in(self):
+        """商家后台不能再自动登录。
+
+        改版前 ``ensureMerchant()`` 在没有令牌时直接拿
+        merchant/smartmall123 登一次 —— 打开页面的人就是商家。
+        """
+        mch = self._web("merchant.html")
+        assert "smartmall123" not in mch
+        assert "ensureMerchant" not in mch
+        # 没有商家令牌要跳去登录页，而不是留在这里报一屏 403
+        assert "/merchant/login" in mch and "location.replace" in mch
+
+    def test_demo_credentials_survive_as_a_hint_not_a_button(self):
+        """演示口令仍然要写在登录页上——但是**写着**，不是接在按钮上。
+
+        整个删掉的话，clone 下来的人拿不到任何能登进去的账号，第一步
+        就卡住。但一旦做成"点一下自动填并提交"，这页就又变回切换器了。
+        """
+        for path in ("/login", "/merchant/login"):
+            page = self._text(path)
+            assert "smartmall123" in page, f"{path} 该留一句演示账号提示"
+            # 提示区里不能有 onclick——有就说明它是个能点的登录快捷方式
+            hint = page[page.index('class="authhint"'):]
+            hint = hint[:hint.index("</div>")]
+            assert "onclick" not in hint, f"{path} 的演示提示不该是个按钮"
+
+    # ------------------------------------------- ?redirect= 不能变成开放重定向
+
+    @pytest.mark.parametrize("name", ["login.html", "merchant-login.html"])
+    def test_redirect_param_only_accepts_same_site_paths(self, name):
+        """``?redirect=`` 只收站内绝对路径。
+
+        不校验的话，``/login?redirect=https://evil.example`` 就是一个开放
+        重定向：钓鱼邮件里挂的是本站域名，用户看到熟悉的登录页，登完被送去
+        别人的站。``//evil.example`` 也要挡——它是协议相对 URL，浏览器按
+        外站解析，而只判断 ``startsWith('/')`` 恰好放它过去。
+        """
+        src = self._web(name)
+        body = src[src.index("function nextUrl"):]
+        body = body[:body.index("\n}")]
+        assert "startsWith('/')" in body, "要求是站内绝对路径"
+        assert "startsWith('//')" in body, \
+            "协议相对 URL（//evil.example）也要挡，它会被当成外站"
+
+    # ------------------------------------------- 逛和搜不要登录
+
+    def test_browsing_and_searching_need_no_login(self):
+        """游客能逛能搜。
+
+        一进门就拦着登录的站点，人直接就走了。真要拦的只有会产生归属的
+        动作，那几条在下一个用例里。
+        """
+        shop = self._web("index.html")
+        for fn in ("loadProducts", "renderGrid", "searchAsk", "openDetail"):
+            body = shop[shop.index(f"function {fn}"):]
+            body = body[:body.index("\n}")]
+            assert "requireLogin" not in body, f"{fn} 不该要求登录"
+
+    def test_ownership_actions_require_login(self):
+        """下单、客服、收藏要登录。
+
+        这三件事都会产生归属：订单要绑 user_id，客服会话要能查"我的订单"，
+        收藏是"我的"。放行的话，第一步就撞上 1401，前面做的都白做。
+        """
+        shop = self._web("index.html")
+        for fn in ("openChat", "toggleFav"):
+            body = shop[shop.index(f"function {fn}"):]
+            body = body[:body.index("\n}")]
+            assert "requireLogin" in body, f"{fn} 该要求登录"
+        # 下单不走 requireLogin 的弹窗（详情页有自己的消息位），
+        # 但一样得挡住
+        buy = shop[shop.index("async function buyNow"):]
+        buy = buy[:buy.index("\n}")]
+        assert "if (!auth)" in buy and "goLogin" in buy
+
+    def test_favourites_are_kept_per_account(self):
+        """收藏按账号分开存。
+
+        收藏一旦要登录才能用，"这是谁的"就得说清楚：演示机上换个人登录
+        （那台机器本来就是拿来回切账号的），看到上一位的收藏夹。
+        """
+        shop = self._web("index.html")
+        assert "function favKey" in shop
+        assert "smartmall.favs'" not in shop, "还留着不分账号的旧键"
+        body = shop[shop.index("function favKey"):]
+        body = body[:body.index("\n}")]
+        assert "userId" in body
+
+    # ------------------------------------------- 转发
+
+    def test_register_is_forwarded_not_reimplemented(self):
+        """注册只转发。密码哈希与角色判定都在 mall-product 一处。
+
+        在这一层再写一份的结果是两份规则渐行渐远，而先漏的那份
+        （通常是"角色写死 customer"这条）不会有人发现。
+        """
+        from app.config import settings
+
+        c = self._client()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(settings, "order_base_url", "http://127.0.0.1:1")
+            r = c.post("/api/auth/register",
+                       json={"username": "x", "password": "password123"})
+            assert r.status_code == 200
+            assert r.json()["code"] == 9503
+
+    def test_proxy_does_not_filter_the_register_payload(self):
+        """转发层不挑字段。
+
+        在这里剔掉 role 看着像多一道保险，实际是把安全判定搬到一个可以
+        绕开的地方——浏览器完全可以直连 8081。判定只有一处：
+        AuthService.register 里角色写死 customer。
+        """
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parents[1]
+               / "app" / "routers" / "ws.py").read_text(encoding="utf-8")
+        fn = src[src.index("async def register("):]
+        fn = fn[:fn.index("\n@router")]
+        code = "\n".join(l for l in fn.splitlines()
+                         if not l.strip().startswith("#"))
+        code = re.sub(r'""".*?"""', "", code, flags=re.S)
+        assert "role" not in code, \
+            "转发层不该碰 role —— 判定放在这里等于放在一条能绕开的路上"
 
 
 class TestTurnResultAssets:

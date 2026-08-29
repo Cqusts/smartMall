@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>商家登录 · smartMall</title>
+<link rel="stylesheet" href="/base.css">
+<style>
+body{margin:0;font:14px/1.6 var(--sans);color:var(--ink);
+     -webkit-font-smoothing:antialiased}
+.back{position:absolute;top:26px;left:28px;font-size:13.5px;color:var(--ink-3)}
+.back:hover{color:var(--ink)}
+</style>
+</head>
+<body class="authpage">
+
+<a class="back" href="/">← 回店铺</a>
+
+<div class="authcard authcard--merchant">
+  <div class="logo">smart<span>Mall</span>.</div>
+  <div class="sub">商家后台</div>
+
+  <h1 class="serif">登录</h1>
+
+  <div class="msg" id="msg"></div>
+
+  <form onsubmit="doLogin(event)">
+    <div class="field" id="fName">
+      <label for="name">用户名</label>
+      <input class="inp" id="name" autocomplete="username" autofocus>
+    </div>
+    <div class="field" id="fPass">
+      <label for="pass">密码</label>
+      <input class="inp" id="pass" type="password" autocomplete="current-password">
+    </div>
+    <button class="btn primary block lg" id="btn" type="submit">登录</button>
+  </form>
+
+  <!-- **这一页没有注册入口，而且不该有。**
+       开源之后任何人 clone 下来都能打到注册接口，能自助开通商家就等于
+       附赠了一个后台：发货、审退款、审素材全开。后端那边是同一条规矩——
+       RegisterRequest 上没有 role 字段，AuthService.register 里角色写死
+       customer。所以这里少一个按钮不是"还没做"，是判定的一部分。 -->
+  <div class="authhint">
+    <b>商家账号不开放注册。</b>
+    演示账号 <code>merchant</code> / <code>smartmall123</code>（见
+    <code>010_auth.sql</code>）。要新增商家，往 <code>mall_user</code> 里插一行
+    <code>role='merchant'</code> —— 注册接口只能建买家。
+  </div>
+
+  <div class="authfoot">
+    要买东西？<a href="/login">买家登录 / 注册</a>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+
+/* 与买家登录页同一条规则：?redirect= 只接受站内绝对路径。
+   商家后台会带着 ?redirect=/merchant 把人送过来 */
+function nextUrl(){
+  const raw = new URLSearchParams(location.search).get('redirect') || '/merchant';
+  return (raw.startsWith('/') && !raw.startsWith('//')) ? raw : '/merchant';
+}
+
+function say(kind, text){
+  const m = $('#msg');
+  m.className = 'msg on ' + kind;
+  m.innerHTML = text;
+}
+
+function bad(fieldId){
+  const f = $(fieldId);
+  f.classList.add('bad');
+  f.querySelector('.inp').focus();
+}
+
+async function doLogin(ev){
+  ev.preventDefault();
+  document.querySelectorAll('.field.bad').forEach(f => f.classList.remove('bad'));
+
+  const username = $('#name').value.trim();
+  const password = $('#pass').value;
+  if (!username) return bad('#fName');
+  if (!password) return bad('#fPass');
+
+  const btn = $('#btn');
+  btn.disabled = true; btn.textContent = '登录中…';
+  try{
+    const r = await fetch('/api/auth/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username, password}),
+    });
+    const d = await r.json();
+    if (d.code !== 0){
+      say('err', (d.message || '未知错误')
+        + (d.code === 9503 ? '（订单服务 mall-product:8081 没起来，'
+                           + '在仓库根跑 make run-product）' : ''));
+      return;
+    }
+
+    /* 口令对了，但不是商家。
+       **这里不放行，而且要把令牌丢掉。** 存下来的话，人会带着一枚买家
+       令牌落到后台页上，看到一片"无权限"的报错，读起来像系统坏了；
+       更要紧的是那之后"我到底登的是谁"就说不清了。
+       当然这条只是体验：真正的判定在 mall-product 的 @RequireMerchant，
+       绕过这个页面直接敲 /merchant 照样是 1403。 */
+    if (d.data.role !== 'merchant'){
+      say('warn', '这是买家账号，进不了商家后台。'
+        + '<br>要买东西请走 <a href="/login">买家登录</a>。');
+      return;
+    }
+
+    try{ localStorage.setItem('smartmall.auth', JSON.stringify(d.data)); }catch(e){}
+    location.href = nextUrl();
+  }catch(e){
+    say('err', '登录失败：' + (e.message || e));
+  }finally{
+    btn.disabled = false; btn.textContent = '登录';
+  }
+}
+</script>
+</body>
+</html>

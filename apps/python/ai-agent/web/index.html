@@ -27,41 +27,24 @@
   爱心写进 localStorage 并驱动右上角的收藏数，色块来自 SKU 规格里的真实颜色。
   认不出的颜色**不画**——画错一个色块就是对商品撒了个小谎。
 -->
+<!-- 调色板、按钮、输入框、登录页版式在这里。四个页面共用一份——
+     抄成四份副本的话，改一次得记得改四处，而漏掉的那处不会报错，
+     只会让人在页面之间跳的时候觉得"这好像是另一个系统"。
+     同源路径，不是外链，零外部请求那条约束不受影响。 -->
+<link rel="stylesheet" href="/base.css">
 <style>
-:root{
-  --ink:#1a1a1a; --ink-2:#5c5c5c; --ink-3:#9a9a9a;
-  --line:#e9e5e0; --line-2:#f0ece7;
-  --cream:#ede6dd;        /* 首屏底色 */
-  --cream-2:#f2efea;      /* 商品图底色 */
-  --sand:#b08d6f;         /* 点缀色，只用在小面积上 */
-  --sand-soft:#f7f1e9;
-  --ok:#2f7d5b; --warn:#9a6b1f; --err:#b4413c;
-  /* 标题用衬线。**中西文分开挑，不能只写 Georgia**：Georgia 没有汉字，
-     浏览器会按字逐个回退，回退到哪个字体完全看系统装了什么——
-     在只有黑体的机器上，整句标题就变成了黑体，衬线的意思一点没剩。
-     所以后面把三大平台的中文衬线依次列全：思源宋体 / 宋体-简 / 宋体。 */
-  --serif:Georgia,"Times New Roman","Noto Serif SC","Source Han Serif SC",
-          "Songti SC",STSong,"SimSun",serif;
-}
-*{box-sizing:border-box}
+/* 这里只放店铺页自己的。跨页面的都搬去 /base.css 了 */
 body{
   margin:0; background:#fff; color:var(--ink);
-  font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
-       "Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  font:14px/1.6 var(--sans);
   -webkit-font-smoothing:antialiased;
 }
-a{color:inherit;text-decoration:none}
-button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
-.ico{width:1em;height:1em;fill:currentColor;vertical-align:-.14em}
 .wrap{max-width:1240px;margin:0 auto;padding:0 28px}
-.serif{font-family:var(--serif)}
 
 /* ---------------------------------------------------------- 顶栏 */
 .hd{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid var(--line-2)}
 .hd .wrap{display:flex;align-items:center;gap:34px;height:76px}
-.logo{font-size:23px;font-weight:800;letter-spacing:-.6px;white-space:nowrap}
 .logo b{font-weight:800}
-.logo span{color:var(--sand)}
 .nav{display:flex;gap:30px;font-size:14.5px;color:var(--ink-2)}
 /* cursor 不能少：这几项是 onclick 的 <a>，没有 href 就不会自动变手型，
    看起来跟死链一模一样——「点了没反应」和「看起来不能点」是同一种坏 */
@@ -89,31 +72,24 @@ button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
             line-height:17px;text-align:center;padding:0 4px;font-weight:600}
 .iconbtn.on{background:var(--sand-soft);color:var(--sand)}
 
-/* 账号切换。做成点头像弹出的面板而不是一个下拉框：下拉框读起来像
-   「筛选条件」，而这里发生的事是**重新登录换一枚令牌** */
+/* 账号面板。点头像弹出，不是一个下拉框：下拉框读起来像「筛选条件」，
+   而这里是登录态 —— 谁登着、以及怎么退出去。 */
 .acctwrap{position:relative}
-.acct{position:absolute;right:0;top:52px;width:290px;background:#fff;
+.acct{position:absolute;right:0;top:52px;width:280px;background:#fff;
       border:1px solid var(--line);border-radius:10px;padding:14px;
       box-shadow:0 12px 34px rgba(0,0,0,.13);display:none;z-index:30}
 .acct.open{display:block}
 .acct .hh{font-size:11.5px;color:var(--ink-3);letter-spacing:1px;margin-bottom:8px}
 .acct .me{display:flex;align-items:center;gap:11px;padding-bottom:12px;
-          border-bottom:1px solid var(--line-2);margin-bottom:11px}
+          border-bottom:1px solid var(--line-2);margin-bottom:12px}
 .avatar{width:40px;height:40px;border-radius:50%;background:var(--cream);
         color:var(--sand);display:flex;align-items:center;justify-content:center;
         font-size:18px;flex:none}
 .acct .me b{display:block;font-size:14px}
 .acct .me em{font-style:normal;font-size:12px;color:var(--ink-3)}
-.idn{display:flex;align-items:center;gap:10px;width:100%;padding:8px 9px;
-     border-radius:7px;text-align:left;font-size:13px}
-.idn:hover{background:#f7f6f4}
-.idn.on{background:var(--sand-soft)}
-.idn .t{flex:1}
-.idn .t em{display:block;font-style:normal;font-size:11.5px;color:var(--ink-3)}
-.idn .ck{color:var(--sand);font-size:13px;visibility:hidden}
-.idn.on .ck{visibility:visible}
-.idn:disabled{opacity:.55;cursor:progress}
-.acct .note{margin-top:11px;padding-top:10px;border-top:1px solid var(--line-2);
+.acct .acts{display:flex;gap:8px}
+.acct .acts .btn{flex:1;height:38px;padding:0 12px;font-size:13px}
+.acct .note{margin-top:12px;padding-top:10px;border-top:1px solid var(--line-2);
             font-size:11.5px;color:var(--ink-3);line-height:1.75}
 
 /* ---------------------------------------------------------- 首屏 */
@@ -516,15 +492,16 @@ footer code{background:#f2efec;padding:1px 6px;border-radius:3px}
       <button class="iconbtn" id="userBtn" title="账号" onclick="toggleAcct(event)">
         <svg class="ico"><use href="#i-user"/></svg>
       </button>
-      <!-- 账号切换。点头像弹出，不是一个下拉框——这里发生的事是
-           **重新登录换一枚令牌**，而下拉框读起来像是在筛选什么东西 -->
+      <!-- 账号。**这里曾经是一个「切换身份」的演示控件**：三个账号写死在
+           前端、密码明文摆着，点一下就登进去。那对演示够用，但作为开源
+           项目它读起来像"这个站没有登录"。现在是真的登录态：没登录就去
+           /login，登了就显示是谁、能退出。 -->
       <div class="acct" id="acct">
-        <div class="hh">当前身份</div>
+        <div class="hh">账号</div>
         <div class="me" id="acctMe"></div>
-        <div class="hh">切换账号</div>
-        <div id="acctList"></div>
-        <div class="note">切换会重新登录换一枚令牌。<b>订单归属只认令牌里的
-          身份</b>——改浏览器里的任何字段都越权不了。</div>
+        <div class="acts" id="acctActs"></div>
+        <div class="note"><b>订单归属只认令牌里的身份</b>——改浏览器里的
+          任何字段都越权不了。</div>
       </div>
     </div>
     <button class="iconbtn" id="favBtn" title="收藏夹" onclick="toggleFavOnly()">
@@ -651,26 +628,19 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-/* ================================================================ 身份
+/* ================================================================ 登录态
 
-   这一段原先是缺的：页面里调了 loadAuth / switchIdentity / authFetch，
-   三个函数一个都没定义 —— 于是 loadAuth() 抛 ReferenceError，把它后面的
-   loadProducts() 和 connect() 一起带走，整页既没有商品也连不上客服。
-   **报错只在控制台里**，页面看着像"接口挂了"，症状离病因隔了三层。
+   这一段原先是个**演示用的身份切换器**：三个账号连密码写死在前端，点一下
+   自动登录。作为演示够用，但这个项目要开源，而一个"点头像就换人"的站点
+   读起来像是根本没有鉴权 —— 尽管令牌一直是后端签的。
 
-   三个演示账号的密码都是 smartmall123（见 010_auth.sql 的种子）。
-   写死在前端是刻意的：这是演示页，不是登录流程；真实系统这里应该是
-   登录框。但**令牌仍然是后端签的**，前端拿到的只是一个不透明字符串，
-   改不出别人的身份来。 */
-const IDENTITIES = [
-  {key:'demo',     name:'演示买家',   note:'买家 · 有历史订单可查'},
-  {key:'buyer2',   name:'另一位买家', note:'买家 · 用来验越权拦得住'},
-  {key:'merchant', name:'店铺管理员', note:'商家 · 能发货、审退款'},
-];
-const PASSWORD = 'smartmall123';
+   现在这里只做三件事：读本地存的令牌、显示是谁、把人送去 /login。
+   登录和注册在 /login 那一页，商家在 /merchant/login。
 
+   **令牌是凭证，不是身份本身。** 这个对象整个都在用户手里，role 改成
+   merchant 也没用：后端只验签名，@RequireMerchant 认的是令牌里签好的
+   那个角色。 */
 let auth = null;
-let switching = '';
 
 function loadAuth(){
   try{ auth = JSON.parse(localStorage.getItem('smartmall.auth') || 'null'); }
@@ -678,9 +648,9 @@ function loadAuth(){
   renderAcct();
 }
 
-function saveAuth(a){
-  auth = a;
-  try{ localStorage.setItem('smartmall.auth', JSON.stringify(a)); }catch(e){}
+function clearAuth(){
+  auth = null;
+  try{ localStorage.removeItem('smartmall.auth'); }catch(e){}
   renderAcct();
 }
 
@@ -693,66 +663,54 @@ function authFetch(url, opts){
   return fetch(url, Object.assign({}, opts, {headers}));
 }
 
-async function switchIdentity(key){
-  if (switching) return;
-  switching = key;
-  renderAcct();
-  try{
-    const r = await fetch('/api/auth/login', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({username:key, password:PASSWORD}),
-    });
-    const d = await r.json();
-    if (d.code !== 0){
-      // 登录失败要说清是哪一层的问题：订单服务没起来是演示时最常见的情况，
-      // 而"登录失败"四个字会让人去查密码
-      bubble('sys', `切换身份失败：${d.message || '未知错误'}`
-        + (d.code === 9503 ? '（订单服务 mall-product:8081 没起来，'
-                           + '在仓库根跑 make run-product）' : ''));
-      openChat();
-      return null;
-    }
-    saveAuth(d.data);
-    // 换了人就换一个会话：上一位买家问过的订单不该出现在下一位的上下文里
-    sessionId = null;
-    return d.data;
-  }catch(e){
-    bubble('sys', `切换身份失败：${e.message || e}`);
-    openChat();
-    return null;
-  }finally{
-    switching = '';
-    renderAcct();
-  }
+/* 去登录页，并带上回来的路径。
+   带 redirect 是因为不带的话，用户在某件商品的详情页点了「立即购买」，
+   登完被扔回首页，还得自己找回那件商品 —— 多数人到这里就不买了。 */
+function goLogin(tab){
+  const back = location.pathname + location.search + location.hash;
+  location.href = '/login?redirect=' + encodeURIComponent(back)
+                + (tab === 'reg' ? '&tab=reg' : '');
+}
+
+function logout(){
+  clearAuth();
+  // 换人就换一个会话：上一位买家问过的订单不该留在下一位的上下文里
+  sessionId = null;
+  closeAcct();
 }
 
 function renderAcct(){
   const cur = auth ? (auth.nickname || auth.username || '') : '';
+  const icon = `<div class="avatar"><svg class="ico" style="width:18px;height:18px">
+                  <use href="#i-user"/></svg></div>`;
+
   $('#acctMe').innerHTML = auth
-    ? `<div class="avatar"><svg class="ico" style="width:18px;height:18px">
-         <use href="#i-user"/></svg></div>
-       <div><b>${esc(cur)}</b>
+    ? `${icon}<div><b>${esc(cur)}</b>
          <em>#${esc(auth.userId)} · ${auth.role === 'merchant' ? '商家' : '买家'}</em>
        </div>`
-    : `<div class="avatar"><svg class="ico" style="width:18px;height:18px">
-         <use href="#i-user"/></svg></div><div><b>未登录</b>
-       <em>选一个身份开始</em></div>`;
+    : `${icon}<div><b>未登录</b><em>逛和搜不用登录</em></div>`;
 
-  $('#acctList').innerHTML = IDENTITIES.map(id => {
-    const on = auth && auth.username === id.key;
-    const busy = switching === id.key;
-    return `<button class="idn ${on ? 'on' : ''}"
-              ${switching ? 'disabled' : ''} onclick="switchIdentity('${id.key}')">
-      <span class="t"><b>${esc(id.name)}</b><em>${esc(id.note)}</em></span>
-      <span class="ck">${busy ? '…' : '✓'}</span></button>`;
-  }).join('');
+  $('#acctActs').innerHTML = auth
+    ? `<button class="btn" onclick="logout()">退出登录</button>`
+    : `<button class="btn primary" onclick="goLogin()">登录</button>
+       <button class="btn" onclick="goLogin('reg')">注册</button>`;
 
-  $('#userBtn').title = auth ? `${cur}（点击切换账号）` : '点击登录';
+  $('#userBtn').title = auth ? `${cur}（点击查看账号）` : '登录 / 注册';
 
   // 商家后台只对商家显示。**这是体验不是安全**——藏了照样能直接敲
   // /merchant，那一端有 @RequireMerchant 与 media.py 的 _denied 把着。
-  // 放在这里而不是登录时做一次：身份是能来回切的，切回买家要跟着收起来
   $('#navMerchant').hidden = !(auth && auth.role === 'merchant');
+}
+
+/* 需要登录才能做的事，统一走这里。
+   逛、搜、看详情**都不要登录** —— 真实电商也是这样，一进门就拦着登录
+   的站点，人直接就走了。要拦的只有产生归属的动作：下单、问客服（会话
+   要绑到人）、收藏。 */
+function requireLogin(why){
+  if (auth) return true;
+  closeAcct();
+  if (confirm(why + '\n\n现在去登录？')) goLogin();
+  return false;
 }
 
 function toggleAcct(e){
@@ -940,6 +898,11 @@ function pickCat(c){
   cat = c;
   shown = PAGE;          // 换类目要回到第一页，否则会停在上一个类目的页码
   favOnly = false;
+  // 搜索词也要跟着清。留着的话，点「针织衫」这个类目看到的是"针织衫
+  // 里还匹配上次搜索词的那几件"，而标题写的是「针织衫」——列表少了
+  // 一半，页面上却没有任何东西说明为什么
+  kw = '';
+  $('#q').value = '';
   $('#favBtn').classList.remove('on');
   renderCats();
   renderGrid();
@@ -1033,16 +996,26 @@ let favOnly = false;
 const PAGE = 60;
 let shown = PAGE;
 
+/* 收藏按账号分开存。
+   同一台机器上换个人登录，看到的是上一位的收藏夹——演示机上这几乎必然
+   发生（就是拿来回切账号用的）。收藏本身还是只存在浏览器里，没必要为它
+   开一张表；但"这是谁的"必须分清。未登录时用一个用不到的键：收藏这个
+   动作本来就要先登录（见 toggleFav）。 */
+function favKey(){
+  return 'smartmall.favs.' + (auth ? auth.userId : 'guest');
+}
+
 function loadFavs(){
-  try{ favs = new Set(JSON.parse(localStorage.getItem('smartmall.favs') || '[]')); }
+  try{ favs = new Set(JSON.parse(localStorage.getItem(favKey()) || '[]')); }
   catch(e){ favs = new Set(); }
   renderFavCount();
 }
 
 function toggleFav(id, ev){
   ev.stopPropagation();
+  if (!requireLogin('收藏要先登录，这样换台机器也还在。')) return;
   favs.has(id) ? favs.delete(id) : favs.add(id);
-  try{ localStorage.setItem('smartmall.favs', JSON.stringify([...favs])); }catch(e){}
+  try{ localStorage.setItem(favKey(), JSON.stringify([...favs])); }catch(e){}
   renderFavCount();
   renderGrid();
 }
@@ -1054,8 +1027,13 @@ function renderFavCount(){
 }
 
 function toggleFavOnly(){
+  if (!favOnly && !requireLogin('收藏夹要先登录。')) return;
   favOnly = !favOnly;
   shown = PAGE;
+  // 搜索词要清掉，理由同 pickCat：不清的话收藏夹里只显示"还匹配上次
+  // 搜索词的那几件"，而标题写的是「我的收藏」
+  kw = '';
+  $('#q').value = '';
   $('#favBtn').classList.toggle('on', favOnly);
   renderGrid();
 }
@@ -1093,24 +1071,49 @@ function colorsOf(p){
   return out;
 }
 
+/* 搜索关键词。**搜索不要登录** —— 一进门就拦着登录的站点，人直接就走了。
+   要登录的只有会产生归属的动作：下单、客服会话、收藏。 */
+let kw = '';
+
+/* 匹配商品名、品类、品牌。分词就不做了：中文分词做不好的表现是
+   "搜得到的搜不出来"，比朴素的包含匹配更让人困惑，而这个库里
+   商品名本来就短。 */
+function matches(p, term){
+  // 字段照着 /api/products 实际返回的来（tools.py 的 _BASE_COLS）。
+  // 写一个不存在的字段名不会报错，只会永远匹配不上——而现象是
+  // "按品牌搜不出来"，看不出是字段名打错了
+  return [p.name, p.short_name, p.brand, p.category, p.root_category]
+    .some(v => String(v || '').toLowerCase().includes(term));
+}
+
 function visible(){
   let list = cat === '全部' ? products
     : products.filter(p => (p.root_category || p.category) === cat);
   if (favOnly) list = list.filter(p => favs.has(p.id));
+  if (kw) list = list.filter(p => matches(p, kw));
   return list;
 }
 
 function renderGrid(){
   const list = visible();
-  $('#secTitle').textContent = favOnly ? '我的收藏'
+  $('#secTitle').textContent = kw ? `搜索“${kw}”`
+                             : favOnly ? '我的收藏'
                              : (cat === '全部' ? '新品上架' : cat);
   $('#secCount').textContent = list.length
     ? (list.length > shown ? `共 ${list.length} 件，已显示 ${shown} 件`
                            : `共 ${list.length} 件`) : '';
 
   if (!list.length){
-    $('#grid').innerHTML = `<div class="empty">${favOnly
-      ? '收藏夹还是空的。点商品图右上角的爱心可以收一件。'
+    // 搜不到的时候把客服递上去 —— 这是这个项目最该被点开的入口，
+    // 而"没有结果"正是用户最想找个人问问的时刻
+    // 关键词**不拼进 onclick**：拼的话就得同时躲开 HTML 转义和 JS 字符串
+    // 转义两层，一个引号就能把整段 handler 变成语法错误（表现是"按钮点了
+    // 没反应"）。让 handler 去读 kw 这个变量，两层都不用碰
+    $('#grid').innerHTML = `<div class="empty">${
+      kw ? `没有匹配“${esc(kw)}”的商品。
+            <button class="btn" style="margin-left:10px"
+                    onclick="askAboutSearch()">问问客服</button>`
+      : favOnly ? '收藏夹还是空的。点商品图右上角的爱心可以收一件。'
       : '这个分类下暂时没有商品。'}</div>`;
     return;
   }
@@ -1346,13 +1349,29 @@ function askProduct(id){
   openChat();
 }
 
+/* 搜索框。**先搜商品，搜不到再给客服入口。**
+
+   原先它是直接开客服的：这页当时是纯演示，"搜索"只是提问的一个入口。
+   但客服会话要绑到人（订单归属只认令牌），一登录才能用；而搜索是逛店
+   的一部分，游客得能用。把两件事压在一个框上，结果就是访客一敲回车
+   撞上登录墙——那是最容易让人直接关掉页面的一步。 */
 function searchAsk(e){
   e.preventDefault();
   const t = $('#q').value.trim();
-  if (!t) return;
-  // 搜索框直接当提问入口：这是个客服演示，不是真的搜索引擎
+  // pickCat 会顺带清掉 kw 与收藏筛选，所以设 kw 必须排在它后面。
+  // 空关键词就是"清空搜索"，回到全部商品——什么都不做的话，
+  // 用户清空搜索框再回车会发现列表还卡在上一次的结果上
+  pickCat('全部');
+  kw = t.toLowerCase();
+  renderGrid();
+  navOn('全部商品');
+  _scrollTo('.shop');
+}
+
+/* 搜不到时那个「问问客服」。读 kw，不接参数——见 renderGrid 里的注释 */
+function askAboutSearch(){
   current = null;
-  askAbout(t);
+  askAbout($('#q').value.trim() || kw);
 }
 
 /* ================================================================ 客服 */
@@ -1368,7 +1387,11 @@ function connect(){
   ws.onmessage = e => handle(JSON.parse(e.data));
 }
 
+/* 开客服窗。**要登录**——会话是绑到人的：客服能查"我的订单"、能看
+   历史，而那些都要一个确定的 user_id。不登录也放进来的话，一问订单
+   就撞上 1401，那时候再让人去登录，前面聊的都白聊了。 */
 function openChat(){
+  if (!requireLogin('联系客服要先登录 —— 客服会按你的订单来回答。')) return;
   closeAcct();
   $('#chat').classList.add('open');
   $('#fab').classList.add('hide');
@@ -1408,7 +1431,11 @@ async function buyNow(){
   if (placing) return;
 
   if (!auth){
-    orderMsg('err', '请先在右上角选一个身份 —— 订单归属只认令牌里的身份。');
+    // 这里不用 requireLogin 的弹窗：详情页有自己的消息位，
+    // 在已经打开的抽屉上再叠一个 confirm 会盖住商品
+    orderMsg('err', '下单要先登录 —— 订单归属只认令牌里的身份。'
+      + '<button class="btn primary" style="margin-left:10px;height:32px"'
+      + ' onclick="goLogin()">去登录</button>');
     return;
   }
   if (!selectedSku){
@@ -1589,8 +1616,8 @@ async function orderAction(orderNo, action, verbs, body, isAdmin){
       // 那一刻点支付就会走到这里，用户需要知道单没了、钱没扣
       orderMsg('err', `${verbs.fail}：${esc(d.message || '未知错误')}`
         + (d.code === 1403
-            ? '<br><span class="hint">当前身份没有这个权限。'
-            + '发货、审退款要商家身份 —— 右上角换成「店铺管理员」再试。</span>'
+            ? '<br><span class="hint">当前账号没有这个权限。'
+            + '发货、审退款要商家账号 —— 去 <a href="/merchant/login">商家登录</a>。</span>'
             : ''));
       return;
     }
@@ -1957,10 +1984,10 @@ function tick(){
 }
 tick(); setInterval(tick, 1000);
 
-loadFavs();
+/* loadAuth 必须排在 loadFavs 前面：收藏的存储键按 userId 分（见 favKey），
+   顺序反了就会先读到 guest 那一份，登录着的人看到一个空收藏夹 */
 loadAuth();
-// 没有令牌就先按演示买家登录一次，否则页面一进来就点不了下单
-if (!auth) switchIdentity('demo');
+loadFavs();
 loadProducts();
 connect();
 </script>

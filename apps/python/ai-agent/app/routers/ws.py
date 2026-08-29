@@ -42,6 +42,51 @@ async def index() -> str:
     return page.read_text(encoding="utf-8")
 
 
+@router.get("/base.css", summary="公共样式")
+async def base_css() -> FileResponse:
+    """四个页面共用的调色板与基础组件。
+
+    做成一个文件而不是在每页的 ``<style>`` 里各抄一份：抄出来的四份副本
+    会各自漂移，而漂移的表现是"在页面之间跳的时候像换了个站"，没人会
+    把它当成 bug 报上来。
+
+    是同源路径，不是外链——整页零外部请求那条硬要求还在
+    （见 ``test_page_has_no_external_dependencies``）。
+    """
+    path = _WEB / "base.css"
+    if not path.is_file():  # pragma: no cover
+        raise HTTPException(status_code=404)
+    return FileResponse(path, media_type="text/css",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@router.get("/login", response_class=HTMLResponse, summary="买家登录 / 注册")
+async def login_page() -> str:
+    """买家登录页。
+
+    这里能注册；``/merchant/login`` 不能。商家账号只从种子数据或 DBA 来——
+    开源之后谁 clone 下来都能注册成商家的话，等于附赠了一个后台入口。
+    判定不在这个页面上，在 ``AuthService.register``（角色写死 customer）。
+    """
+    page = _WEB / "login.html"
+    if not page.is_file():  # pragma: no cover
+        return "<h1>缺少 web/login.html</h1>"
+    return page.read_text(encoding="utf-8")
+
+
+@router.get("/merchant/login", response_class=HTMLResponse, summary="商家登录")
+async def merchant_login_page() -> str:
+    """商家登录页。没有注册入口，理由见 ``login_page``。
+
+    放在 ``/merchant`` 前面登记：两条都是字面路径，谁先谁后此刻都能匹配，
+    但哪天有人加了 ``/merchant/{tab}``，先登记的那条才不会被吃掉。
+    """
+    page = _WEB / "merchant-login.html"
+    if not page.is_file():  # pragma: no cover
+        return "<h1>缺少 web/merchant-login.html</h1>"
+    return page.read_text(encoding="utf-8")
+
+
 @router.get("/merchant", response_class=HTMLResponse, summary="商家后台")
 async def merchant_page() -> str:
     """商家后台。
@@ -207,6 +252,18 @@ async def login(payload: dict[str, Any]) -> dict[str, Any]:
     转发存在的唯一理由和订单一样——演示页由本服务托管，跨域调 8081 更麻烦。
     """
     return await _forward("POST", "/api/product/auth/login", json_body=payload)
+
+
+@router.post("/api/auth/register", summary="注册（转发到 mall-product）")
+async def register(payload: dict[str, Any]) -> dict[str, Any]:
+    """注册买家账号。
+
+    **原样转发，这一层不挑字段。** 挑字段（比如在这里剔掉 role）看着像多
+    一道保险，实际是把安全判定搬到了一个可以绕开的地方：浏览器完全可以
+    直连 8081。判定只有一处——``AuthService.register`` 里角色写死 customer，
+    而 ``RegisterRequest`` 上根本没有 role 这个字段可传。
+    """
+    return await _forward("POST", "/api/product/auth/register", json_body=payload)
 
 
 @router.post("/api/orders", summary="下单（转发到 mall-product）")

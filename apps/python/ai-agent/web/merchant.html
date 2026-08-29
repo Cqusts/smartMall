@@ -12,42 +12,31 @@
   只有商家能用的代码，而"哪些元素该按角色隐藏"迟早会漏一个——
   漏的方向通常是该藏的没藏。
 
-  **这个页面不做任何权限判断**，它只是把令牌带上。能不能操作由
-  mall-product 的 @RequireMerchant 决定。前端藏按钮是体验，不是安全：
-  藏了照样能用 curl 调，所以真正的判定必须在服务端。
+  没有商家令牌就跳去 /merchant/login，**但那只是体验**：绕开页面直接
+  curl 那些接口照样打得到。真正的判定在 mall-product 的 @RequireMerchant
+  和 media.py 的 _denied 上。这里做的事只有一件——别让人对着一屏 403
+  猜自己是谁。
 -->
+<!-- 调色板、按钮、输入框都在这里，与店铺页、两个登录页共用一份。
+     **两边不一致的代价不是"不好看"**——商家在两个页面之间来回切，
+     配色一换会让人以为跳到了别的系统。 -->
+<link rel="stylesheet" href="/base.css">
 <style>
-/* 与店铺页（index.html）同一套视觉语言：同样的调色板、同样的衬线标题、
-   同样的黑色主按钮。**两边不一致的代价不是"不好看"**——商家在两个页面
-   之间来回切，配色一换会让人以为跳到了别的系统。 */
-:root{
-  --ink:#1a1a1a; --ink-2:#5c5c5c; --ink-3:#9a9a9a;
-  --line:#e9e5e0; --line-2:#f0ece7;
-  --cream:#ede6dd; --cream-2:#f2efea;
-  --sand:#b08d6f; --sand-soft:#f7f1e9;
-  --ok:#2f7d5b; --warn:#9a6b1f; --err:#b4413c;
-  --serif:Georgia,"Times New Roman","Noto Serif SC","Source Han Serif SC",
-          "Songti SC",STSong,"SimSun",serif;
-}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
-     "Hiragino Sans GB","Microsoft YaHei",sans-serif;
+/* 这里只放后台自己的。跨页面的都在 /base.css 里 */
+*{margin:0;padding:0}
+body{font:14px/1.6 var(--sans);
      color:var(--ink);background:#faf9f8;-webkit-font-smoothing:antialiased}
-button,input,select,textarea{font:inherit;color:inherit}
-button{cursor:pointer;border:none;background:none}
-a{color:inherit;text-decoration:none}
+input,select,textarea{font:inherit;color:inherit}
 
 .top{background:#fff;border-bottom:1px solid var(--line-2);padding:0 28px;
      display:flex;align-items:center;gap:20px;height:76px;position:sticky;top:0;z-index:20}
-.top .logo{font-size:23px;font-weight:800;letter-spacing:-.6px;white-space:nowrap}
-.top .logo span{color:var(--sand);font-weight:400;font-size:14px;margin-left:10px;
-                letter-spacing:0}
+.top .logo span{font-weight:400;font-size:14px;margin-left:10px;letter-spacing:0}
 .top .sp{flex:1}
 .top .who{font-size:13px;color:var(--ink-2)}
 .top .who b{color:var(--ink)}
-.top a.back{font-size:13.5px;color:var(--ink-2);border:1px solid var(--line);
-            padding:8px 18px;border-radius:6px}
-.top a.back:hover{border-color:var(--ink);color:var(--ink)}
+.top .back{font-size:13.5px;color:var(--ink-2);border:1px solid var(--line);
+           padding:8px 18px;border-radius:6px;background:#fff}
+.top .back:hover{border-color:var(--ink);color:var(--ink)}
 
 .tabs{background:#fff;padding:0 28px;display:flex;gap:30px;
       border-bottom:1px solid var(--line-2)}
@@ -94,8 +83,11 @@ td.num{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--in
 .tag.refunding{background:#fbeeed;color:var(--err)}
 .tag.refunded{background:#f4f2f0;color:var(--ink-3)}
 
-.btn{border:1px solid var(--line);border-radius:6px;padding:6px 14px;font-size:13px;
-     color:var(--ink-2);background:#fff}
+/* 后台的按钮比登录页的小一号：表格每行末尾都有两三个，用 42px 高的
+   大按钮会把行撑开一倍。height:auto 是必须写的——base.css 的 .btn 定了
+   固定高度，不覆盖的话这里的 padding 就白设了 */
+.btn{border:1px solid var(--line);border-radius:6px;height:auto;
+     padding:6px 14px;font-size:13px;color:var(--ink-2);background:#fff}
 .btn:hover{border-color:var(--ink);color:var(--ink)}
 /* 主按钮跟店铺页一致用黑，不用橙——那是这个项目里唯一的强调色位置 */
 .btn.primary{background:var(--ink);border-color:var(--ink);color:#fff}
@@ -127,6 +119,7 @@ td.num{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--in
   <div class="logo">smartMall<span>商家后台</span></div>
   <span class="sp"></span>
   <span class="who" id="who">未登录</span>
+  <button class="back" onclick="logout()">退出登录</button>
   <a class="back" href="/">← 回到店铺</a>
 </div>
 
@@ -221,11 +214,6 @@ function loadAuth(){
   catch(e){ auth = null; }
 }
 
-function saveAuth(a){
-  auth = a;
-  try { localStorage.setItem('smartmall.auth', JSON.stringify(a)); } catch(e){}
-}
-
 /* 带令牌的 fetch。**唯一出口** —— 散着手写 headers 迟早漏一个，
    而漏的表现是 401，看起来像"功能坏了"而不是"没带令牌"。 */
 async function api(url, opts){
@@ -244,22 +232,27 @@ function say(kind, text){
   say._t = setTimeout(() => m.className = 'msg', 6000);
 }
 
-/* 商家身份。没有就自动登录 —— 这是演示页，不是生产登录流程。
-   真实系统这里应该是登录框，见 README 的说明。 */
-async function ensureMerchant(){
+/* 登录守卫。
+   **这里曾经是自动登录**：没有令牌就拿一对写死在这个文件里的商家用户名
+   口令登一次。演示够用，但开源出去等于把后台的门开着——谁打开这一页
+   都是商家。
+
+   现在没有令牌、或者拿的是买家令牌，就送去 /merchant/login。
+   **这仍然只是体验，不是安全**：绕开页面直接 curl 那些接口照样能打到，
+   拦住它们的是 mall-product 的 @RequireMerchant 和 media.py 的 _denied。
+   这里做的事只有一件——别让人对着一屏 403 猜自己是谁。 */
+function requireMerchant(){
   if (auth && auth.role === 'merchant'){ renderWho(); return true; }
-  const d = await (await fetch('/api/auth/login', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({username:'merchant', password:'smartmall123'}),
-  })).json();
-  if (d.code !== 0){
-    say('err', '商家登录失败：' + (d.message || '') +
-        '（订单服务没起来？.\\smartmall.ps1 up）');
-    return false;
-  }
-  saveAuth(d.data);
-  renderWho();
-  return true;
+  // 带上回来的路径，登完直接回后台，不用再点一次
+  const back = location.pathname + location.search;
+  location.replace('/merchant/login?redirect=' + encodeURIComponent(back));
+  return false;
+}
+
+function logout(){
+  auth = null;
+  try{ localStorage.removeItem('smartmall.auth'); }catch(e){}
+  location.replace('/merchant/login');
 }
 
 function renderWho(){
@@ -676,9 +669,11 @@ async function pollVideos(){
 
 /* ---------------------------------------------------------------- 启动 */
 
-(async function init(){
+(function init(){
   loadAuth();
-  if (await ensureMerchant()) loadProducts();
+  // 守卫要在**加载数据之前**。反过来的话，未登录的人会先看到一屏
+  // "无权限"的报错，然后页面才跳走——那一闪读起来像后台坏了
+  if (requireMerchant()) loadProducts();
 })();
 </script>
 </body>
