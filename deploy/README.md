@@ -1,7 +1,7 @@
 # 整套 Docker 部署
 
 **本地开发不需要这一套。**跑通商品页与下单只要 JDK 21 + 一台本机 MySQL，
-命令见仓库根 [README 的「启动」一节](../README.md#启动)：
+命令见仓库根 [使用手册的「启动」一节](../docs/16-walkthrough.md#启动)：
 
 ```powershell
 .\smartmall.ps1 db-init && .\smartmall.ps1 build && .\smartmall.ps1 up
