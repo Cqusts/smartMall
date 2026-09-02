@@ -70,6 +70,60 @@ flowchart TB
     DATA <--> LS
 ```
 
+### 1.x 数据飞轮全景
+
+README 里那张架构图的可编辑版本。**两条粗箭头是「Agent 集群」与
+「四个共用底座的 Agent」的区别**：客服答不上来自动给知识运维派一个补写任务，
+补完了、且这个盲点属于某个商品，再自动给运营派一个更新文案的任务，
+中间没有人点按钮。串起来的是一张 `agent_task` 表，判据在 `tasks/dispatch.py`——
+那里最要紧的是**不派**的五种情况（自伤求助、用户主动要人工、议价投诉退款、
+服务故障、内部异常）。
+
+```mermaid
+flowchart TB
+    subgraph SRC["数据来源"]
+        D1["公开数据集<br/>JDDC / ECD"]
+        D2["对话 Trace"]
+        D3["AI 素材<br/>素材中心"]
+        D4["直播切片<br/>SRS + FunASR"]
+    end
+
+    subgraph DP["数据中台"]
+        ODS["ODS 原始层"] --> DWD["DWD 明细层"]
+        DWD --> DWS["DWS 服务层"]
+        DWS --> DA["数据资产（版本化）"]
+        CLEAN["四道清洗关卡<br/>机器 → 规则 → 模型 → 人工"]
+    end
+
+    subgraph OUT["数据出口"]
+        KB["RAG 知识库<br/>knowledge_item"]
+        SFT["微调数据集<br/>sft_sample"]
+        KPI["考核指标集"]
+    end
+
+    subgraph AG["Agent 集群（agent_task 串起来）"]
+        A1["客服 Agent"]
+        A2["导购 Agent"]
+        A3["知识运维 Agent"]
+        A4["运营 Agent"]
+    end
+
+    SRC --> ODS
+    CLEAN -.贯穿.-> DWD
+    DA --> KB
+    DA --> SFT
+    DA --> KPI
+    KB --> A1
+    KB --> A2
+    SFT --> A1
+    A1 -.对话回流.-> D2
+    A4 -.素材回流.-> D3
+
+    A1 ==>|"答不上来，派活"| A3
+    A3 ==>|"知识补完，派活"| A4
+    A3 -.写入待审.-> KB
+```
+
 ---
 
 ## 2. 服务清单与职责
