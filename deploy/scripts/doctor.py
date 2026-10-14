@@ -178,6 +178,47 @@ def check_database() -> None:
                 else:
                     line(BAD, "商品表是空的", "跑 db-init（会导入 005 的种子数据）")
 
+            check_mysql_tuning(cur, db)
+
+
+def _java_pool_total() -> int:
+    """各 Java 服务 Hikari 连接池上限之和，从 application.yml 读，不是写死的。
+    没配 hikari 但有 datasource 的按 Hikari 默认的 10 算；没有 datasource 的（网关）不占连接。"""
+    total = 0
+    for yml in sorted((ROOT / "apps" / "java").glob("*/src/main/resources/application.yml")):
+        text = yml.read_text(encoding="utf-8")
+        m = re.search(r"maximum-pool-size:\s*(\d+)", text)
+        if m:
+            total += int(m.group(1))
+        elif "datasource:" in text:
+            total += 10
+    return total
+
+
+def check_mysql_tuning(cur, db: str) -> None:
+    """buffer pool / 连接预算 / 慢查询日志。建议的依据与不建议的理由见 dbtune.py。
+    只提醒不阻断：调优不是"起不来"的原因，不该让自检变红。"""
+    try:
+        import dbtune
+
+        cur.execute("SHOW GLOBAL VARIABLES WHERE Variable_name IN "
+                    "('innodb_buffer_pool_size','max_connections','slow_query_log','long_query_time')")
+        variables = {k: v for k, v in cur.fetchall()}
+        cur.execute("SHOW GLOBAL STATUS WHERE Variable_name = 'Max_used_connections'")
+        status = {k: v for k, v in cur.fetchall()}
+        cur.execute("SELECT COALESCE(SUM(data_length + index_length), 0) FROM "
+                    "information_schema.tables WHERE table_schema=%s", (db,))
+        dataset = float(cur.fetchone()[0])
+        py_pool = (int(os.environ.get("MYSQL_POOL_SIZE", "10"))
+                   + int(os.environ.get("MYSQL_MAX_OVERFLOW", "10")))
+        for f in dbtune.assess(variables=variables, status=status, dataset_bytes=dataset,
+                               java_pool_total=_java_pool_total(),
+                               python_pool_per_process=py_pool):
+            line(OK if f.level == "ok" else WARN, f.title,
+                 "\n      ".join(f.detail.splitlines()))
+    except Exception as exc:  # noqa: BLE001  体检本身不能让自检崩掉
+        line(WARN, "没能完成 MySQL 配置检查", f"{type(exc).__name__}: {exc}")
+
 
 # ---------------------------------------------------------------- 服务
 

@@ -150,18 +150,22 @@ class MySqlTraceStore:
         """
         from sqlalchemy import text
 
-        sql = text(
-            "UPDATE agent_trace SET thumb = :thumb, feedback_reason = :reason,"
-            # CURRENT_TIMESTAMP 而不是 NOW()：前者是标准 SQL，MySQL 与 SQLite
-            # 都认，于是这条语句能在测试里被真正执行一遍
-            " feedback_at = CURRENT_TIMESTAMP WHERE trace_id = :trace_id"
-        )
-        n = self._exec(
-            sql,
-            {"thumb": thumb, "reason": reason[:64], "trace_id": trace_id},
-            what="feedback",
-            want_rowcount=True,
-        )
+        def update(table: str):
+            return text(
+                f"UPDATE {table} SET thumb = :thumb, feedback_reason = :reason,"
+                # CURRENT_TIMESTAMP 而不是 NOW()：前者是标准 SQL，MySQL 与 SQLite
+                # 都认，于是这条语句能在测试里被真正执行一遍
+                " feedback_at = CURRENT_TIMESTAMP WHERE trace_id = :trace_id")
+
+        params = {"thumb": thumb, "reason": reason[:64], "trace_id": trace_id}
+        n = self._exec(update("agent_trace"), params, what="feedback", want_rowcount=True,
+                       deadlock_retries=2)
+        if not n:
+            # 在线表里没有这一行：可能已经被 archive-traces 搬进归档表了（用户在一个开了很久的页面上
+            # 点赞）。点赞是最值钱的字段，不能因为归档就丢——回头更新归档表。
+            # 归档表不存在（没跑 015 迁移）时这条会失败，记进 errors，不影响返回值
+            n = self._exec(update("agent_trace_archive"), params,
+                           what="feedback(archive)", want_rowcount=True, deadlock_retries=2)
         return bool(n)
 
     # ---------------------------------------------------------------- 读取
@@ -198,7 +202,14 @@ class MySqlTraceStore:
                 ), {"n": limit}).mappings()
             ]
 
-    def product_demand(self, product_id: int, limit: int = 12) -> list[dict]:
+    #: product_demand 默认统计最近多少天。与 ``archive-traces`` 的默认保留期对齐：
+    #: 没有这个窗口，查询耗时随该商品的全部历史行数线性增长（实测 1 万行 0.8ms →
+    #: 100 万行 12ms，线性外推到一年是秒级）。窗口走 idx_product(product_id, created_at)，
+    #: 代价只和窗口内的行数有关。传 None 恢复"全部历史"。
+    PRODUCT_DEMAND_WINDOW_DAYS = 90
+
+    def product_demand(self, product_id: int, limit: int = 12, *,
+                       since_days: int | None = PRODUCT_DEMAND_WINDOW_DAYS) -> list[dict]:
         """用户对这件商品实际问得最多的是什么。
 
         **这是运营 Agent 区别于"套模板写文案"的唯一依据。** 运营拍脑袋
@@ -209,37 +220,55 @@ class MySqlTraceStore:
         信号**，而且更强——用户想知道、我们连答案都没有，那更该在文案里
         主动讲清楚。
         """
+        from datetime import datetime, timedelta
+
         from sqlalchemy import text
 
+        window = ""
+        params: dict[str, Any] = {"pid": product_id, "n": limit}
+        if since_days is not None:
+            # 窗口起点在 Python 里算好当参数传：这条 SQL 不带方言（没有 DATE_SUB/NOW），
+            # 测试才能在 SQLite 上真正执行它。几个小时的时区差对 90 天的窗口无关紧要
+            window = " AND created_at >= :since"
+            params["since"] = datetime.now() - timedelta(days=since_days)
         with self.engine.connect() as conn:
             return [
                 dict(r) for r in conn.execute(text(
                     "SELECT input_text AS question, COUNT(*) AS times,"
                     " MAX(intent) AS intent, SUM(handover) AS unanswered "
                     "FROM agent_trace WHERE product_id = :pid"
-                    " AND input_text <> '' "
+                    " AND input_text <> ''" + window + " "
                     "GROUP BY input_text "
                     "ORDER BY times DESC, question ASC LIMIT :n"
-                ), {"pid": product_id, "n": limit}).mappings()
+                ), params).mappings()
             ]
 
     # ---------------------------------------------------------------- 内部
 
     def _exec(self, sql, params, *, what: str,
-              want_id: bool = False, want_rowcount: bool = False):
+              want_id: bool = False, want_rowcount: bool = False, deadlock_retries: int = 0):
         """执行写入，失败只记录不抛出。
 
         埋点绝不能挡住对话——用户等着答案，而"这一轮没记上"
         的代价远小于"这一轮没回复"。
+
+        ``deadlock_retries``：遇到 MySQL 死锁（1213）/锁等待超时（1205）时重试几次。
+        只给点赞用——它和后台的 archive-traces 会碰同一批老行，按 trace_id 走唯一索引再锁主键，
+        与归档的"先主键后二级索引"顺序相反，撞上时 InnoDB 会挑一个事务当牺牲品。
+        点赞是最值钱的字段，被牺牲了就重来一次，而不是丢掉。
         """
-        try:
-            with self.engine.begin() as conn:
-                result = conn.execute(sql, params)
-                if want_id:
-                    return result.lastrowid
-                if want_rowcount:
-                    return result.rowcount
+        for attempt in range(deadlock_retries + 1):
+            try:
+                with self.engine.begin() as conn:
+                    result = conn.execute(sql, params)
+                    if want_id:
+                        return result.lastrowid
+                    if want_rowcount:
+                        return result.rowcount
+                    return None
+            except Exception as exc:  # noqa: BLE001
+                code = (getattr(getattr(exc, "orig", None), "args", None) or (None,))[0]
+                if code in (1213, 1205) and attempt < deadlock_retries:
+                    continue
+                self.errors.append(f"{what}: {type(exc).__name__}: {exc}")
                 return None
-        except Exception as exc:  # noqa: BLE001
-            self.errors.append(f"{what}: {type(exc).__name__}: {exc}")
-            return None

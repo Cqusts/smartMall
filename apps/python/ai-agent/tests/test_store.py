@@ -207,6 +207,102 @@ class TestFeedback:
         assert _rows(store, "agent_trace")[0]["thumb"] == 1
 
 
+class TestFeedbackSurvivesDeadlocks:
+    """点赞和后台的 archive-traces 会碰同一批老行。按 trace_id 走唯一索引再锁主键，
+    与归档"先主键后二级索引"的顺序相反，撞上时 InnoDB 会挑一个事务当牺牲品。
+    点赞是最值钱的字段，被牺牲了就重来，而不是丢掉。"""
+
+    class Deadlock(Exception):
+        def __init__(self, code=1213):
+            self.orig = type("O", (), {"args": (code, "Deadlock found when trying to get lock")})()
+
+    def _fail_updates(self, store, times, code=1213):
+        from sqlalchemy import event
+
+        state = {"n": 0}
+
+        @event.listens_for(store.engine, "before_cursor_execute")
+        def boom(conn, cur, statement, params, context, executemany):
+            if statement.lstrip().startswith("UPDATE agent_trace") and state["n"] < times:
+                state["n"] += 1
+                raise self.Deadlock(code)
+        return state
+
+    def test_a_deadlock_victim_retries_and_lands(self, store):
+        t = _trace()
+        store.save(t)
+        state = self._fail_updates(store, times=2)
+        assert store.record_feedback(t.trace_id, -1, "答非所问") is True
+        assert state["n"] == 2
+        assert _rows(store, "agent_trace")[0]["thumb"] == -1
+        assert not store.errors, "重试成功了就不该留下错误记录"
+
+    def test_lock_wait_timeout_is_retried_too(self, store):
+        t = _trace()
+        store.save(t)
+        self._fail_updates(store, times=1, code=1205)
+        assert store.record_feedback(t.trace_id, 1) is True
+
+    def test_gives_up_after_the_retry_limit_and_leaves_a_trace(self, store):
+        t = _trace()
+        store.save(t)
+        state = self._fail_updates(store, times=99)
+        assert store.record_feedback(t.trace_id, 1) is False
+        assert state["n"] == 3 + 3, "在线表与归档表各试 1+2 次"       # 在线表 3 次，回退到归档表又 3 次
+        assert store.errors
+
+    def test_other_errors_are_not_retried(self, store):
+        from sqlalchemy import event
+
+        t = _trace()
+        store.save(t)
+        state = {"n": 0}
+
+        @event.listens_for(store.engine, "before_cursor_execute")
+        def boom(conn, cur, statement, params, context, executemany):
+            if statement.lstrip().startswith("UPDATE agent_trace"):
+                state["n"] += 1
+                raise RuntimeError("磁盘满了")
+        assert store.record_feedback(t.trace_id, 1) is False
+        assert state["n"] == 2, "非死锁错误不重试（在线表 1 次 + 归档表 1 次）"
+
+
+class TestFeedbackForArchivedTraces:
+    """archive-traces 把老的行搬进了 agent_trace_archive。点赞可能迟到——用户在一个开了很久的
+    页面上点了赞，这时那一行已经不在在线表里。点赞是最值钱的字段（点踩直接当 DPO 负例），
+    不能因为归档就丢。"""
+
+    def _with_archive(self, store):
+        from sqlalchemy import text
+
+        with store.engine.begin() as conn:
+            conn.execute(text(_DDL[0].replace("CREATE TABLE agent_trace", "CREATE TABLE agent_trace_archive")))
+            conn.execute(text("INSERT INTO agent_trace_archive (id, trace_id, session_id, input_text) "
+                              "VALUES (1, 'old-trace', 's', '很久以前的问题')"))
+
+    def test_feedback_lands_on_the_archived_row(self, store):
+        self._with_archive(store)
+        assert store.record_feedback("old-trace", -1, "答非所问") is True
+        r = _rows(store, "agent_trace_archive")[0]
+        assert r["thumb"] == -1 and r["feedback_reason"] == "答非所问"
+
+    def test_live_row_is_preferred_and_archive_untouched(self, store):
+        self._with_archive(store)
+        t = _trace()
+        store.save(t)
+        assert store.record_feedback(t.trace_id, 1)
+        assert _rows(store, "agent_trace_archive")[0]["thumb"] is None
+
+    def test_unknown_trace_is_still_false_with_an_archive(self, store):
+        self._with_archive(store)
+        assert store.record_feedback("nope", 1) is False
+
+    def test_missing_archive_table_does_not_break_feedback(self, store):
+        """没跑 015 迁移的库：在线表里没有这行就老实返回 False，错误留痕、不抛。"""
+        assert store.record_feedback("nope", 1) is False
+        assert any("feedback(archive)" in e for e in store.errors)
+
+
 class TestGraphIntegration:
     """图跑完必须落库，且落库失败不能影响回复。"""
 
@@ -293,6 +389,24 @@ class TestProductDemand:
         got = store.product_demand(9001)
         assert [r["question"] for r in got] == ["会起球吗", "厚吗"]
         assert got[0]["times"] == 2
+
+    def test_old_history_is_outside_the_default_window(self, store):
+        """窗口让查询代价只和近期的行数有关，而不是随全部历史线性增长。传 None 恢复全部历史。"""
+        from datetime import datetime, timedelta
+
+        from sqlalchemy import text
+
+        for i, (q, days) in enumerate([("会起球吗", 5), ("会起球吗", 20), ("三年前的问题", 400)]):
+            store.save(TraceRecord(trace_id=f"w{i}", session_id="s", product_id=9001, input_text=q))
+            with store.engine.begin() as conn:
+                conn.execute(text("UPDATE agent_trace SET created_at = :at WHERE trace_id = :t"),
+                             {"at": (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S"),
+                              "t": f"w{i}"})
+        assert [r["question"] for r in store.product_demand(9001)] == ["会起球吗"]
+        assert store.product_demand(9001)[0]["times"] == 2
+        assert {r["question"] for r in store.product_demand(9001, since_days=None)} == {"会起球吗", "三年前的问题"}
+        assert [r["question"] for r in store.product_demand(9001, since_days=10)] == ["会起球吗"]
+        assert store.product_demand(9001, since_days=10)[0]["times"] == 1
 
     def test_other_products_do_not_leak_in(self, store):
         store.save(TraceRecord(trace_id="a", session_id="s",

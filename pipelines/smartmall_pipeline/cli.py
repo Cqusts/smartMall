@@ -10,6 +10,7 @@
     python -m smartmall_pipeline.cli stats                  # 看各层数据量
     python -m smartmall_pipeline.cli coverage               # 知识覆盖度矩阵
     python -m smartmall_pipeline.cli publish --version kb-v1
+    python -m smartmall_pipeline.cli archive-traces --dry-run   # 看会归档多少对话埋点
 
 数据库连接从环境变量读（与 deploy/.env 一致）：
 ``MYSQL_HOST`` / ``MYSQL_PORT`` / ``MYSQL_USER`` / ``MYSQL_PASSWORD`` / ``MYSQL_DATABASE``
@@ -1045,6 +1046,13 @@ def cmd_stats(args: argparse.Namespace) -> int:
             n = conn.execute(text(sql)).scalar()
             print(f"  {pad(label, 20)} {n:>8}")
 
+        try:
+            n = conn.execute(text("SELECT COUNT(*) FROM agent_trace_archive")).scalar()
+            print(f"  {pad('  已归档的对话埋点', 20)} {n:>8}")
+        except Exception:  # noqa: BLE001  015 迁移还没跑
+            print(f"  {pad('  已归档的对话埋点', 20)} （没有归档表：跑 migrate.py 应用 015）")
+            conn.rollback()
+
         rows = conn.execute(text(
             "SELECT source, COUNT(*) FROM knowledge_item WHERE deleted=0 "
             "GROUP BY source ORDER BY COUNT(*) DESC"
@@ -1053,6 +1061,54 @@ def cmd_stats(args: argparse.Namespace) -> int:
             print("\n  按来源分布：")
             for source, n in rows:
                 print(f"    {pad(source, 18)} {n:>8}")
+    return 0
+
+
+# ---------------------------------------------------------------- archive-traces
+
+
+def cmd_archive_traces(args: argparse.Namespace) -> int:
+    """把超过保留期的对话埋点搬到 agent_trace_archive（搬，不是删）。机制见 archive.py。"""
+    from datetime import timedelta
+
+    from .archive import ArchiveInconsistency, archive_traces, db_now
+
+    engine = DwsRepository.from_env().engine
+    cutoff = db_now(engine) - timedelta(days=args.older_than_days)
+    print(f"==> {_env_summary()}")
+    print(f"  保留期 {args.older_than_days} 天：归档 {cutoff:%Y-%m-%d %H:%M:%S} 之前的对话埋点"
+          + ("（连点赞点踩的一起）" if args.include_feedback else "（带点赞点踩的留在在线表）"))
+
+    def show(r) -> None:
+        print(f"    已搬 {r.archived:>8} 行 / {r.batches} 批 / {r.seconds:5.1f}s", end="\r", flush=True)
+
+    try:
+        r = archive_traces(
+            engine, cutoff=cutoff, include_feedback=args.include_feedback,
+            batch_size=args.batch_size, sleep=args.sleep, max_seconds=args.max_seconds,
+            dry_run=args.dry_run, progress=None if args.dry_run else show)
+    except ArchiveInconsistency as exc:
+        print(f"\n  ✗ {exc}\n    已重试仍不一致，这一批已回滚，没有数据丢失；稍后重跑一次即可"
+              "（它会从还没搬的行继续）。")
+        return 1
+
+    print()
+    if r.stopped_by == "nothing":
+        print("  没有超过保留期的对话埋点。")
+    elif r.stopped_by == "dry_run":
+        print(f"  [预览] 将归档 {r.eligible_remaining} 行"
+              + (f"，另有 {r.skipped_feedback} 行带点赞点踩会留下" if r.skipped_feedback else ""))
+        print("  去掉 --dry-run 才会真的搬。")
+    else:
+        print(f"  ✓ 已归档 {r.archived} 行，{r.batches} 批，用时 {r.seconds:.1f}s"
+              + (f"（因并发冲突重做过 {r.retries} 批，线上有点赞/写入时正常）" if r.retries else ""))
+        if r.skipped_feedback:
+            print(f"    另有 {r.skipped_feedback} 行带点赞点踩，留在在线表（--include-feedback 才搬）")
+        if r.stopped_by in ("time_budget", "max_batches"):
+            print(f"  ⚠ 因 {'时间预算' if r.stopped_by == 'time_budget' else '批数上限'}提前停止，"
+                  f"还剩 {r.eligible_remaining} 行；再跑一次会接着搬。")
+        print("  磁盘空间不会立刻变小（InnoDB 复用空页）；要归还给系统，维护窗口里 "
+              "OPTIMIZE TABLE agent_trace。")
     return 0
 
 
@@ -1628,6 +1684,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--include-ods", action="store_true",
                    help="连原始数据一起删（谨慎：删了只能重新采集）")
     s.set_defaults(func=cmd_reset)
+
+    s = sub.add_parser("archive-traces", help="把超过保留期的对话埋点搬到归档表（搬，不是删）")
+    s.add_argument("--older-than-days", type=int, default=90,
+                   help="保留期，默认 90 天。product_demand 的统计窗口默认也是 90 天，两者对齐")
+    s.add_argument("--include-feedback", action="store_true",
+                   help="连带点赞点踩的行一起搬（默认留在在线表：它们是训练数据，占比很小）")
+    s.add_argument("--batch-size", type=int, default=2000, help="每批行数（一个事务）")
+    s.add_argument("--sleep", type=float, default=0.05, help="批间停顿（秒），给线上写入和复制让路")
+    s.add_argument("--max-seconds", type=float, default=None, help="时间预算：到点干净地停，下次接着搬")
+    s.add_argument("--dry-run", action="store_true", help="只统计将要搬多少，不动数据")
+    s.set_defaults(func=cmd_archive_traces)
 
     s = sub.add_parser("publish", help="发布数据资产版本")
     s.add_argument("--version", required=True, help="如 kb-v1")
