@@ -28,6 +28,7 @@ def dbtune():
 
 def run(dbtune, **kw):
     base = dict(variables={"innodb_buffer_pool_size": str(128 * MB), "max_connections": "300",
+                           "innodb_redo_log_capacity": str(100 * MB),
                            "slow_query_log": "ON", "long_query_time": "0.5"},
                 status={"Max_used_connections": "20"}, dataset_bytes=50 * MB,
                 java_pool_total=40, python_pool_per_process=20)
@@ -113,13 +114,39 @@ class TestSlowQueryLog:
         assert by_title(run(dbtune, variables={"slow_query_log": "1"}), "慢查询日志").level == "ok"
 
 
-class TestWhatItDeliberatelyDoesNotAdvise:
-    def test_no_redo_log_advice(self, dbtune):
-        """实测把 redo 从 100MB 提到 1GB，归档速度在噪声内，Innodb_log_waits 始终 0。
-        没有证据说明它是瓶颈，就不该建议改。"""
-        for kw in ({}, {"dataset_bytes": 5 * GB}, {"variables": {"slow_query_log": "OFF"}}):
-            for f in run(dbtune, **kw):
-                assert "redo" not in (f.title + f.detail).lower()
+class TestRedoCapacity:
+    """这条规则改过一次。第一版断言"不建议改 redo"，依据是无并发写入时归档速度没变、
+    Innodb_log_waits 是 0——错的：它没看并发写入的尾延迟（p99 6ms → 415~616ms），
+    而 Innodb_log_waits 统计的是 log buffer 等待，不反映 checkpoint 压力。"""
+
+    def test_small_redo_with_a_big_dataset_warns_and_cites_the_tail_latency(self, dbtune):
+        f = by_title(run(dbtune, dataset_bytes=1 * GB), "redo")
+        assert f.level == "warn"
+        assert "SET PERSIST innodb_redo_log_capacity = 1073741824" in f.detail
+        assert "p99" in f.detail and "616ms" in f.detail, "要带上实测的尾延迟，而不是只说'调大'"
+        assert "Innodb_log_waits" in f.detail, "要点明那个看起来相关、其实看不出来的计数器"
+        assert "--batch-size 500 --sleep 0.1" in f.detail, "要给出不改配置的替代办法"
+
+    def test_small_dataset_is_not_nagged(self, dbtune):
+        """小库不做批量维护，天天报警只会让人学会无视体检。"""
+        assert by_title(run(dbtune, dataset_bytes=50 * MB), "redo").level == "ok"
+
+    def test_large_redo_is_ok_even_with_a_big_dataset(self, dbtune):
+        f = by_title(run(dbtune, dataset_bytes=2 * GB, variables={"innodb_redo_log_capacity": str(1 * GB)}), "redo")
+        assert f.level == "ok"
+
+    def test_threshold_is_512mb(self, dbtune):
+        assert by_title(run(dbtune, dataset_bytes=1 * GB,
+                            variables={"innodb_redo_log_capacity": str(511 * MB)}), "redo").level == "warn"
+        assert by_title(run(dbtune, dataset_bytes=1 * GB,
+                            variables={"innodb_redo_log_capacity": str(512 * MB)}), "redo").level == "ok"
+
+    def test_old_servers_without_the_variable_are_skipped(self, dbtune):
+        """innodb_redo_log_capacity 是 8.0.30 才有的。没有这个变量就别编一条建议出来。"""
+        out = dbtune.assess(variables={"innodb_buffer_pool_size": str(1 * GB), "max_connections": "300",
+                                       "slow_query_log": "ON", "long_query_time": "0.5"},
+                            status={}, dataset_bytes=5 * GB, java_pool_total=40, python_pool_per_process=20)
+        assert not [f for f in out if "redo" in f.title]
 
 
 class TestDoctorHelpers:

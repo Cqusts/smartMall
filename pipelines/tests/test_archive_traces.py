@@ -163,6 +163,27 @@ class TestBatching:
                 assert 10 in params, f"批探测没有带上 max_id 上界：{params}"
 
 
+class TestDefaultsAreTheSmoothOnes:
+    """默认值是实测出来的平滑档：MySQL 默认 redo 只有 100MB，2000 行/批 + 0.05s 停顿时归档每秒
+    产生 13MB redo、8 秒写满一圈，线上写入 p99 从 6ms 涨到 415~616ms；500 行/批 + 0.1s 停顿
+    p99 7.5ms。有人把默认值"调快一点"，这里要红——它会悄悄把线上写入的尾延迟拉高两个数量级。"""
+
+    def test_function_defaults(self):
+        import inspect
+        sig = inspect.signature(archive_traces).parameters
+        assert sig["batch_size"].default == 500 and sig["sleep"].default == 0.1
+
+    def test_cli_defaults(self):
+        from smartmall_pipeline import cli
+        ns = cli.build_parser().parse_args(["archive-traces"])
+        assert ns.batch_size == 500 and ns.sleep == 0.1 and ns.older_than_days == 90
+
+    def test_cli_defaults_match_the_function(self):
+        from smartmall_pipeline import cli
+        ns = cli.build_parser().parse_args(["archive-traces"])
+        assert (ns.batch_size, ns.sleep) == (arch.DEFAULT_BATCH_SIZE, arch.DEFAULT_SLEEP)
+
+
 class TestResumable:
     def test_stopping_early_and_rerunning_finishes_the_job(self, engine):
         seed(engine, old=100, new=5)

@@ -14,8 +14,15 @@ doctor.py 调用它。评估逻辑是纯函数（``assess``），不碰数据库
 * **慢查询日志。**本项目所有的 SQL 调优都是"找出慢查询、EXPLAIN、加索引或改写"
   （订单回收那条 310ms → 4ms 就是这么发现的）。不开日志就没有第一步。
 
-**故意不提的：**``innodb_redo_log_capacity``。实测把它从 100MB 提到 1GB，归档速度在噪声内
-（6500~7900 行/秒），``Innodb_log_waits`` 一直是 0——没有证据说明它是瓶颈，就不该建议改。
+* **redo 日志容量。**这条结论**改过一次，值得记下来**。第一版写的是"不建议改"，依据是：
+  无并发写入时把 redo 从 100MB 提到 1GB，归档速度在噪声内，``Innodb_log_waits`` 始终是 0。
+  这个结论是错的——它只看了吞吐，没看**并发写入的尾延迟**，而 ``Innodb_log_waits`` 统计的是
+  log buffer 等待，根本不反映 checkpoint 压力。补上并发写入（约 100 条/秒的线上插入）再量：
+  归档每秒产生 13MB redo，100MB 的日志 8 秒转一圈，线上插入 p50 不变（2.3ms），
+  **p99 6ms → 415~616ms，max 近 1 秒**；redo 提到 1GB 后 p99 11.9ms、max 43ms。
+  所以只在数据量大到会做批量维护（归档、导入）时提醒，并且给出不改配置的替代办法（归档的
+  默认批大小/停顿就是为此选的）。教训：调优结论必须带着真实的并发负载去量，看吞吐和看
+  一个"看起来相关"的计数器都不够。
 """
 
 from __future__ import annotations
@@ -28,6 +35,10 @@ GB = 1024 * MB
 POOL_PRESSURE = 0.8
 #: 连接数估算/历史峰值超过上限的这个比例就提醒
 CONN_PRESSURE = 0.7
+#: redo 容量低于它、且数据量达到下面的门槛时提醒。门槛是"会做批量维护"的量级：
+#: 小库天天报警，大家很快学会无视体检
+REDO_MIN = 512 * MB
+REDO_RELEVANT_DATASET = 512 * MB
 
 
 @dataclass(frozen=True)
@@ -90,6 +101,23 @@ def assess(*, variables: dict[str, str], status: dict[str, str], dataset_bytes: 
         else:
             out.append(Finding(
                 "ok", f"连接预算：最坏 {worst} 条 / 上限 {max_conn}，历史峰值 {used}", budget))
+
+    # ---------------------------------------------------------------- redo 日志容量
+    redo = int(variables.get("innodb_redo_log_capacity", 0))     # 8.0.30+ 才有这个变量
+    if redo:
+        if redo < REDO_MIN and dataset_bytes >= REDO_RELEVANT_DATASET:
+            out.append(Finding(
+                "warn", f"redo 日志容量只有 {_mb(redo)}，批量维护时线上写入的尾延迟会很难看",
+                "实测（归档 73 万行，同时有约 100 条/秒的线上插入）：redo 100MB 时线上插入 p50 2.3ms 不变，\n"
+                "p99 6ms → 415~616ms、max 近 1 秒（归档每秒产生 13MB redo，8 秒就把 100MB 写满一圈）；\n"
+                "redo 1GB 时 p99 11.9ms、max 43ms。注意 Innodb_log_waits 看不出来（它统计的是 log buffer）。\n"
+                "在线调大（8.0.30+，重启保留）：SET PERSIST innodb_redo_log_capacity = 1073741824;\n"
+                "代价：多占 1GB 磁盘，崩溃恢复要多扫一些日志。不想改的话，归档默认的小批量 + 长停顿\n"
+                "（--batch-size 500 --sleep 0.1）已经把 p99 压到 7.5ms，只是慢一倍。"))
+        else:
+            out.append(Finding(
+                "ok", f"redo 日志容量 {_mb(redo)}",
+                "数据+索引达到 512MB 且 redo 小于 512MB 时这里会提醒（批量维护会让线上写入卡顿）。"))
 
     # ---------------------------------------------------------------- 慢查询日志
     slow = str(variables.get("slow_query_log", "OFF")).upper() in ("ON", "1")

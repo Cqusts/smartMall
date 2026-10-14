@@ -1690,8 +1690,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="保留期，默认 90 天。product_demand 的统计窗口默认也是 90 天，两者对齐")
     s.add_argument("--include-feedback", action="store_true",
                    help="连带点赞点踩的行一起搬（默认留在在线表：它们是训练数据，占比很小）")
-    s.add_argument("--batch-size", type=int, default=2000, help="每批行数（一个事务）")
-    s.add_argument("--sleep", type=float, default=0.05, help="批间停顿（秒），给线上写入和复制让路")
+    s.add_argument("--batch-size", type=int, default=500,
+                   help="每批行数（一个事务）。默认 500 是平滑档：MySQL 默认 redo 只有 100MB，"
+                        "2000 行/批会把它 8 秒写满一圈，线上写入 p99 涨到 400~600ms")
+    s.add_argument("--sleep", type=float, default=0.1,
+                   help="批间停顿（秒），给线上写入、刷盘和复制让路。redo 容量调到 1GB 后可以放心调小")
     s.add_argument("--max-seconds", type=float, default=None, help="时间预算：到点干净地停，下次接着搬")
     s.add_argument("--dry-run", action="store_true", help="只统计将要搬多少，不动数据")
     s.set_defaults(func=cmd_archive_traces)

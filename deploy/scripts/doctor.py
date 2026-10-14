@@ -202,7 +202,8 @@ def check_mysql_tuning(cur, db: str) -> None:
         import dbtune
 
         cur.execute("SHOW GLOBAL VARIABLES WHERE Variable_name IN "
-                    "('innodb_buffer_pool_size','max_connections','slow_query_log','long_query_time')")
+                    "('innodb_buffer_pool_size','innodb_redo_log_capacity','max_connections',"
+                    "'slow_query_log','long_query_time')")
         variables = {k: v for k, v in cur.fetchall()}
         cur.execute("SHOW GLOBAL STATUS WHERE Variable_name = 'Max_used_connections'")
         status = {k: v for k, v in cur.fetchall()}

@@ -72,15 +72,19 @@
 - **buffer pool 伤的是读**：`O_DIRECT`（让 buffer pool 成为唯一的缓存）下，128MB → 1GB 使
   `product_demand` p50 **103ms → 6.2ms**（复测 128MB 为 93ms），写入只涨约 10%。
   默认 `O_DIRECT` 关着时 OS page cache 会兜底，这个差别被遮住了。
-- **redo 日志大小不是瓶颈**：从 100MB 提到 1GB 没有更快（`Innodb_log_waits` 始终 0），所以**不建议改**。
+- **redo 日志容量决定批量维护时线上写入的尾延迟**（见 4.3 的表）：归档每秒产生 13MB redo，
+  默认 100MB 的日志 8 秒转一圈，checkpoint 追不上就卡住线上写入——p50 不变，p99 6ms → 415~616ms，
+  max 近 1 秒；调到 1GB 后 p99 11.9ms。**这条结论改过一次**：第一版写的是"redo 不是瓶颈、不建议改"，
+  依据是无并发写入时归档速度没变、`Innodb_log_waits` 始终为 0——错的。它只看了吞吐，没看并发写入的
+  尾延迟；而 `Innodb_log_waits` 统计的是 log buffer 等待，不反映 checkpoint 压力。
 
 ### 4.2 改了什么
 
 | | |
 |---|---|
-| `docker-compose.base.yml` | `--innodb-buffer-pool-size`（默认 1G，`MYSQL_BUFFER_POOL_SIZE`）、慢查询日志默认开（0.5s）。**刻意没动** `innodb_flush_method`（个别文件系统不支持 `O_DIRECT`，MySQL 会起不来）和 redo 大小（没有证据） |
-| 本机 MySQL | `doctor.py` 新增体检：数据+索引逼近 buffer pool 时提醒并给出 `SET PERSIST innodb_buffer_pool_size = ...`（8.0 在线生效、重启保留，不用改 my.ini）；连接预算；慢查询日志。每条规则的两边都有单测（`deploy/tests/test_dbtune.py`） |
-| `agent_trace` 归档 | 迁移 015 + `python -m smartmall_pipeline.cli archive-traces`：把超过保留期（默认 90 天）的行**搬**到 `agent_trace_archive`（不是删）。分批（每批一个事务）、可中断可重跑、带点赞点踩的行默认留在在线表（它们是训练数据）、遇到死锁只重做这一批 |
+| `docker-compose.base.yml` | `--innodb-buffer-pool-size`（默认 1G，`MYSQL_BUFFER_POOL_SIZE`）、`--innodb-redo-log-capacity`（默认 1G，`MYSQL_REDO_LOG_CAPACITY`，需要 8.0.30+）、慢查询日志默认开（0.5s）。**刻意没动** `innodb_flush_method`（个别文件系统不支持 `O_DIRECT`，MySQL 会起不来）。flags 已在真实 8.0.46 容器里验证能起、能生效 |
+| 本机 MySQL | `doctor.py` 新增体检：数据+索引逼近 buffer pool 时提醒并给出 `SET PERSIST innodb_buffer_pool_size = ...`（8.0 在线生效、重启保留，不用改 my.ini）；数据量大而 redo 容量小时提醒（并给出 `SET PERSIST innodb_redo_log_capacity`，小库不报，免得天天报警）；连接预算；慢查询日志。每条规则的两边都有单测（`deploy/tests/test_dbtune.py`），在真实 MySQL 上跑过 |
+| `agent_trace` 归档 | 迁移 015 + `python -m smartmall_pipeline.cli archive-traces`：把超过保留期（默认 90 天）的行**搬**到 `agent_trace_archive`（不是删）。分批（每批一个事务）、可中断可重跑、带点赞点踩的行默认留在在线表（它们是训练数据）、遇到死锁只重做这一批。**默认批大小 500、停顿 0.1s 是实测出来的平滑档**（见 4.3） |
 | `product_demand` | 默认只统计最近 90 天（与归档保留期对齐）；传 `since_days=None` 恢复全部历史。**这是语义变化**：三个月前的问题不再计入"用户最关心什么" |
 | 点赞迟到 | 在线表 UPDATE 不到时回头更新归档表；遇到死锁/锁等待重试。点赞是最值钱的字段，不能因为归档就丢 |
 
@@ -96,18 +100,29 @@ python -m smartmall_pipeline.cli archive-traces --max-seconds 600  # 放进维�
 - 删除行**不会**缩小 InnoDB 文件（空页留给后续插入复用）。要把磁盘还给系统，维护窗口里 `OPTIMIZE TABLE agent_trace`（会重建表、短暂阻塞写入，不自动做）。
 - **归档刚结束时实例还在刷脏页，延迟会比较难看**（实测见下）；稳态后恢复。放在低峰跑，别在它刚结束时拿查询耗时下结论。
 
-**归档的真 MySQL 验证**（`deploy/scripts/loadtest/db_trace_bench.py`；100 万行；线上写入与点赞同时进行）：
+**归档的真 MySQL 验证**（`deploy/scripts/loadtest/db_trace_bench.py verify`；100 万行，73 万行超过保留期；线上同时有约 100 条/秒的插入和约 20 次/秒的点赞，接近这个项目真实的对话量级）：
 
-| | 128MB buffer pool，线上写入不限速（16 线程，压力上限） |
-|---|---|
-| 归档 | 730,032 行 / 381 批 / 782s（约 930 行/秒） |
-| 正确性 | 在线 281,158 + 归档 730,032 = 原 1,011,190；两表重复 0；内容校验和一致 |
-| 期间的点赞 | 25,675 次，**一条没丢**（其中 9,593 次落在已归档的行上，靠回退到归档表） |
-| 对线上写入的影响 | 插入 2517/s → 1387/s，p99 14.9 → 34.7ms，max 569ms |
-| 归档刚结束时 | 实例还在刷 1.7 万个脏页，`product_demand` 一度 1128ms；刷完回到 7–8ms（`history_len`=0，执行计划没变——不是回退） |
+| 配置 | 归档耗时 | 归档 redo 速率 | 线上插入 p50 | **p99** | max |
+|---|---|---|---|---|---|
+| 基线：同样的线上流量、不归档 | — | — | 1.9–2.2ms | 5.8–7.2ms | 8–29ms |
+| redo 100MB（默认），2000 行/批 + 停顿 0.05s | 102–107s | 13MB/s（**每 7.9s 写满一圈**） | 2.3–2.8ms | **415 / 616ms** | 927–1024ms |
+| redo 1GB，2000 行/批 + 停顿 0.05s | 94s | — | 2.2ms | **11.9ms** | 43ms |
+| redo 100MB（默认），500 行/批 + 停顿 0.1s（**现在的默认**） | 223s | 6MB/s（每 16.8s 一圈） | 1.9ms | **7.5ms** | 76ms |
 
-这一轮是**压力上限**：不限速的 16 个写入线程把归档期间灌进了 110 万行，而这个项目设计的对话峰值只有几十轮/秒。
+读法：中位数几乎不变，**尾延迟**才暴露问题——所以验证脚本直接打印 p99/max 和归档产生的 redo 量。
+前两行说明默认的 redo 容量被批量维护写满时线上写入会被卡住；后两行是两种解法：调大 redo（快，且尾延迟更好），
+或者降低归档速率（不用改配置，但慢一倍）。工具的默认值选了后者，因为它在任何 MySQL 配置上都安全；
+redo 调到 1GB 之后可以 `--batch-size 2000 --sleep 0.05` 提速。
 
+每一轮的正确性校验都通过：在线 + 归档 = 原行数，两表重复 0，内容校验和一致；期间的点赞一条没丢
+（其中约 1/3 落在已归档的行上，靠回退到归档表）。
+
+buffer pool 的影响（同一个归档，redo 100MB 无并发写入）：128MB 约 2900 行/秒、每批耗时从 200ms 一路涨到 750ms；
+1GB 约 6600 行/秒、每批稳定 250–360ms。128MB 且线上写入不限速（16 线程压到极限）时，归档 782 秒、线上插入
+2517/s → 1387/s——那是压力上限，不是这个项目的真实量级。
+
+**归档刚结束时实例还在刷脏页**，这时的查询延迟不是稳态（128MB 那一轮刚结束时 `product_demand` 一度 1128ms，
+刷完回到 7–8ms；`history_len`=0，执行计划没变）。放在低峰跑，别在它刚结束时拿查询耗时下结论。
 
 ### 4.4 连接预算
 

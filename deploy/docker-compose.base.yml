@@ -46,9 +46,14 @@ services:
       # buffer pool 默认 128MB，数据+索引超过它之后读查询的随机读全落到磁盘。
       # 实测（O_DIRECT，agent_trace 100 万行 ≈ 1GB）：128MB → 1GB 使 product_demand
       # p50 103ms → 6.2ms。刻意不改 innodb_flush_method=O_DIRECT：个别文件系统
-      # （tmpfs、某些 overlay）不支持，会让 MySQL 起不来；也不动 redo 日志大小：
-      # 实测提到 1GB 并没有更快（Innodb_log_waits 始终为 0）
+      # （tmpfs、某些 overlay）不支持，会让 MySQL 起不来
       - --innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-1G}
+      # redo 日志容量默认 100MB。批量维护（agent_trace 归档、大批量导入）每秒产生十几 MB redo，
+      # 100MB 的日志 8 秒就转一圈，checkpoint 追不上就卡住线上写入：实测线上插入 p50 不变，
+      # p99 6ms → 415~616ms、max 近 1 秒；1GB 时 p99 11.9ms、max 43ms。
+      # 需要 MySQL 8.0.30+（镜像 mysql:8.0 是浮动标签，较老的本地缓存镜像请删掉这一行）。
+      # 注意 Innodb_log_waits 看不出这个问题（它统计 log buffer 等待）——曾经因此误判过它不重要
+      - --innodb-redo-log-capacity=${MYSQL_REDO_LOG_CAPACITY:-1G}
       # 慢查询日志：本项目的 SQL 调优都是从这里找出慢查询、EXPLAIN、加索引或改写的
       - --slow-query-log=ON
       - --long-query-time=${MYSQL_LONG_QUERY_TIME:-0.5}

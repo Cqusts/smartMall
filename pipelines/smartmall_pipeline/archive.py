@@ -46,6 +46,15 @@ TRACE_COLUMNS = (
 )
 
 
+#: 默认值是**实测出来的平滑档**，不是跑得最快的档。归档会产生大量 redo（每搬一行约 1.8KB），
+#: 而 MySQL 默认 redo 容量只有 100MB：2000 行/批 + 0.05s 停顿时每秒 13MB，**8 秒就把 redo 写满一圈**，
+#: checkpoint 追不上就卡住线上写入——线上插入的 p50 几乎不变（2.3ms），p99 却从 6ms 涨到 415~616ms、
+#: max 近 1 秒。500 行/批 + 0.1s 停顿把速率砍半（6MB/s），p99 7.5ms、max 76ms，代价是慢一倍
+#: （73 万行 223s vs 102s）。把 redo 容量调到 1GB 则两者兼得（p99 11.9ms、94s），见 dbtune.py。
+#: 这个任务本来就该在后台慢慢跑，所以默认选平滑；redo 容量够大时再用 --batch-size / --sleep 提速。
+DEFAULT_BATCH_SIZE = 500
+DEFAULT_SLEEP = 0.1
+
 #: 一批遇到可重试的并发冲突（死锁、锁等待超时、复制后又被改）时最多试几次，之后才放弃整个任务
 MAX_BATCH_ATTEMPTS = 3
 
@@ -131,8 +140,8 @@ def archive_traces(
     *,
     cutoff: datetime,
     include_feedback: bool = False,
-    batch_size: int = 2000,
-    sleep: float = 0.05,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    sleep: float = DEFAULT_SLEEP,
     max_seconds: float | None = None,
     max_batches: int | None = None,
     dry_run: bool = False,
