@@ -60,7 +60,7 @@ async def main():
         "reject_max_s": round(rej_lat[-1], 3) if rej_lat else None,
         "server_llm_calls": calls["finished"],
         "useful_calls": st.get("200", 0),
-        "wasted_calls": calls["finished"] - st.get("200", 0) - (1 if by and by[0][0] == 200 else 0),
+        "wasted_calls": calls["finished"] - calls.get("probe", 0) - st.get("200", 0) - (1 if by and by[0][0] == 200 else 0),
         "bystander": [(str(s), round(l, 2)) for s, l in by],
         "has_guard": has_guard,
         "server_idle_after_s": round(busy_until, 1) if busy_until else None,

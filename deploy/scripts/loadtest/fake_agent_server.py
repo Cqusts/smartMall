@@ -18,7 +18,7 @@ import uvicorn
 import app.routers.chat as chat_mod
 
 DELAY = float(os.environ.get("FAKE_TURN_SECONDS", "2"))
-calls = {"started": 0, "finished": 0}
+calls = {"started": 0, "finished": 0, "probe": 0}
 lock = threading.Lock()
 
 
@@ -28,6 +28,9 @@ def fake(message, agent_state, deps):
     time.sleep(DELAY)
     with lock:
         calls["finished"] += 1
+        # 探针（probe_proc.py）也会发聊天请求，单独记账：否则它们会被算成"客户端早已放弃的白跑调用"
+        if agent_state.session.session_id.startswith("probe"):
+            calls["probe"] += 1
     agent_state.answer = "ok"
     return agent_state
 
