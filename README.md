@@ -407,6 +407,7 @@ smartMall/
 - [14 · 基础设施](docs/14-infra.md)
 - [15 · 风险与合规](docs/15-risks-compliance.md)
 - [16 · 使用手册](docs/16-walkthrough.md)
+- [17 · 并发与容量](docs/17-capacity-and-concurrency.md)
 
 </td></tr>
 </table>
