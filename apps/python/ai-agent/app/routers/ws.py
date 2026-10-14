@@ -14,7 +14,7 @@ import base64
 import binascii
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import (APIRouter, HTTPException, Request, WebSocket,
                      WebSocketDisconnect)
@@ -519,11 +519,13 @@ async def ws_chat(ws: WebSocket) -> None:
             try:
                 async with guard.turn(ctx.session_id,
                                       _sessions.lock_for(ctx.session_id)) as slot:
+                    overrides = ({"current_product_id": payload["product_id"]}
+                                 if payload.get("product_id") is not None else None)
                     if payload.get("agent") == "shopping":
-                        await _pump_shopping(ws, loop, message, ctx, slot)
+                        await _pump_shopping(ws, loop, message, ctx, slot, overrides)
                     else:
                         state = AgentState(session=ctx, image=image, image_mime=mime)
-                        await _pump(ws, loop, message, state, slot)
+                        await _pump(ws, loop, message, state, slot, overrides)
             except Overloaded as exc:
                 if created:
                     _sessions.discard(ctx.session_id)
@@ -573,7 +575,8 @@ def _decode_image(raw: Any) -> tuple[bytes | None, str]:
 
 
 async def _relay(ws: WebSocket, loop: asyncio.AbstractEventLoop, events,
-                 slot: Slot | None = None) -> None:
+                 slot: Slot | None = None,
+                 exclusive: Callable[[Callable[[], None]], None] | None = None) -> None:
     """把同步生成器的事件搬到事件循环里发出去。
 
     生成器在线程里跑；每产出一个事件就 ``call_soon_threadsafe`` 塞进
@@ -587,10 +590,15 @@ async def _relay(ws: WebSocket, loop: asyncio.AbstractEventLoop, events,
     q: asyncio.Queue = asyncio.Queue()
     done = object()
 
+    def _drive() -> None:
+        for event in events():
+            loop.call_soon_threadsafe(q.put_nowait, event)
+
     def _produce() -> None:
         try:
-            for event in events():
-                loop.call_soon_threadsafe(q.put_nowait, event)
+            # exclusive：配了 Redis 时在这里跨实例串行、轮前读新、轮后写回（见 SessionStore.run_exclusive）。
+            # 包住**整个生成器**——写回要等最后一个事件产出之后
+            (exclusive or (lambda fn: fn()))(_drive)
         finally:
             loop.call_soon_threadsafe(q.put_nowait, done)
 
@@ -609,14 +617,16 @@ async def _relay(ws: WebSocket, loop: asyncio.AbstractEventLoop, events,
 
 async def _pump(
     ws: WebSocket, loop: asyncio.AbstractEventLoop, message: str, state: AgentState,
-    slot: Slot | None = None,
+    slot: Slot | None = None, overrides: dict[str, Any] | None = None,
 ) -> None:
-    await _relay(ws, loop, lambda: stream_turn(message, state, get_deps()), slot)
+    await _relay(
+        ws, loop, lambda: stream_turn(message, state, get_deps()), slot,
+        exclusive=lambda fn: _sessions.run_exclusive(state.session, fn, overrides=overrides))
 
 
 async def _pump_shopping(
     ws: WebSocket, loop: asyncio.AbstractEventLoop, message: str, ctx,
-    slot: Slot | None = None,
+    slot: Slot | None = None, overrides: dict[str, Any] | None = None,
 ) -> None:
     """导购一轮。
 
@@ -630,8 +640,10 @@ async def _pump_shopping(
     state = _sessions.agent_state(
         ctx, "shopping", lambda: ShoppingState(session=ctx)
     )
-    await _relay(ws, loop,
-                 lambda: stream_shopping_turn(message, state, get_deps()), slot)
+    await _relay(
+        ws, loop, lambda: stream_shopping_turn(message, state, get_deps()), slot,
+        exclusive=lambda fn: _sessions.run_exclusive(
+            ctx, fn, shopping=state, overrides=overrides))
 
 
 async def _handle_feedback(ws: WebSocket, payload: dict[str, Any]) -> None:

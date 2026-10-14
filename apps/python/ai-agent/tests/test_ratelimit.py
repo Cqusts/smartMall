@@ -8,9 +8,7 @@ Redis 部分跑在**真的 redis-server 进程**上，不是 mock：限流的正
 from __future__ import annotations
 
 import asyncio
-import shutil
 import socket
-import subprocess
 import time
 
 import pytest
@@ -262,41 +260,7 @@ class TestClientIp:
 # ----------------------------------------------------------------------------- 真 Redis
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-class RedisServer:
-    def __init__(self) -> None:
-        self.port = _free_port()
-        self.proc: subprocess.Popen | None = None
-
-    def start(self) -> None:
-        self.proc = subprocess.Popen(
-            ["redis-server", "--port", str(self.port), "--bind", "127.0.0.1",
-             "--save", "", "--appendonly", "no", "--loglevel", "warning"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            try:
-                with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
-                    return
-            except OSError:
-                time.sleep(0.05)
-        raise RuntimeError("redis-server 没起来")
-
-    def stop(self) -> None:
-        if self.proc is not None:
-            self.proc.terminate()
-            self.proc.wait(10)
-            self.proc = None
-
-
-needs_redis = pytest.mark.skipif(shutil.which("redis-server") is None,
-                                 reason="没有 redis-server，跳过真 Redis 测试")
-redis_asyncio = pytest.importorskip("redis.asyncio")
+from _redis import RedisServer, needs_redis, redis_asyncio  # noqa: E402,F401
 
 
 @pytest.fixture

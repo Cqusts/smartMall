@@ -1,16 +1,13 @@
 """客服对话接口。
 
-会话状态目前放进程内存。Redis 版本在下一个增量——先把对话链路跑通，
-单实例演示够用，换存储时只需替换 :class:`SessionStore` 的实现，
-上层一行不用改。
+会话存储见 :mod:`app.sessions`（进程内工作副本 + 可选 Redis 持久层）；
+过载保护与限流见 :mod:`app.overload`。
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
-import time
 from typing import Any
 
 from ai_common.api import ApiResponse, ErrorCode
@@ -20,90 +17,17 @@ from pydantic import BaseModel, Field
 
 from ..agent import AgentState, SessionContext, safe_run_turn
 from ..agent.nodes import Deps
-from ..concurrency import chat_workers
+from ..concurrency import chat_workers, run_blocking
+from ..config import settings
 from ..overload import ChatGuard, Overloaded, build_guard
 from ..ratelimit import client_ip
+from ..sessions import SessionStore, build_session_store  # noqa: F401  SessionStore 供外部/测试引用
 
 router = APIRouter(prefix="/chat", tags=["客服"])
 log = logging.getLogger(__name__)
 
 
-class SessionStore:
-    """会话存储。
-
-    进程内字典 + TTL。够单实例演示用；多实例部署必须换 Redis，
-    否则同一个用户的两条消息落到不同实例上，上下文就断了。
-    """
-
-    def __init__(self, ttl: float = 86400.0) -> None:
-        self._data: dict[str, tuple[float, SessionContext]] = {}
-        self._agent_state: dict[str, dict[str, Any]] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
-        self.ttl = ttl
-
-    def lock_for(self, session_id: str) -> asyncio.Lock:
-        """这个会话的串行锁。**同一个会话的两轮对话不能同时跑。**
-
-        一轮对话现在跑在工作线程里，会读写同一个 ``SessionContext``（历史、摘要、
-        转人工计数）。同一个用户连发两条、或者 REST 与 WebSocket 同时进来，
-        两个线程就会交错着改同一份历史——答案引用的是另一轮写到一半的上下文。
-        不同会话之间不受影响，照常并行。
-
-        只在事件循环线程里调用（和 ``get``/``touch`` 一样），所以字典本身不需要锁。
-        """
-        lock = self._locks.get(session_id)
-        if lock is None:
-            lock = self._locks[session_id] = asyncio.Lock()
-        return lock
-
-    def has(self, session_id: str | None) -> bool:
-        return bool(session_id) and session_id in self._data
-
-    def discard(self, session_id: str) -> None:
-        """丢掉一个会话。被过载保护拒绝的**新**会话要丢掉：客户端没拿到 session_id，
-        重试时又会新建一个，每次拒绝都留一个没人认领的会话，直到 24 小时 TTL。"""
-        self._data.pop(session_id, None)
-        self._agent_state.pop(session_id, None)
-        self._locks.pop(session_id, None)
-
-    def get(self, session_id: str | None, **kw) -> SessionContext:
-        now = time.time()
-        self._evict(now)
-        if session_id and session_id in self._data:
-            return self._data[session_id][1]
-        ctx = SessionContext(**{k: v for k, v in kw.items() if v is not None})
-        if session_id:
-            ctx.session_id = session_id
-        self._data[ctx.session_id] = (now, ctx)
-        return ctx
-
-    def agent_state(self, ctx: SessionContext, key: str, factory) -> Any:
-        """取这个会话在某个 Agent 下的私有状态，没有就新建。
-
-        导购必须跨轮记住用户说过的条件（见
-        :meth:`~app.agent.shopping.state.ShoppingState.begin_turn`），
-        所以它的 state 得比单轮活得久。挂在会话存储里而不是另开一个
-        全局字典，是为了让它**和会话一起过期**——单独存的话，
-        会话早没了它还占着，就是一处长在演示环境里的内存泄漏。
-        """
-        bag = self._agent_state.setdefault(ctx.session_id, {})
-        if key not in bag:
-            bag[key] = factory()
-        return bag[key]
-
-    def touch(self, ctx: SessionContext) -> None:
-        self._data[ctx.session_id] = (time.time(), ctx)
-
-    def _evict(self, now: float) -> None:
-        dead = [k for k, (ts, _) in self._data.items() if now - ts > self.ttl]
-        for k in dead:
-            self._data.pop(k, None)
-            self._agent_state.pop(k, None)
-            # 锁跟着会话一起过期，否则每个来过的会话都在这里留一把锁
-            self._locks.pop(k, None)
-
-
-_sessions = SessionStore()
+_sessions = build_session_store(settings)
 _deps: Deps | None = None
 _deps_lock = threading.Lock()
 _guard: ChatGuard | None = None
@@ -116,8 +40,6 @@ def get_guard() -> ChatGuard:
     """
     global _guard
     if _guard is None:
-        from ..config import settings
-
         _guard = build_guard(settings, workers=chat_workers(), log=log.warning)
     return _guard
 
@@ -135,8 +57,6 @@ def peer_of(request_or_ws: Any) -> str | None:
 
 def rate_keys(request_or_ws: Any, *, user_id: Any, session_id: str | None) -> tuple[str, str | None]:
     """限流的两个 key：(IP, 用户或会话)。有 user_id 按用户，没有按会话，都没有就只按 IP。"""
-    from ..config import settings
-
     ip = client_ip(peer_of(request_or_ws),
                    request_or_ws.headers.get("x-forwarded-for"),
                    settings.chat_trust_proxy_hops)
@@ -204,9 +124,13 @@ class ChatResponse(BaseModel):
     postcheck_flags: list[str] = []
 
 
-def _run_turn(message: str, ctx: SessionContext):
-    """工作线程里跑的一轮。get_deps() 也在这里调——首次装配是阻塞的。"""
-    return safe_run_turn(message, AgentState(session=ctx), get_deps())
+def _run_turn(message: str, ctx: SessionContext, overrides: dict[str, Any] | None = None):
+    """工作线程里跑的一轮。get_deps() 也在这里调——首次装配是阻塞的。
+
+    ``run_exclusive``：配了 Redis 时在这里跨实例串行、轮前读新、轮后写回；没配就是直接跑。"""
+    return _sessions.run_exclusive(
+        ctx, lambda: safe_run_turn(message, AgentState(session=ctx), get_deps()),
+        overrides=overrides)
 
 
 def overloaded_response(exc: Overloaded) -> JSONResponse:
@@ -251,7 +175,9 @@ async def chat(req: ChatRequest, request: Request):
     # 准入控制与按会话串行见 ChatGuard.turn / SessionStore.lock_for。
     try:
         async with guard.turn(ctx.session_id, _sessions.lock_for(ctx.session_id)) as slot:
-            state = await slot.submit(_run_turn, req.message, ctx)
+            state = await slot.submit(
+                _run_turn, req.message, ctx,
+                {"current_product_id": req.product_id} if req.product_id is not None else None)
     except Overloaded as exc:
         if created:
             _sessions.discard(ctx.session_id)
@@ -279,6 +205,9 @@ async def chat(req: ChatRequest, request: Request):
 @router.get("/{session_id}/history", summary="查看会话历史")
 async def history(session_id: str) -> dict[str, Any]:
     ctx = _sessions.get(session_id)
+    # 会话可能是别的实例聊的：配了 Redis 时先看有没有更新的版本（阻塞 I/O，不在事件循环里做）
+    if _sessions.backend is not None:
+        await run_blocking(_sessions.refresh, ctx)
     return {
         "session_id": ctx.session_id,
         "turns": [

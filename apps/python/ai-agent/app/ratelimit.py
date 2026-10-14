@@ -129,32 +129,7 @@ return {allowed, wait_ms}
 """
 
 
-def make_redis_client(url: str, *, timeout: float = 0.25, max_connections: int = 50) -> Any:
-    """限流专用的 Redis 客户端。**不能用 ``Redis(host, port, ...)`` 默认构造**，真 Redis 测试里撞到过两个坑：
-
-    * **默认构造带重试。**连接失败会指数退避重试 10 次（redis-py 8.1 实测：连不上时 11 次连接尝试、
-      耗时 4.4 秒）。限流在每条消息的路径上，而且失败了我们本来就会放行并改用进程内限流——
-      重试只会让用户白等。显式构造连接池就没有这个重试；这里仍然写明 ``Retry(NoBackoff(), 0)``
-      把意图钉死，免得库升级后池级别的默认值变了，这个卡顿悄悄回来
-      （``test_connection_failure_is_attempted_once`` 数连接尝试次数来守这一点）。
-    * **异步连接池满了直接抛 ``MaxConnectionsError``，不排队**（默认上限 100）。
-      一次突发 200 个并发消息，Redis 明明健康，也会因为"连接不够"被判成故障、
-      整体降级。换成 ``BlockingConnectionPool``：连接不够时排队，等不到才算故障。
-      上限 50 足够——一次 Lua 调用不到 1ms，50 条连接撑得住每秒几万次。
-    """
-    import redis.asyncio as aioredis
-    from redis.asyncio.retry import Retry
-    from redis.backoff import NoBackoff
-
-    pool = aioredis.BlockingConnectionPool.from_url(
-        url,
-        max_connections=max_connections,
-        timeout=timeout,                   # 等空闲连接的时间
-        socket_timeout=timeout,
-        socket_connect_timeout=timeout,
-        retry=Retry(NoBackoff(), 0),
-    )
-    return aioredis.Redis(connection_pool=pool)
+from .redis_clients import make_redis_client  # noqa: E402,F401  测试与 build_guard 经由本模块取用
 
 
 class RedisLimiter:

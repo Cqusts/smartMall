@@ -187,6 +187,10 @@ services:
       # 对话限流计数放 Redis：多个 ai-agent 实例共用一份额度。Redis 不可用时自动退回
       # 进程内限流（放行，不会停掉客服）。不设的话默认 memory，每个实例各记各的
       CHAT_RATE_BACKEND: redis
+      # 会话（对话历史、导购累积的需求）持久化到 Redis：发版/重启后接着聊，多实例下 WebSocket
+      # 重连落到另一个实例上下文也不断。Redis 故障时自动退回纯内存，不会停掉客服。
+      # 不设的话默认 memory：每次重启丢掉所有进行中的对话
+      SESSION_BACKEND: redis
       # 前面有几层可信反向代理，且它们会往 X-Forwarded-For 末尾追加客户端地址。
       # 0 = 不读该头、只用连接对端地址——直连 9002 时正确；但若实际走代理访问，
       # 所有用户会共用代理那一个 IP 桶。设之前先确认代理确实追加了该头（见 app/ratelimit.py: client_ip）

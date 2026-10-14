@@ -60,4 +60,7 @@ async def info():
         # 对话入口当前负载与累计拒绝数。active 长期顶满 max_active、rejected 在涨，
         # 说明该扩容（或 CHAT_WORKERS 太小）；active 归不了零说明名额泄漏
         "chat_load": chat.get_guard().snapshot(),
+        # 会话数、淘汰数、持久层是否在降级。sessions 长期贴着 max_sessions、evicted_cap 在涨，
+        # 说明在淘汰还活着的会话（调大 SESSION_MAX 或加机器）
+        "sessions": chat._sessions.stats(),
     }
