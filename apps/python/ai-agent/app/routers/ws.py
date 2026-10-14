@@ -18,7 +18,7 @@ from typing import Any
 
 from fastapi import (APIRouter, HTTPException, Request, WebSocket,
                      WebSocketDisconnect)
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from ..agent.state import AgentState
 from ..agent.streaming import stream_turn
@@ -124,9 +124,8 @@ async def product_image(name: str) -> FileResponse:
                         headers={"Cache-Control": "public, max-age=86400"})
 
 
-@router.get("/api/products", summary="商品列表")
-async def products() -> dict[str, Any]:
-    """店铺首页的商品数据。
+def _build_catalog_payload() -> dict[str, Any]:
+    """从库里组装店铺首页的商品数据。**同步**，由缓存在线程池里调用。
 
     直接读工具层——前端看到的价格库存与客服回答用的**是同一个数据源**。
     分成两条路的话，页面显示"有货"而客服说"缺货"，用户会以为系统在骗人。
@@ -134,6 +133,9 @@ async def products() -> dict[str, Any]:
     from ..agent.tools import MySqlToolBox
 
     try:
+        # from_env() 现在共享进程内的连接池（见 repository.shared_engine），
+        # 每次重建仍新建 MySqlToolBox：它的 degraded 列表是「这一次查询」的降级记录，
+        # 复用同一个对象会让它越积越多，而且迁移补跑之后也清不掉
         box = MySqlToolBox.from_env()
         items = []
         # 列表从表里查，不写死 ID——写死的话，上新商品要改代码，
@@ -185,6 +187,76 @@ async def products() -> dict[str, Any]:
                 "detail": detail[:400]}
 
 
+
+_catalog_cache = None
+
+
+def get_catalog_cache():
+    """惰性建缓存。读 ``CATALOG_CACHE_TTL`` 等环境变量，所以不能在 import 时建。"""
+    global _catalog_cache
+    if _catalog_cache is None:
+        from ..catalog_cache import CatalogCache
+
+        # 用 lambda 而不是直接传函数：测试替换 _build_catalog_payload 时要能生效
+        _catalog_cache = CatalogCache(lambda: _build_catalog_payload())
+    return _catalog_cache
+
+
+def reset_catalog_cache() -> None:
+    """丢掉缓存实例。测试之间、或配置在运行中被改动后调用。"""
+    global _catalog_cache
+    _catalog_cache = None
+
+
+def invalidate_catalog() -> None:
+    """库存/价格变了（比如刚成功下了一单）。下一次读取一定重建。"""
+    if _catalog_cache is not None:
+        _catalog_cache.invalidate()
+
+
+@router.get("/api/products", summary="商品列表")
+async def products(request: Request) -> Response:
+    """店铺首页的商品数据。
+
+    **三件事，都是压测量出来的**（原先吞吐固定 5.2 req/s，并发 30 时 p99 14 秒）：
+
+    1. **不占事件循环。** 原来是 ``async def`` 里直接跑同步的数据库查询，一个请求
+       的 ~190ms 里整个进程的其它请求（含 ``/health``）全部排队——并发 30 时
+       ``/health`` 最大等了 13 秒。现在查询丢进线程池。
+    2. **缓存 + 单飞。** 数据变得慢、读得快，见 :mod:`app.catalog_cache`
+       （含页面与客服之间的一致性取舍）。
+    3. **ETag 与 gzip。** 490KB 压到约 40KB；数据没变时浏览器直接 304。
+    """
+    from starlette.concurrency import run_in_threadpool
+
+    from smartmall_pipeline.repository import dsn_from_env
+
+    # 键用连库 DSN：配置变了（测试里常这么干，运维也会）旧缓存就不作数
+    snap = await run_in_threadpool(get_catalog_cache().get, dsn_from_env())
+
+    if not snap.ok:
+        # 失败不给 ETag、不让任何一层缓存留下它，只是把原因照常告诉前端
+        return Response(snap.body, media_type="application/json",
+                        headers={"Cache-Control": "no-store"})
+
+    headers = {
+        "ETag": snap.etag,
+        # no-cache 不是"不缓存"，是"每次用之前先问一声"：浏览器带着 If-None-Match
+        # 来，没变就 304。要的正是这个——数据永远不会比服务端缓存更旧
+        "Cache-Control": "no-cache",
+        "Vary": "Accept-Encoding",
+    }
+    from ..catalog_cache import etag_matches
+
+    if etag_matches(request.headers.get("if-none-match"), snap.etag):
+        return Response(status_code=304, headers=headers)
+
+    if "gzip" in request.headers.get("accept-encoding", "").lower():
+        return Response(snap.gz, media_type="application/json",
+                        headers={**headers, "Content-Encoding": "gzip"})
+    return Response(snap.body, media_type="application/json", headers=headers)
+
+
 #: 订单号白名单。转发时它会被拼进下游 URL，不校验就等于把路径拼接权
 #: 交给调用方（`../../actuator/env` 之类）。合法订单号只有「20 位数字」
 #: 这一种形状——与 OrderService.nextOrderNo 的生成规则对齐
@@ -228,13 +300,21 @@ async def _forward(method: str, path: str, *,
         }
 
     try:
-        return resp.json()
+        body = resp.json()
     except ValueError:
         return {
             "code": 9503,
             "message": f"订单服务返回了非 JSON 响应（HTTP {resp.status_code}）",
             "data": None,
         }
+
+    # 写操作成功 = 库存/订单状态可能变了。立刻作废商品列表缓存，用户自己刚买完，
+    # 页面上的库存马上就得是新的（缓存的一致性取舍见 catalog_cache 模块注释）。
+    # 只在写成功时作废：失败的请求没有改变任何东西，作废了只是白白多一次重建
+    if (method.upper() != "GET" and isinstance(body, dict)
+            and body.get("code") == 0):
+        invalidate_catalog()
+    return body
 
 
 #: 用户侧转发。**身份不再作为参数出现在这一层**——它曾经是 ?user_id=，

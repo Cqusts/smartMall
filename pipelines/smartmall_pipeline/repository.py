@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Sequence
 
 from .models import Dialogue, KnowledgeItem, SftSample, Turn
+
+
+def dsn_from_env() -> str:
+    """应用当前会用的连库 DSN。缓存要把它当键用——配置变了，旧缓存就不作数。"""
+    return _dsn_from_env()
 
 
 def _dsn_from_env() -> str:
@@ -33,18 +39,83 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+#: 进程内的 Engine 注册表：同一个 DSN 只建一个 Engine，也就是**只有一个连接池**。
+_ENGINES: dict[str, Any] = {}
+_ENGINES_LOCK = threading.Lock()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def shared_engine(dsn: str):
+    """同一个 DSN 在进程里只建一个 Engine。
+
+    **为什么要共享。** 原先每个 ``from_env()`` 都 ``create_engine`` 一次，而 Engine
+    就是连接池——于是调用方有多少个，进程里就有多少个池子。实测两处后果：
+
+    · ``/api/products`` 每个请求都 ``MySqlToolBox.from_env()``，每请求新建一个池子、
+      一条新连接（TCP + 认证握手），用完丢掉。压测里 MySQL 的 ``Connections`` 计数
+      正好是**每请求 +1**，单请求耗时 209ms，复用连接只要 113ms。
+    · 客服服务的装配（``build_deps``）里轨迹、工具、素材、任务、检索……各自
+      ``from_env()`` 一次，至少五个互相独立的池子，每个默认 5+10 个连接。
+      副本数一多，连接数是相乘的，而 MySQL 的 ``max_connections`` 只有 300。
+
+    Engine 本身线程安全，共享是 SQLAlchemy 的标准用法。
+
+    池参数可由环境变量调：``MYSQL_POOL_SIZE``（默认 10）、``MYSQL_MAX_OVERFLOW``
+    （默认 10）、``MYSQL_POOL_RECYCLE``（默认 1800 秒，要小于服务端 wait_timeout，
+    否则会拿到被服务端单方面关掉的连接；``pool_pre_ping`` 是第二道保险）。
+    """
+    with _ENGINES_LOCK:
+        engine = _ENGINES.get(dsn)
+        if engine is None:
+            from sqlalchemy import create_engine
+
+            engine = create_engine(
+                dsn,
+                pool_pre_ping=True,
+                pool_size=_env_int("MYSQL_POOL_SIZE", 10),
+                max_overflow=_env_int("MYSQL_MAX_OVERFLOW", 10),
+                pool_recycle=_env_int("MYSQL_POOL_RECYCLE", 1800),
+                future=True,
+            )
+            _ENGINES[dsn] = engine
+        return engine
+
+
+def dispose_shared_engines() -> None:
+    """关掉并清空所有共享 Engine。进程退出前或测试之间调用。"""
+    with _ENGINES_LOCK:
+        engines = list(_ENGINES.values())
+        _ENGINES.clear()
+    for engine in engines:
+        engine.dispose()
+
+
 @dataclass
 class _Base:
     dsn: str
+    shared: bool = False
+    """True 时复用进程内同 DSN 的 Engine（见 :func:`shared_engine`）。
+    ``from_env()`` 走这条；直接 ``Repository(dsn=...)`` 保持原样各建各的——
+    测试里的 ``sqlite://`` 内存库要靠"每个实例一个库"来互相隔离，共享了就串了。"""
 
     def __post_init__(self) -> None:
+        if self.shared:
+            self.engine = shared_engine(self.dsn)
+            return
+
         from sqlalchemy import create_engine
 
         self.engine = create_engine(self.dsn, pool_pre_ping=True, future=True)
 
     @classmethod
     def from_env(cls):
-        return cls(dsn=_dsn_from_env())
+        return cls(dsn=_dsn_from_env(), shared=True)
 
 
 class OdsRepository(_Base):
