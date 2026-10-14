@@ -24,7 +24,6 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
-import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * 下单。
@@ -48,18 +47,19 @@ public class OrderService {
 
     private static final Logger log = LoggerFactory.getLogger(OrderService.class);
 
-    private static final DateTimeFormatter ORDER_NO_TIME =
-            DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
-
     /** 物流节点的时间格式。与 004 种子数据一致，客服会照着念给用户听。 */
     private static final DateTimeFormatter TRACK_TIME =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    /** 订单号碰撞时整事务重试的上限。见 {@link #place}。 */
+    private static final int MAX_PLACE_ATTEMPTS = 3;
+
     private final MallOrderMapper orderMapper;
     private final SkuMapper skuMapper;
     private final TransactionTemplate tx;
+    private final OrderNoGenerator orderNos;
 
     /**
      * 库存预占时长。**单一事实来源**——出参里的 expiresAt 与超时回收任务
@@ -71,11 +71,13 @@ public class OrderService {
     private final int releaseBatchSize;
 
     public OrderService(MallOrderMapper orderMapper, SkuMapper skuMapper, TransactionTemplate tx,
+                        OrderNoGenerator orderNos,
                         @Value("${smartmall.order.payment-ttl:PT30M}") Duration paymentTtl,
                         @Value("${smartmall.order.release-expired.batch-size:200}") int releaseBatchSize) {
         this.orderMapper = orderMapper;
         this.skuMapper = skuMapper;
         this.tx = tx;
+        this.orderNos = orderNos;
         this.paymentTtl = paymentTtl;
         this.releaseBatchSize = releaseBatchSize;
     }
@@ -103,22 +105,52 @@ public class OrderService {
             return OrderView.of(hit, true, paymentTtl);
         }
 
-        try {
-            MallOrder created = tx.execute(status -> doPlace(req, userId));
-            return OrderView.of(created, false, paymentTtl);
-        } catch (DuplicateKeyException e) {
-            // 慢路径：两个同 request_id 的请求并发，快路径都没命中。
-            // 到这里事务已经回滚，扣掉的库存跟着回滚了，回查赢家返回即可。
-            MallOrder winner = orderMapper.findByRequestId(req.requestId());
-            if (winner == null) {
-                // 撞的不是 request_id，是别的唯一键（order_no 碰撞）。
-                // 不能当幂等吞掉——那会把一个真实故障伪装成成功
-                throw e;
+        for (int attempt = 1; ; attempt++) {
+            try {
+                MallOrder created = tx.execute(status -> doPlace(req, userId));
+                return OrderView.of(created, false, paymentTtl);
+            } catch (DuplicateKeyException e) {
+                // 慢路径：两个同 request_id 的请求并发，快路径都没命中。
+                // 到这里事务已经回滚，扣掉的库存跟着回滚了，回查赢家返回即可。
+                MallOrder winner = orderMapper.findByRequestId(req.requestId());
+                if (winner != null) {
+                    log.info("幂等命中（慢路径·并发） requestId={} orderNo={}",
+                            req.requestId(), winner.getOrderNo());
+                    return OrderView.of(winner, true, paymentTtl);
+                }
+
+                // 撞的不是 request_id。是订单号碰撞就整笔重来：事务已经完整回滚
+                // （库存吐回、订单没插进去），换一个新订单号再走一遍与第一次没有区别。
+                // 不能当幂等吞掉——那会把一个真实故障伪装成成功；也不能直接 500——
+                // 那是把一次本可以悄悄重试掉的碰撞甩给用户。
+                if (!isOrderNoCollision(e) || attempt >= MAX_PLACE_ATTEMPTS) {
+                    throw e;
+                }
+                log.warn("订单号碰撞，整笔重试（第 {}/{} 次） requestId={}",
+                        attempt, MAX_PLACE_ATTEMPTS, req.requestId());
             }
-            log.info("幂等命中（慢路径·并发） requestId={} orderNo={}",
-                    req.requestId(), winner.getOrderNo());
-            return OrderView.of(winner, true, paymentTtl);
         }
+    }
+
+    /**
+     * 这次唯一键冲突是不是 {@code uk_order_no}。
+     *
+     * <p>按索引名匹配而不是"任何 DuplicateKeyException 都重试"：别的唯一键冲突
+     * （将来加的）重试三次只会撞三次，白白多占三轮行锁。MySQL 的报错形如
+     * {@code Duplicate entry '…' for key 'mall_order.uk_order_no'}，H2 的消息里
+     * 也带索引名，两边都能匹配。
+     */
+    static boolean isOrderNoCollision(Throwable e) {
+        for (Throwable c = e; c != null; c = c.getCause()) {
+            String m = c.getMessage();
+            if (m != null && m.toLowerCase(java.util.Locale.ROOT).contains("uk_order_no")) {
+                return true;
+            }
+            if (c.getCause() == c) {
+                break;
+            }
+        }
+        return false;
     }
 
     /** 事务体：扣库存 → 建单。两步任一失败，整笔回滚。 */
@@ -147,7 +179,7 @@ public class OrderService {
         }
 
         MallOrder order = new MallOrder();
-        order.setOrderNo(nextOrderNo());
+        order.setOrderNo(orderNos.next());
         order.setRequestId(req.requestId());
         order.setUserId(userId);
         order.setProductId(sku.getProductId());
@@ -543,8 +575,4 @@ public class OrderService {
      * 真撞了也不会写坏数据——{@code uk_order_no} 会拦住，调用方收到
      * DuplicateKeyException 且 request_id 回查为空，走重新抛出的分支。
      */
-    private String nextOrderNo() {
-        return LocalDateTime.now().format(ORDER_NO_TIME)
-                + String.format("%06d", ThreadLocalRandom.current().nextInt(1_000_000));
-    }
 }
