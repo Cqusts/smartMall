@@ -13,7 +13,12 @@
 对比 128MB 与 1GB 时请带上它，并用 ``SET GLOBAL innodb_buffer_pool_size = ...`` 在线切换。
 
 ``verify`` 的环境变量：``INS_RATE``（每个写入线程每秒几条，默认 12，8 个线程合计约 100 条/秒，
-接近这个项目真实的对话峰值；调大看极限）。
+接近这个项目真实的对话峰值；调大看极限）；``ARCHIVE_EXTRA_ARGS``（追加给 archive-traces 的参数，
+比如 ``"--batch-size 500 --sleep 0.1"``）。
+
+**看尾延迟，别只看中位数：**归档期间线上插入的 p50 几乎不变，p99/max 才会暴露 redo 日志太小
+（默认 100MB）导致的刷盘停顿。``Innodb_log_waits`` 看不出来——它统计的是 log buffer 等待，
+不是 checkpoint 压力；这里直接打印归档产生的 redo 量。
 """
 from __future__ import annotations
 
@@ -195,10 +200,14 @@ def cmd_verify() -> None:
     [t.start() for t in ths]
     e = {**os.environ, "MYSQL_HOST": env.host(), "MYSQL_PORT": str(env.port()), "MYSQL_USER": user,
          "MYSQL_PASSWORD": password, "MYSQL_DATABASE": DB, "PYTHONPATH": str(ROOT / "pipelines")}
+    redo0 = int(scalar("SHOW GLOBAL STATUS LIKE 'Innodb_os_log_written'")[1])
     t0 = time.perf_counter()
-    out = subprocess.run([sys.executable, "-m", "smartmall_pipeline.cli", "archive-traces", "--older-than-days", "90"],
+    extra = os.environ.get("ARCHIVE_EXTRA_ARGS", "").split()
+    out = subprocess.run([sys.executable, "-m", "smartmall_pipeline.cli", "archive-traces", "--older-than-days", "90", *extra],
                          env=e, capture_output=True, text=True, cwd=ROOT / "pipelines")
     dur = time.perf_counter() - t0
+    redo = (int(scalar("SHOW GLOBAL STATUS LIKE 'Innodb_os_log_written'")[1]) - redo0) / 1048576
+    cap = scalar("SELECT @@innodb_redo_log_capacity") / 1048576
     stop.set(); [t.join() for t in ths]
     print("归档命令输出：")
     for ln in out.stdout.replace("\r", "\n").splitlines():
@@ -207,6 +216,7 @@ def cmd_verify() -> None:
     if out.returncode:
         print("归档命令失败：", out.stderr[-800:])
     ins_lat.sort()
+    print(f"归档产生 redo {redo:,.0f}MB（{redo / dur:.0f}MB/s），redo 容量 {cap:,.0f}MB——每 {cap / max(redo / dur, 1e-9):.1f}s 写满一圈")
     print(f"归档用时 {dur:.1f}s；期间线上单行插入 {len(ins_lat) / dur:.0f}/s，p50 {ins_lat[len(ins_lat) // 2] * 1000:.2f}ms "
           f"p99 {ins_lat[int(len(ins_lat) * .99)] * 1000:.1f}ms max {ins_lat[-1] * 1000:.0f}ms")
 
