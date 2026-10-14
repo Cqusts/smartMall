@@ -168,8 +168,21 @@ async def reload_stats() -> Any:
     """
     from starlette.concurrency import run_in_threadpool
 
+    def reload() -> int:
+        svc = get_service()
+        # 重新索引之后调的就是这个口子，顺手把新数据 flush 成带索引的 segment：
+        # 没 flush 的数据检索走慢速扫描（见 MilvusIndex.flush 的实测数字）。
+        # flush 失败不该挡住 IDF 表的刷新——两件事互不依赖
+        try:
+            svc.store.flush()
+        except Exception:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).warning("reload 时 flush 失败，继续重建 IDF 表", exc_info=True)
+        return svc.refresh_stats()
+
     try:
-        n = await run_in_threadpool(lambda: get_service().refresh_stats())
+        n = await run_in_threadpool(reload)
     except SearchError as exc:
         return _fail(ErrorCode.DEPENDENCY_UNAVAILABLE, str(exc), 503)
     return ApiResponse.ok({"documents": n}).model_dump(mode="json", by_alias=True)

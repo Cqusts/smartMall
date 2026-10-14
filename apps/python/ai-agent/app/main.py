@@ -29,10 +29,19 @@ app.include_router(chat.router)
 app.include_router(media.router)
 app.include_router(ws.router)
 
-reg.register("litellm", http_check(f"{s.litellm_base_url}/health/liveliness"))
-reg.register("ai-rag", http_check(f"{s.rag_base_url}/health"))
-reg.register("redis", tcp_check(s.redis_host, s.redis_port))
-reg.register("kafka", kafka_check(s.kafka_bootstrap_servers), required=False)
+
+
+def register_dependencies(reg, s) -> None:
+    reg.register("litellm", http_check(f"{s.litellm_base_url}/health/liveliness"))
+    # ai-rag 只有走 http 后端时才是必需依赖。local 后端根本不调它，
+    # 它挂了不该让 ai-agent 的 /ready 变红、被编排系统摘掉流量
+    reg.register("ai-rag", http_check(f"{s.rag_base_url}/health"),
+                 required=(s.retriever_backend == "http"))
+    reg.register("redis", tcp_check(s.redis_host, s.redis_port))
+    reg.register("kafka", kafka_check(s.kafka_bootstrap_servers), required=False)
+
+
+register_dependencies(reg, s)
 
 
 @app.get("/info", tags=["ops"], summary="服务能力声明")
@@ -46,4 +55,6 @@ async def info():
                          "marketing", "sales_kpi_judge"],
         "implemented": ["customer_service", "shopping_guide", "knowledge_ops",
                         "marketing"],
+        # 对话检索走哪条路。运维一眼看出生产是不是真的在用 Milvus
+        "retriever": settings.retriever_backend,
     }

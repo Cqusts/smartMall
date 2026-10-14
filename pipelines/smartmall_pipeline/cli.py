@@ -1259,8 +1259,18 @@ def cmd_index(args: argparse.Namespace) -> int:
     if milvus is not None:
         # 报 collection 的实际条数，不报"我以为写了多少"——
         # 写入报错被吞掉的情况下，这两个数会对不上
-        print(f"  Milvus collection 现有 {milvus.count()} 条")
+        print(f"  Milvus collection 现有 {_finalize_milvus_index(milvus)} 条")
     return 0
+
+
+def _finalize_milvus_index(milvus: Any) -> int:
+    """批量写入收尾：先 flush 让新数据建上索引，再返回 collection 实际条数。
+
+    顺序有讲究：先 flush 再 count。flush 之前写进去的数据在 growing segment 里，
+    没有索引，检索是慢速扫描（见 ``MilvusIndex.flush`` 的实测数字）。
+    """
+    milvus.flush()
+    return milvus.count()
 
 
 def _milvus_row(

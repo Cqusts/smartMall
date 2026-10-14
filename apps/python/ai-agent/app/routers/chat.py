@@ -113,10 +113,16 @@ def get_deps() -> Deps:
         with _deps_lock:
             if _deps is None:
                 from ..agent.assembly import build_deps
+                from ..config import settings
 
+                # 检索后端由配置决定，见 Settings.retriever_backend。
+                # 原先这里不传 rag_url，服务端于是永远走本地暴力检索
+                rag_url = (settings.rag_base_url
+                           if settings.retriever_backend == "http" else None)
                 # with_media=True：商家后台的素材生成走这一份 Deps。
                 # 装不上（没 key、没建表）也不影响对话——那两个组件只是留空
-                _deps = build_deps(with_media=True, log=lambda m: None)
+                _deps = build_deps(with_media=True, rag_url=rag_url,
+                                   log=lambda m: None)
     return _deps
 
 

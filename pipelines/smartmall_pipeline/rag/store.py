@@ -15,8 +15,11 @@
 
 from __future__ import annotations
 
+import os
 import struct
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -366,6 +369,91 @@ class LocalVectorStore:
         return list(seen.values())
 
 
+class QueryVectorCache:
+    """查询向量的 LRU 缓存。
+
+    **为什么缓存的是向量化而不是检索结果。**在线检索每个用户问题都要调一次向量化
+    API（几十到一百多毫秒的网络往返，还要花钱），而客服场景里问题高度重复——
+    "能退货吗""发货多久""有发票吗"每天被问成百上千遍。向量化是确定性的：同一个
+    模型、同一句话，向量永远一样，所以缓存它没有任何一致性代价。
+    检索结果就不行了——它依赖知识库当前内容，缓存会让新审核的知识迟迟查不到。
+
+    **存的是紧凑二进制（4KB/条），不是 Python 的 list[float]。**后者每条约 33KB
+    （每个 float 一个 28 字节的对象加 8 字节指针）：4096 条要 135MB，换成 4KB 的
+    二进制是 16MB。命中时解包一次约 20µs，比一次网络往返小三个数量级。
+
+    键里带 provider 名与维度：换模型必须换键。不同模型的向量不可比，
+    拿旧模型缓存的向量去查新模型建的索引，相似度就失去意义了，而且不报任何错。
+    """
+
+    def __init__(self, maxsize: int) -> None:
+        self.maxsize = maxsize
+        self._data: OrderedDict[tuple, bytes] = OrderedDict()
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: tuple) -> list[float] | None:
+        with self._lock:
+            blob = self._data.get(key)
+            if blob is None:
+                self.misses += 1
+                return None
+            self._data.move_to_end(key)
+            self.hits += 1
+        return unpack_vector(blob)
+
+    def put(self, key: tuple, vec: Sequence[float]) -> list[float]:
+        """写入，并**返回按 float32 舍入后的向量**。
+
+        第一次（未命中）与之后（命中）必须拿到完全相同的向量。存储是 float32，
+        命中时解包出来的是舍入后的值；要是未命中时返回原始 float64，同一句话的
+        第一次与第二次检索分数会在第 8 位小数上不同——差得极小，但"同一输入两次
+        结果不一样"是调阈值时最难复现的一类问题。索引里的向量本来就是 float32，
+        查询侧舍入到同样精度没有任何损失。
+        """
+        blob = pack_vector(vec)
+        with self._lock:
+            self._data[key] = blob
+            self._data.move_to_end(key)
+            while len(self._data) > self.maxsize:
+                self._data.popitem(last=False)
+        return unpack_vector(blob)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+            self.hits = self.misses = 0
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
+_QUERY_CACHE: QueryVectorCache | None = None
+_QUERY_CACHE_LOCK = threading.Lock()
+
+
+def query_cache() -> QueryVectorCache:
+    """进程内唯一的查询向量缓存。大小读 ``EMBED_QUERY_CACHE_SIZE``（默认 4096，0 = 关闭）。"""
+    global _QUERY_CACHE
+    if _QUERY_CACHE is None:
+        with _QUERY_CACHE_LOCK:
+            if _QUERY_CACHE is None:
+                try:
+                    size = int(os.environ.get("EMBED_QUERY_CACHE_SIZE", "4096"))
+                except ValueError:
+                    size = 4096
+                _QUERY_CACHE = QueryVectorCache(max(0, size))
+    return _QUERY_CACHE
+
+
+def reset_query_cache() -> None:
+    """丢掉缓存实例（连同大小配置）。测试之间调用。"""
+    global _QUERY_CACHE
+    with _QUERY_CACHE_LOCK:
+        _QUERY_CACHE = None
+
+
 def embed_query(provider: EmbeddingProvider, query: str) -> list[float]:
     """把查询转成向量。
 
@@ -373,7 +461,17 @@ def embed_query(provider: EmbeddingProvider, query: str) -> list[float]:
     Qwen3-Embedding 这类非对称模型对"待检索的问题"和"库里的文档"
     产出不同的向量，用错一侧会白白损失召回。
     不支持的实现（如 bge-m3 dense）退回 ``embed``，行为与从前一致。
+
+    结果按 ``(provider 名, 维度, 原文)`` 缓存，见 :class:`QueryVectorCache`。
+    失败不缓存——异常在写缓存之前就抛出去了。
     """
+    cache = query_cache()
+    key = (getattr(provider, "name", ""), getattr(provider, "dim", DIM), query)
+    if cache.maxsize > 0:
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+
     fn = getattr(provider, "embed_query", None)
     vec = [fn(query)] if callable(fn) else provider.embed([query])
 
@@ -388,4 +486,6 @@ def embed_query(provider: EmbeddingProvider, query: str) -> list[float]:
         raise RuntimeError(
             f"{getattr(provider, 'name', provider)} 声明 dim={want}，"
             f"实际返回 {got} 维")
+    if cache.maxsize > 0:
+        return cache.put(key, vec[0])
     return vec[0]

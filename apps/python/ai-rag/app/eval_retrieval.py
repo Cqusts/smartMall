@@ -109,6 +109,8 @@ def index_corpus(
         }
         for d, t, v in zip(corpus, texts, vecs)
     ])
+    # 评测要量的是"建好索引之后"的检索质量与耗时，不是 growing segment 上的慢速扫描
+    store.flush()
     return len(corpus)
 
 

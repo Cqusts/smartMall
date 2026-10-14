@@ -178,7 +178,12 @@ services:
     build: { context: ../apps/python, dockerfile: ai-agent/Dockerfile }
     container_name: sm-ai-agent
     restart: unless-stopped
-    environment: *python-env
+    environment:
+      <<: *python-env
+      # 对话检索走 ai-rag（Milvus HNSW + 原生 BM25），不是进程内暴力检索。
+      # 不设的话默认是 local：compose 里的 ai-rag 与 Milvus 虽然起着，
+      # 却不在对话的查询链路上
+      RETRIEVER_BACKEND: http
     ports: ["9002:9002"]
     networks: [smartmall]
 

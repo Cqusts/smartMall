@@ -12,6 +12,7 @@ Agent 不该知道知识存在 Milvus 还是 MySQL 里。定义一个窄协议�
 
 from __future__ import annotations
 
+import threading
 from typing import Protocol, Sequence, runtime_checkable
 
 from .state import Citation
@@ -103,11 +104,42 @@ class LocalRetriever:
 
 
 class HttpRetriever:
-    """调 ai-rag 服务。生产路径，带 rerank。"""
+    """调 ai-rag 服务。生产路径，带 rerank。
+
+    **复用同一个 httpx.Client。**原先每次检索 ``httpx.post(...)``，等于每个用户问题
+    都新建一条到 ai-rag 的 TCP 连接——对话链路上最频繁的一次内部调用，白白多付一次握手。
+    httpx.Client 线程安全，对话线程池里的各个线程共用它。
+
+    连接超时单独设短（3 秒）：ai-rag 没起来时应该很快失败并转人工，
+    而不是让用户干等整个读超时。
+    """
 
     def __init__(self, base_url: str, timeout: float = 10.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self._client = None
+        self._client_lock = threading.Lock()
+
+    def _http(self):
+        client = self._client
+        if client is None:
+            with self._client_lock:
+                if self._client is None:
+                    import httpx
+
+                    self._client = httpx.Client(
+                        timeout=httpx.Timeout(self.timeout, connect=min(3.0, self.timeout)),
+                        limits=httpx.Limits(max_connections=100,
+                                            max_keepalive_connections=32),
+                    )
+                client = self._client
+        return client
+
+    def close(self) -> None:
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            client.close()
 
     def search(
         self,
@@ -125,10 +157,14 @@ class HttpRetriever:
         if category_id:
             payload["category_id"] = category_id
 
+        url = f"{self.base_url}/search"
         try:
-            resp = httpx.post(
-                f"{self.base_url}/search", json=payload, timeout=self.timeout
-            )
+            try:
+                resp = self._http().post(url, json=payload)
+            except (httpx.RemoteProtocolError, httpx.ReadError):
+                # 复用的长连接被对端悄悄关了；检索是只读的，换条新连接重试一次安全。
+                # 超时不重试——那会把用户的等待翻倍
+                resp = self._http().post(url, json=payload)
         except Exception as exc:  # noqa: BLE001
             raise RetrievalError(
                 f"无法连接 ai-rag {self.base_url}：{type(exc).__name__}"

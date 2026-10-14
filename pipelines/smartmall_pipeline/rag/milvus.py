@@ -236,6 +236,27 @@ class MilvusIndex:
         res = self.client.upsert(collection_name=self.cfg.collection, data=data)
         return int(res.get("upsert_count", len(data)))
 
+    def flush(self) -> None:
+        """批量写入之后调一次：封存 growing segment、触发索引构建。
+
+        **不调的话，刚写进去的数据没有索引，检索走的是慢速扫描。**实测 Milvus Lite
+        5000 条：写完不 flush，dense 572ms + sparse 765ms；flush 之后 40ms + 21ms，
+        差 15–30 倍。而且这个坑的形状很阴——数据量大到自动封存时（实测约 2 万条）
+        它自己就好了，所以**小规模反而更慢**：
+
+            条数      本地暴力检索    Milvus（不 flush）    Milvus（flush 后）
+            728          31 ms         152 ms               28 ms
+            5000        226 ms        1468 ms               53 ms
+            20000       919 ms          56 ms               55 ms
+
+        也就是说只做"让对话走 Milvus"的接线而不修这一处，上线后在几千条规模下会比
+        进程内暴力检索**慢 6 倍**，而且没有任何报错。
+
+        只在批量加载结束后调，不要每批都调——flush 本身有开销（5000 条约 1.2 秒），
+        每批 flush 会产生一堆小 segment。
+        """
+        self.client.flush(self.cfg.collection)
+
     def delete_by_item(self, item_ids: Sequence[int]) -> None:
         """按 knowledge_item 删除其全部切片。知识下线或重新切分时用。"""
         if not item_ids:

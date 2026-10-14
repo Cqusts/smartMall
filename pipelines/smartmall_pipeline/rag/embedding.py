@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from typing import Protocol, Sequence, runtime_checkable
 
 DIM = 1024
@@ -134,6 +135,8 @@ class DashScopeEmbedding:
             "EMBEDDING_QUERY_INSTRUCT"
         )
         self.timeout = timeout
+        self._client = None
+        self._client_lock = threading.Lock()
 
         if not self.api_key:
             raise EmbeddingError(
@@ -190,41 +193,78 @@ class DashScopeEmbedding:
             for item in sorted(data, key=lambda d: d.get(key, 0))
         ]
 
-    def _embed(self, texts: Sequence[str], *, text_type: str) -> list[list[float]]:
+    def _http(self):
+        """复用同一个 httpx.Client（线程安全）。
+
+        **原先每次调用都 ``with httpx.Client(...)`` 新建一个。**这在批量建索引时无所谓
+        （一次几十条），但在线检索每个用户问题都要向量化一次——于是每个问题都付一次
+        TCP + TLS 握手，对 HTTPS 的百炼来说往往比 embedding 计算本身还贵。
+        连接复用后，握手只在第一次付。
+
+        连接超时单独设短：百炼连不上时不该让用户干等整个读超时（默认 60 秒）。
+        """
+        client = self._client
+        if client is None:
+            with self._client_lock:
+                if self._client is None:
+                    import httpx
+
+                    self._client = httpx.Client(timeout=httpx.Timeout(
+                        self.timeout, connect=min(5.0, self.timeout)))
+                client = self._client
+        return client
+
+    def close(self) -> None:
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            client.close()
+
+    def _post(self, client, url: str, payload: dict):
+        """发一次请求。复用的长连接可能被对端（或中间的 NAT/负载均衡）悄悄关掉，
+        这时第一次发送会以 ``RemoteProtocolError`` / ``ReadError`` 失败——重试一次
+        就会换一条新连接。embedding 是幂等的，重试安全。
+
+        **只重试这两种。**超时不重试：重试会把用户的等待翻倍（60 秒读超时 ×2），
+        而且超时多半是对端真的慢，再发一次只是添乱。
+        """
         import httpx
 
+        kwargs = dict(headers={"Authorization": f"Bearer {self.api_key}"}, json=payload)
+        try:
+            return client.post(url, **kwargs)
+        except (httpx.RemoteProtocolError, httpx.ReadError):
+            return client.post(url, **kwargs)
+
+    def _embed(self, texts: Sequence[str], *, text_type: str) -> list[list[float]]:
         url = self.NATIVE_URL if self.native else f"{self.base_url}/embeddings"
         out: list[list[float]] = []
-        with httpx.Client(timeout=self.timeout) as client:
-            for i in range(0, len(texts), self.max_batch):
-                batch = list(texts[i : i + self.max_batch])
-                resp = client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json=self._payload(batch, text_type),
-                )
-                if resp.status_code != 200:
-                    detail = resp.text[:300]
-                    hint = ""
-                    if "batch size" in detail:
-                        hint = (
-                            f"\n  当前批次 {len(batch)} 条超过服务端上限，"
-                            f"用 --batch-size 调小（该模型上限 {self.max_batch}）"
-                        )
-                    elif resp.status_code in (401, 403):
-                        hint = (
-                            "\n  API Key 无效、未开通该模型，或该模型免费额度已用尽。"
-                            "\n  百炼的免费额度按模型独立发放：聊天模型用尽不影响向量模型，"
-                            "\n  反之亦然。到控制台确认这个模型自己的余额。"
-                            "\n  换模型：EMBEDDING_MODEL=text-embedding-v3"
-                            "\n  不想付费：--embedding local（本地 bge-m3）"
-                        )
-                    elif resp.status_code == 429:
-                        hint = "\n  触发限流，稍后重试；重跑会从断点继续"
-                    raise EmbeddingError(
-                        f"向量化失败 HTTP {resp.status_code}: {detail}{hint}"
+        client = self._http()
+        for i in range(0, len(texts), self.max_batch):
+            batch = list(texts[i : i + self.max_batch])
+            resp = self._post(client, url, self._payload(batch, text_type))
+            if resp.status_code != 200:
+                detail = resp.text[:300]
+                hint = ""
+                if "batch size" in detail:
+                    hint = (
+                        f"\n  当前批次 {len(batch)} 条超过服务端上限，"
+                        f"用 --batch-size 调小（该模型上限 {self.max_batch}）"
                     )
-                out.extend(self._vectors(resp.json(), len(batch)))
+                elif resp.status_code in (401, 403):
+                    hint = (
+                        "\n  API Key 无效、未开通该模型，或该模型免费额度已用尽。"
+                        "\n  百炼的免费额度按模型独立发放：聊天模型用尽不影响向量模型，"
+                        "\n  反之亦然。到控制台确认这个模型自己的余额。"
+                        "\n  换模型：EMBEDDING_MODEL=text-embedding-v3"
+                        "\n  不想付费：--embedding local（本地 bge-m3）"
+                    )
+                elif resp.status_code == 429:
+                    hint = "\n  触发限流，稍后重试；重跑会从断点继续"
+                raise EmbeddingError(
+                    f"向量化失败 HTTP {resp.status_code}: {detail}{hint}"
+                )
+            out.extend(self._vectors(resp.json(), len(batch)))
         return out
 
 
