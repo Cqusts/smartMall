@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 from typing import Any
 
@@ -15,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from ..agent import AgentState, SessionContext, safe_run_turn
 from ..agent.nodes import Deps
+from ..concurrency import run_blocking
 
 router = APIRouter(prefix="/chat", tags=["客服"])
 
@@ -29,7 +32,23 @@ class SessionStore:
     def __init__(self, ttl: float = 86400.0) -> None:
         self._data: dict[str, tuple[float, SessionContext]] = {}
         self._agent_state: dict[str, dict[str, Any]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self.ttl = ttl
+
+    def lock_for(self, session_id: str) -> asyncio.Lock:
+        """这个会话的串行锁。**同一个会话的两轮对话不能同时跑。**
+
+        一轮对话现在跑在工作线程里，会读写同一个 ``SessionContext``（历史、摘要、
+        转人工计数）。同一个用户连发两条、或者 REST 与 WebSocket 同时进来，
+        两个线程就会交错着改同一份历史——答案引用的是另一轮写到一半的上下文。
+        不同会话之间不受影响，照常并行。
+
+        只在事件循环线程里调用（和 ``get``/``touch`` 一样），所以字典本身不需要锁。
+        """
+        lock = self._locks.get(session_id)
+        if lock is None:
+            lock = self._locks[session_id] = asyncio.Lock()
+        return lock
 
     def get(self, session_id: str | None, **kw) -> SessionContext:
         now = time.time()
@@ -64,10 +83,13 @@ class SessionStore:
         for k in dead:
             self._data.pop(k, None)
             self._agent_state.pop(k, None)
+            # 锁跟着会话一起过期，否则每个来过的会话都在这里留一把锁
+            self._locks.pop(k, None)
 
 
 _sessions = SessionStore()
 _deps: Deps | None = None
+_deps_lock = threading.Lock()
 
 
 def get_deps() -> Deps:
@@ -80,14 +102,21 @@ def get_deps() -> Deps:
     这里曾经自己 new 了一个 AgentConfig()，于是服务端拿着网关别名
     chat-default 去调 DeepSeek，直接 400，最后表现成"答不上来"——
     装配逻辑重复一次就会漂移一次。
+
+    **要加锁，因为它现在会被多个线程同时首次调用。**装配很重——
+    ``LocalRetriever`` 要把整个知识库向量从 MySQL 读进内存、建 BM25 索引，
+    秒级、吃内存。冷启动时一批并发请求同时发现 ``_deps is None``，不加锁就是
+    每个线程各装配一份：N 份知识库向量同时驻留内存。
     """
     global _deps
     if _deps is None:
-        from ..agent.assembly import build_deps
+        with _deps_lock:
+            if _deps is None:
+                from ..agent.assembly import build_deps
 
-        # with_media=True：商家后台的素材生成走这一份 Deps。
-        # 装不上（没 key、没建表）也不影响对话——那两个组件只是留空
-        _deps = build_deps(with_media=True, log=lambda m: None)
+                # with_media=True：商家后台的素材生成走这一份 Deps。
+                # 装不上（没 key、没建表）也不影响对话——那两个组件只是留空
+                _deps = build_deps(with_media=True, log=lambda m: None)
     return _deps
 
 
@@ -117,6 +146,11 @@ class ChatResponse(BaseModel):
     postcheck_flags: list[str] = []
 
 
+def _run_turn(message: str, ctx: SessionContext):
+    """工作线程里跑的一轮。get_deps() 也在这里调——首次装配是阻塞的。"""
+    return safe_run_turn(message, AgentState(session=ctx), get_deps())
+
+
 @router.post("", response_model=ChatResponse, summary="发送一条消息")
 async def chat(req: ChatRequest) -> ChatResponse:
     ctx = _sessions.get(
@@ -129,7 +163,11 @@ async def chat(req: ChatRequest) -> ChatResponse:
     if req.product_id is not None:
         ctx.current_product_id = req.product_id
 
-    state = safe_run_turn(req.message, AgentState(session=ctx), get_deps())
+    # **整轮对话（含首次装配 get_deps）放进线程池。**原来这里是 async def 里直接同步
+    # 跑：一轮要几次 LLM 往返，几秒到十几秒，期间整个进程的其它请求全部排队。
+    # 按会话串行见 SessionStore.lock_for。
+    async with _sessions.lock_for(ctx.session_id):
+        state = await run_blocking(_run_turn, req.message, ctx)
     _sessions.touch(ctx)
 
     return ChatResponse(

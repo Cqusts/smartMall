@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from ..agent.state import AgentState
 from ..agent.streaming import stream_turn
+from ..concurrency import run_blocking, submit
 from ..config import settings
 from .chat import _sessions, get_deps
 
@@ -499,11 +500,14 @@ async def ws_chat(ws: WebSocket) -> None:
             if payload.get("product_id") is not None:
                 ctx.current_product_id = payload["product_id"]
 
-            if payload.get("agent") == "shopping":
-                await _pump_shopping(ws, loop, message, ctx)
-            else:
-                state = AgentState(session=ctx, image=image, image_mime=mime)
-                await _pump(ws, loop, message, state)
+            # 同一会话串行：同一个会话的 REST 与 WebSocket 若同时进来，
+            # 两个线程会交错着改同一份历史（见 SessionStore.lock_for）
+            async with _sessions.lock_for(ctx.session_id):
+                if payload.get("agent") == "shopping":
+                    await _pump_shopping(ws, loop, message, ctx)
+                else:
+                    state = AgentState(session=ctx, image=image, image_mime=mime)
+                    await _pump(ws, loop, message, state)
             _sessions.touch(ctx)
 
     except WebSocketDisconnect:
@@ -568,7 +572,9 @@ async def _relay(ws: WebSocket, loop: asyncio.AbstractEventLoop, events) -> None
         finally:
             loop.call_soon_threadsafe(q.put_nowait, done)
 
-    task = asyncio.create_task(asyncio.to_thread(_produce))
+    # 用对话专用线程池，不用 asyncio.to_thread：后者的上限是 min(32, 核数+4)，
+    # 4 核上只有 8 个——第 9 个在线用户要排队等别人整轮对话结束（见 app/concurrency.py）
+    task = asyncio.ensure_future(submit(_produce))
     while True:
         event = await q.get()
         if event is done:
@@ -614,9 +620,11 @@ async def _handle_feedback(ws: WebSocket, payload: dict[str, Any]) -> None:
     thumb = 1 if payload.get("thumb") == "up" else -1
     ok = False
     try:
-        ok = MySqlTraceStore.from_env().record_feedback(
-            trace_id, thumb, payload.get("reason", "")
-        )
+        # 一次 UPDATE，通常 1~2ms，但它是同步的数据库调用，库慢的时候会是秒级——
+        # 放在事件循环里就是整个进程跟着等
+        ok = await run_blocking(
+            lambda: MySqlTraceStore.from_env().record_feedback(
+                trace_id, thumb, payload.get("reason", "")))
     except Exception:  # noqa: BLE001  反馈失败不该影响对话
         ok = False
     await ws.send_json({"type": "feedback_ack", "trace_id": trace_id, "ok": ok})

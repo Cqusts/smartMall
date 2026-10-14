@@ -17,6 +17,7 @@ Milvus 负责它擅长的（HNSW 近邻、倒排 BM25、标量过滤下推），
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -110,6 +111,7 @@ class SearchService:
     """向量化后端，:func:`smartmall_pipeline.rag.build_provider` 产出。"""
     config: RetrievalConfig = field(default_factory=RetrievalConfig)
     stats: LexicalStats | None = None
+    _stats_lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
 
     # ------------------------------------------------------------ IDF 表
 
@@ -152,10 +154,17 @@ class SearchService:
         return self.stats.total
 
     def _ensure_stats(self) -> LexicalStats:
-        if self.stats is None:
-            self.refresh_stats()
-        assert self.stats is not None
-        return self.stats
+        """懒加载 IDF 表。**必须加锁**：检索现在跑在线程池里，服务刚起来的那一刻
+        会有一批请求同时发现 ``stats is None``——不加锁的话每个都去全量扫一遍
+        Milvus 语料（一次几秒），而且恰好发生在最忙的冷启动时刻。"""
+        stats = self.stats
+        if stats is None:
+            with self._stats_lock:
+                if self.stats is None:           # 排队期间别的线程已经建好了
+                    self.refresh_stats()
+                stats = self.stats
+        assert stats is not None
+        return stats
 
     # ------------------------------------------------------------ 检索
 

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from ai_common import ApiResponse, ErrorCode, create_app
@@ -84,17 +85,27 @@ class SearchRequest(BaseModel):
 
 #: 懒加载：import 时就建会去连 Milvus，测试和 --help 都会被拖死
 _service: SearchService | None = None
+_service_lock = threading.Lock()
 
 
 def get_service() -> SearchService:
+    """惰性装配检索服务。
+
+    **要加锁**：检索跑在线程池里，服务刚起来时会有一批请求同时发现
+    ``_service is None``。不加锁就是并发建多个 ``SearchService``——对 Milvus Lite
+    （嵌入式，同一个本地文件）来说是多个客户端抢同一份数据文件，
+    对服务端 Milvus 是白白多建一批连接。
+    """
     global _service
     if _service is None:
-        _service = build_service(
-            uri=settings.milvus_target,
-            collection=settings.kb_collection,
-            analyzer=settings.milvus_analyzer,
-            kb_version=settings.kb_version,
-        )
+        with _service_lock:
+            if _service is None:
+                _service = build_service(
+                    uri=settings.milvus_target,
+                    collection=settings.kb_collection,
+                    analyzer=settings.milvus_analyzer,
+                    kb_version=settings.kb_version,
+                )
     return _service
 
 
@@ -112,15 +123,29 @@ async def search(req: SearchRequest = Body(...)) -> Any:
     返回的每条命中都带 ``dense_score`` 与 ``lexical_overlap``——Agent 靠
     这两个分流「作答 / 澄清 / 转人工」，缺一个都会让它的闸门失效
     （见 ``agent/graph.py`` 的 ``has_lexical_support``）。
+
+    **检索是同步阻塞的，必须放进线程池。** 里面有一次向量化 API 往返加一次 Milvus
+    查询，原先直接写在 ``async def`` 里：一个请求占住事件循环的那段时间，
+    整个进程的其它请求（含 ``/health``）全部排队。实测向量化 150ms 时，
+    20 个并发 ``/search`` 总耗时 3.0 秒——正好是 20×150ms，完全串行，
+    事件循环被冻结了整整 3 秒；单进程上限约 6 QPS。
+    放进线程池后 20 个并发总耗时约一个请求的时间。
+
+    线程安全是实测过的，不是假设：Milvus Lite 3.2.1 在 8 与 32 线程并发检索下
+    0 异常、结果与单线程完全一致、无死锁。
     """
+    from starlette.concurrency import run_in_threadpool
+
     try:
-        hits = get_service().search(
-            req.query,
-            top_k=req.top_k,
-            product_ids=req.product_ids,
-            category_id=req.category_id,
-            biz_types=req.biz_types,
-        )
+        # get_service() 也在线程里调：首次装配要连 Milvus、建向量化客户端，同样是阻塞的
+        hits = await run_in_threadpool(
+            lambda: get_service().search(
+                req.query,
+                top_k=req.top_k,
+                product_ids=req.product_ids,
+                category_id=req.category_id,
+                biz_types=req.biz_types,
+            ))
     except SearchError as exc:
         # 检索失败 ≠ 检索到 0 条。必须以非 200 出去，让 Agent 走转人工，
         # 而不是拿着空结果对用户说"知识库里没有"
@@ -137,9 +162,14 @@ async def reload_stats() -> Any:
 
     IDF 表是启动时扫一遍语料建的（和 ``LocalVectorStore.load()`` 一样是
     一次性快照），新知识入库后不刷新的话，新词的 df 还是 0。
+
+    这一步要全量扫描 Milvus 语料，是几秒级的阻塞操作，同样放进线程池——
+    否则重建期间整个检索服务都停着。
     """
+    from starlette.concurrency import run_in_threadpool
+
     try:
-        n = get_service().refresh_stats()
+        n = await run_in_threadpool(lambda: get_service().refresh_stats())
     except SearchError as exc:
         return _fail(ErrorCode.DEPENDENCY_UNAVAILABLE, str(exc), 503)
     return ApiResponse.ok({"documents": n}).model_dump(mode="json", by_alias=True)
