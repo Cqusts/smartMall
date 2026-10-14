@@ -37,6 +37,8 @@ class ErrorCode(IntEnum):
     MODEL_TIMEOUT = 6504
     GPU_BUSY = 6429
     """GPU 独占任务排队中。详见 docs/14-infra.md 的分时调度。"""
+    AGENT_BUSY = 6529
+    """对话入口过载，已被准入控制快速拒绝（HTTP 503 + Retry-After）。不是故障，稍后重试即可。"""
     COMPLIANCE_REJECTED = 6422
     """输出未通过合规检查。"""
 
@@ -56,6 +58,7 @@ _MESSAGES: dict[int, str] = {
     ErrorCode.MODEL_UNAVAILABLE: "模型服务不可用",
     ErrorCode.MODEL_TIMEOUT: "模型调用超时",
     ErrorCode.GPU_BUSY: "GPU 任务排队中",
+    ErrorCode.AGENT_BUSY: "客服繁忙，请稍后重试",
     ErrorCode.COMPLIANCE_REJECTED: "内容未通过合规检查",
     ErrorCode.INTERNAL_ERROR: "系统内部错误",
     ErrorCode.DEPENDENCY_UNAVAILABLE: "下游依赖不可用",

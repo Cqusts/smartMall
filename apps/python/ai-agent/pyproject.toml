@@ -28,6 +28,8 @@ server = [
     "uvicorn[standard]>=0.32",
     "ai-common",
     "smartmall-pipeline",
+    # 对话限流的 Redis 后端。可选：没装时 CHAT_RATE_BACKEND=redis 会退回进程内限流
+    "redis>=5.2",
 ]
 dev = ["pytest>=8.3"]
 

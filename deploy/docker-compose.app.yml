@@ -184,6 +184,13 @@ services:
       # 不设的话默认是 local：compose 里的 ai-rag 与 Milvus 虽然起着，
       # 却不在对话的查询链路上
       RETRIEVER_BACKEND: http
+      # 对话限流计数放 Redis：多个 ai-agent 实例共用一份额度。Redis 不可用时自动退回
+      # 进程内限流（放行，不会停掉客服）。不设的话默认 memory，每个实例各记各的
+      CHAT_RATE_BACKEND: redis
+      # 前面有几层可信反向代理，且它们会往 X-Forwarded-For 末尾追加客户端地址。
+      # 0 = 不读该头、只用连接对端地址——直连 9002 时正确；但若实际走代理访问，
+      # 所有用户会共用代理那一个 IP 桶。设之前先确认代理确实追加了该头（见 app/ratelimit.py: client_ip）
+      CHAT_TRUST_PROXY_HOPS: ${CHAT_TRUST_PROXY_HOPS:-0}
     ports: ["9002:9002"]
     networks: [smartmall]
 

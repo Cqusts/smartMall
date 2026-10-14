@@ -33,10 +33,22 @@ def _lag_watcher(lags, n=80):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_executor():
+def _fresh_executor(monkeypatch):
+    """这个文件测的是"并行 / 串行 / 不卡事件循环"，不是过载保护。
+
+    所以把保护放开：同一会话 6 条消息同时进来是这里的测试输入，默认配置（每会话最多 2 个
+    在途）会合理地拒掉其中 4 条，那是 test_overload.py 的主题。
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "chat_session_max_pending", 1000)
+    monkeypatch.setattr(settings, "chat_rate_backend", "off")
+    monkeypatch.setattr(settings, "chat_max_waiting", 10_000)
+    chat_mod.reset_guard()
     concurrency.shutdown_chat_executor()
     yield
     concurrency.shutdown_chat_executor()
+    chat_mod.reset_guard()
 
 
 @pytest.fixture

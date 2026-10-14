@@ -1,3 +1,5 @@
 # ai-agent —— M0 运行时依赖（轻量，可直接安装验证）
 # 模型相关的重依赖见 requirements-ml.txt，按里程碑引入
 uvicorn[standard]>=0.32
+# 对话限流的 Redis 后端（CHAT_RATE_BACKEND=redis）。没装也能跑：退回进程内限流
+redis>=5.2

@@ -22,9 +22,10 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from ..agent.state import AgentState
 from ..agent.streaming import stream_turn
-from ..concurrency import run_blocking, submit
+from ..concurrency import submit
 from ..config import settings
-from .chat import _sessions, get_deps
+from ..overload import Overloaded, Slot
+from .chat import _sessions, get_deps, get_guard, rate_keys
 
 router = APIRouter(tags=["客服"])
 
@@ -490,6 +491,19 @@ async def ws_chat(ws: WebSocket) -> None:
             if not message and not image:
                 continue
 
+            guard = get_guard()
+            try:
+                # 限流在创建会话之前：被限流的消息不该往会话表里塞对象。
+                # 按**消息**限而不是按连接：一个连接可以发任意多条
+                ip, identity = rate_keys(ws, user_id=payload.get("user_id"),
+                                         session_id=payload.get("session_id"))
+                await guard.check_rate(ip=ip, identity=identity)
+            except Overloaded as exc:
+                # 只拒这一条，连接保持——用户稍后重发即可，断开重连反而多一次握手
+                await ws.send_json(exc.ws_event())
+                continue
+
+            created = not _sessions.has(payload.get("session_id"))
             ctx = _sessions.get(
                 payload.get("session_id"),
                 user_id=payload.get("user_id"),
@@ -500,14 +514,21 @@ async def ws_chat(ws: WebSocket) -> None:
             if payload.get("product_id") is not None:
                 ctx.current_product_id = payload["product_id"]
 
-            # 同一会话串行：同一个会话的 REST 与 WebSocket 若同时进来，
-            # 两个线程会交错着改同一份历史（见 SessionStore.lock_for）
-            async with _sessions.lock_for(ctx.session_id):
-                if payload.get("agent") == "shopping":
-                    await _pump_shopping(ws, loop, message, ctx)
-                else:
-                    state = AgentState(session=ctx, image=image, image_mime=mime)
-                    await _pump(ws, loop, message, state)
+            # 准入控制 + 同一会话串行：同一个会话的 REST 与 WebSocket 若同时进来，
+            # 两个线程会交错着改同一份历史（见 SessionStore.lock_for、ChatGuard.turn）
+            try:
+                async with guard.turn(ctx.session_id,
+                                      _sessions.lock_for(ctx.session_id)) as slot:
+                    if payload.get("agent") == "shopping":
+                        await _pump_shopping(ws, loop, message, ctx, slot)
+                    else:
+                        state = AgentState(session=ctx, image=image, image_mime=mime)
+                        await _pump(ws, loop, message, state, slot)
+            except Overloaded as exc:
+                if created:
+                    _sessions.discard(ctx.session_id)
+                await ws.send_json(exc.ws_event())
+                continue
             _sessions.touch(ctx)
 
     except WebSocketDisconnect:
@@ -551,7 +572,8 @@ def _decode_image(raw: Any) -> tuple[bytes | None, str]:
         return None, ""
 
 
-async def _relay(ws: WebSocket, loop: asyncio.AbstractEventLoop, events) -> None:
+async def _relay(ws: WebSocket, loop: asyncio.AbstractEventLoop, events,
+                 slot: Slot | None = None) -> None:
     """把同步生成器的事件搬到事件循环里发出去。
 
     生成器在线程里跑；每产出一个事件就 ``call_soon_threadsafe`` 塞进
@@ -574,7 +596,9 @@ async def _relay(ws: WebSocket, loop: asyncio.AbstractEventLoop, events) -> None
 
     # 用对话专用线程池，不用 asyncio.to_thread：后者的上限是 min(32, 核数+4)，
     # 4 核上只有 8 个——第 9 个在线用户要排队等别人整轮对话结束（见 app/concurrency.py）
-    task = asyncio.ensure_future(submit(_produce))
+    # 传了 slot 就用它提交：全局名额在**线程结束时**还，而不是协程退出时——
+    # 客户端中途断开会取消协程，但线程还在跑（见 app/overload.py）
+    task = asyncio.ensure_future(slot.submit(_produce) if slot else submit(_produce))
     while True:
         event = await q.get()
         if event is done:
@@ -584,13 +608,15 @@ async def _relay(ws: WebSocket, loop: asyncio.AbstractEventLoop, events) -> None
 
 
 async def _pump(
-    ws: WebSocket, loop: asyncio.AbstractEventLoop, message: str, state: AgentState
+    ws: WebSocket, loop: asyncio.AbstractEventLoop, message: str, state: AgentState,
+    slot: Slot | None = None,
 ) -> None:
-    await _relay(ws, loop, lambda: stream_turn(message, state, get_deps()))
+    await _relay(ws, loop, lambda: stream_turn(message, state, get_deps()), slot)
 
 
 async def _pump_shopping(
-    ws: WebSocket, loop: asyncio.AbstractEventLoop, message: str, ctx
+    ws: WebSocket, loop: asyncio.AbstractEventLoop, message: str, ctx,
+    slot: Slot | None = None,
 ) -> None:
     """导购一轮。
 
@@ -605,7 +631,7 @@ async def _pump_shopping(
         ctx, "shopping", lambda: ShoppingState(session=ctx)
     )
     await _relay(ws, loop,
-                 lambda: stream_shopping_turn(message, state, get_deps()))
+                 lambda: stream_shopping_turn(message, state, get_deps()), slot)
 
 
 async def _handle_feedback(ws: WebSocket, payload: dict[str, Any]) -> None:
@@ -622,7 +648,9 @@ async def _handle_feedback(ws: WebSocket, payload: dict[str, Any]) -> None:
     try:
         # 一次 UPDATE，通常 1~2ms，但它是同步的数据库调用，库慢的时候会是秒级——
         # 放在事件循环里就是整个进程跟着等
-        ok = await run_blocking(
+        # 不用对话线程池：它的线程全被整轮对话占着时（这正是过载的样子），
+        # 一次 1~2ms 的点赞也要排在几秒一轮的对话后面
+        ok = await asyncio.to_thread(
             lambda: MySqlTraceStore.from_env().record_feedback(
                 trace_id, thumb, payload.get("reason", "")))
     except Exception:  # noqa: BLE001  反馈失败不该影响对话

@@ -57,4 +57,7 @@ async def info():
                         "marketing"],
         # 对话检索走哪条路。运维一眼看出生产是不是真的在用 Milvus
         "retriever": settings.retriever_backend,
+        # 对话入口当前负载与累计拒绝数。active 长期顶满 max_active、rejected 在涨，
+        # 说明该扩容（或 CHAT_WORKERS 太小）；active 归不了零说明名额泄漏
+        "chat_load": chat.get_guard().snapshot(),
     }

@@ -30,5 +30,31 @@ class Settings(ServiceSettings):
     # 要么开 CORS 要么让用户改 host，都不如在这边转发一次省事
     order_base_url: str = "http://localhost:8081"
 
+    # ---- 对话入口的过载保护与限流（机制见 app/overload.py、app/ratelimit.py）----
+    # 全局同时在跑的轮数 = CHAT_WORKERS（线程数），见 app/concurrency.py
+    chat_max_waiting: int = 64
+    """等名额的队列长度。队满立刻拒绝。取线程数量级：队列里的请求至少要等一整轮
+    （几秒）才轮到，排得比"queue_timeout 内能服务的"更长，多出来的注定超时。"""
+    chat_queue_timeout: float = 8.0
+    """在队列里最多等多久（秒）。超过就拒绝——用户多半已经走了，再跑就是白花 LLM 的钱。"""
+    chat_session_max_pending: int = 2
+    """同一会话最多几个在途（含正在跑的）。2 = 一个在跑、一个在等。"""
+    chat_retry_after: int = 5
+    """过载时告诉客户端多少秒后重试（HTTP ``Retry-After``）。"""
+    chat_rate_backend: Literal["memory", "redis", "off"] = "memory"
+    """限流计数放哪。``memory`` 每个进程各记各的（N 实例即 N 倍上限）；
+    ``redis`` 所有实例共用，Redis 故障时自动退回 memory（fail-open）。"""
+    chat_rate_redis_timeout: float = 0.25
+    """限流访问 Redis 的超时（秒）。要短：它在每条消息的路径上。"""
+    chat_rate_ip_burst: float = 30
+    chat_rate_ip_per_min: float = 60
+    """每个 IP：突发 30 条，长期 60 条/分钟。宽松，因为一个出口 IP 后面可能是整个办公室。"""
+    chat_rate_identity_burst: float = 6
+    chat_rate_identity_per_min: float = 12
+    """每个用户（无 user_id 时按会话）：突发 6 条，长期 12 条/分钟。"""
+    chat_trust_proxy_hops: int = 0
+    """前面有几层可信反向代理。0 = 不读 ``X-Forwarded-For``，只用对端地址。
+    **站在代理后面必须设**，否则所有用户共用一个 IP 桶（见 ratelimit.client_ip）。"""
+
 
 settings = Settings()

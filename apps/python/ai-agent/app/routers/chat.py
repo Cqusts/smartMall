@@ -8,18 +8,24 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from typing import Any
 
-from fastapi import APIRouter
+from ai_common.api import ApiResponse, ErrorCode
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..agent import AgentState, SessionContext, safe_run_turn
 from ..agent.nodes import Deps
-from ..concurrency import run_blocking
+from ..concurrency import chat_workers
+from ..overload import ChatGuard, Overloaded, build_guard
+from ..ratelimit import client_ip
 
 router = APIRouter(prefix="/chat", tags=["客服"])
+log = logging.getLogger(__name__)
 
 
 class SessionStore:
@@ -49,6 +55,16 @@ class SessionStore:
         if lock is None:
             lock = self._locks[session_id] = asyncio.Lock()
         return lock
+
+    def has(self, session_id: str | None) -> bool:
+        return bool(session_id) and session_id in self._data
+
+    def discard(self, session_id: str) -> None:
+        """丢掉一个会话。被过载保护拒绝的**新**会话要丢掉：客户端没拿到 session_id，
+        重试时又会新建一个，每次拒绝都留一个没人认领的会话，直到 24 小时 TTL。"""
+        self._data.pop(session_id, None)
+        self._agent_state.pop(session_id, None)
+        self._locks.pop(session_id, None)
 
     def get(self, session_id: str | None, **kw) -> SessionContext:
         now = time.time()
@@ -90,6 +106,42 @@ class SessionStore:
 _sessions = SessionStore()
 _deps: Deps | None = None
 _deps_lock = threading.Lock()
+_guard: ChatGuard | None = None
+
+
+def get_guard() -> ChatGuard:
+    """对话入口的过载保护（准入控制 + 限流），惰性创建，原因同 :func:`get_deps`。
+
+    只在事件循环线程里调用：它内部的 ``asyncio.Semaphore`` 属于创建时所在的循环。
+    """
+    global _guard
+    if _guard is None:
+        from ..config import settings
+
+        _guard = build_guard(settings, workers=chat_workers(), log=log.warning)
+    return _guard
+
+
+def reset_guard() -> None:
+    """测试之间、或改了配置要重新装配时调用。"""
+    global _guard
+    _guard = None
+
+
+def peer_of(request_or_ws: Any) -> str | None:
+    c = request_or_ws.client
+    return c.host if c else None
+
+
+def rate_keys(request_or_ws: Any, *, user_id: Any, session_id: str | None) -> tuple[str, str | None]:
+    """限流的两个 key：(IP, 用户或会话)。有 user_id 按用户，没有按会话，都没有就只按 IP。"""
+    from ..config import settings
+
+    ip = client_ip(peer_of(request_or_ws),
+                   request_or_ws.headers.get("x-forwarded-for"),
+                   settings.chat_trust_proxy_hops)
+    identity = f"u{user_id}" if user_id is not None else (f"s{session_id}" if session_id else None)
+    return ip, identity
 
 
 def get_deps() -> Deps:
@@ -157,8 +209,33 @@ def _run_turn(message: str, ctx: SessionContext):
     return safe_run_turn(message, AgentState(session=ctx), get_deps())
 
 
-@router.post("", response_model=ChatResponse, summary="发送一条消息")
-async def chat(req: ChatRequest) -> ChatResponse:
+def overloaded_response(exc: Overloaded) -> JSONResponse:
+    """过载拒绝的 REST 响应：HTTP 状态码 + ``Retry-After`` + 统一信封。
+
+    用真实的 HTTP 状态码（503/429）而不是 200 里塞错误码：网关、负载均衡、
+    客户端重试库都认状态码，它们才是会据此退避的那一层。
+    """
+    code = ErrorCode.AGENT_BUSY if exc.status == 503 else ErrorCode.RATE_LIMITED
+    return JSONResponse(
+        status_code=exc.status,
+        content=ApiResponse.fail(code, exc.message).model_dump(mode="json", by_alias=True),
+        headers={"Retry-After": str(exc.retry_after)},
+    )
+
+
+@router.post("", response_model=ChatResponse, summary="发送一条消息",
+             responses={429: {"description": "限流 / 同一会话消息太多"},
+                        503: {"description": "客服繁忙，见 Retry-After"}})
+async def chat(req: ChatRequest, request: Request):
+    guard = get_guard()
+    try:
+        # 限流必须在创建会话**之前**：被限流的请求不该往会话表里塞对象
+        ip, identity = rate_keys(request, user_id=req.user_id, session_id=req.session_id)
+        await guard.check_rate(ip=ip, identity=identity)
+    except Overloaded as exc:
+        return overloaded_response(exc)
+
+    created = not _sessions.has(req.session_id)
     ctx = _sessions.get(
         req.session_id,
         user_id=req.user_id,
@@ -171,9 +248,14 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     # **整轮对话（含首次装配 get_deps）放进线程池。**原来这里是 async def 里直接同步
     # 跑：一轮要几次 LLM 往返，几秒到十几秒，期间整个进程的其它请求全部排队。
-    # 按会话串行见 SessionStore.lock_for。
-    async with _sessions.lock_for(ctx.session_id):
-        state = await run_blocking(_run_turn, req.message, ctx)
+    # 准入控制与按会话串行见 ChatGuard.turn / SessionStore.lock_for。
+    try:
+        async with guard.turn(ctx.session_id, _sessions.lock_for(ctx.session_id)) as slot:
+            state = await slot.submit(_run_turn, req.message, ctx)
+    except Overloaded as exc:
+        if created:
+            _sessions.discard(ctx.session_id)
+        return overloaded_response(exc)
     _sessions.touch(ctx)
 
     return ChatResponse(
