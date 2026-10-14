@@ -69,17 +69,20 @@ public class OrderService {
     private final Duration paymentTtl;
 
     private final int releaseBatchSize;
+    private final Duration releaseMaxRun;
 
     public OrderService(MallOrderMapper orderMapper, SkuMapper skuMapper, TransactionTemplate tx,
                         OrderNoGenerator orderNos,
                         @Value("${smartmall.order.payment-ttl:PT30M}") Duration paymentTtl,
-                        @Value("${smartmall.order.release-expired.batch-size:200}") int releaseBatchSize) {
+                        @Value("${smartmall.order.release-expired.batch-size:200}") int releaseBatchSize,
+                        @Value("${smartmall.order.release-expired.max-run:PT30S}") Duration releaseMaxRun) {
         this.orderMapper = orderMapper;
         this.skuMapper = skuMapper;
         this.tx = tx;
         this.orderNos = orderNos;
         this.paymentTtl = paymentTtl;
         this.releaseBatchSize = releaseBatchSize;
+        this.releaseMaxRun = releaseMaxRun;
     }
 
     public Duration paymentTtl() {
@@ -245,7 +248,12 @@ public class OrderService {
         if (orderMapper.markCancelled(order.getId()) == 0) {
             return false;
         }
-        skuMapper.restoreStock(order.getSkuNo(), order.getQuantity());
+        if (skuMapper.restoreStock(order.getSkuNo(), order.getQuantity()) == 0) {
+            // SKU 被删了：订单照样取消，但库存没有地方可回补。不抛异常——抛了会让
+            // 整笔回滚，订单永远取消不掉；但必须留痕，不然这件货就是静默蒸发了
+            log.warn("订单已取消但库存没能回补：SKU 不存在或已删除 orderNo={} skuNo={} qty={}",
+                    order.getOrderNo(), order.getSkuNo(), order.getQuantity());
+        }
         log.info("订单已取消（{}），库存回补 orderNo={} skuNo={} qty={}",
                 reason, order.getOrderNo(), order.getSkuNo(), order.getQuantity());
         return true;
@@ -318,28 +326,108 @@ public class OrderService {
      * @param batchLimit 单轮最多处理多少笔
      * @return 本次实际释放的订单数
      */
-    /** 按配置的超时时长与批量上限释放。定时任务走这个重载，参数不重复配一份。 */
-    public int releaseExpired() {
-        return releaseExpired(paymentTtl, releaseBatchSize);
+    /**
+     * 翻页游标：{@code (created_at, id)}。见 {@link MallOrderMapper#findExpiredPending}。
+     * {@link #START} 取 MySQL DATETIME 的下限，比任何真实订单都早。
+     */
+    public record Cursor(LocalDateTime createdAt, long id) {
+        public static final Cursor START = new Cursor(LocalDateTime.of(1000, 1, 1, 0, 0), 0L);
     }
 
+    /** 一批的结果。{@code scanned == batchLimit} 说明后面可能还有。 */
+    public record ReleaseBatch(int scanned, int released, int failed, Cursor next) {
+    }
+
+    /**
+     * 定时任务入口：**一次触发里把积压翻完**，而不是只处理一批。
+     *
+     * <p>原先每轮只处理一批（200 单），一分钟一轮，回收吞吐上限是 200 单/分钟。
+     * 一次促销里 1 万个放弃支付的订单同时到期，要 50 分钟才收得完——这段时间里
+     * 对应 SKU 的库存一直被占着，页面显示售罄，而实际一件没卖出去。
+     * 现在一次触发里循环翻页直到队列空，或用完 {@code max-run} 的时间预算。
+     */
+    public int releaseExpired() {
+        return releaseAllExpired(paymentTtl, releaseBatchSize, releaseMaxRun);
+    }
+
+    /**
+     * 循环翻页回收，直到扫到的不足一批（队列空了）或用完时间预算。
+     *
+     * <p><b>时间预算只在两批之间检查。</b>第一批一定会跑，所以 {@code maxRun=0}
+     * 等价于"只跑一批"。预算存在的理由：积压特别大时，一次触发不能无限占着
+     * 调度线程与数据库连接——没翻完的留给下一轮（游标从头开始，已回收的不会再出现）。
+     */
+    public int releaseAllExpired(Duration ttl, int batchLimit, Duration maxRun) {
+        long deadline = System.nanoTime() + maxRun.toNanos();
+        Cursor cursor = Cursor.START;
+        int released = 0, failed = 0, batches = 0;
+        while (true) {
+            ReleaseBatch b = releaseExpiredBatch(ttl, batchLimit, cursor);
+            batches++;
+            released += b.released();
+            failed += b.failed();
+            if (b.scanned() < batchLimit) {
+                break;                                  // 扫到的不足一批：队列已经空了
+            }
+            if (System.nanoTime() >= deadline) {
+                log.info("超时释放：本轮用完 {} 的时间预算，已翻 {} 批，余量留给下一轮",
+                        maxRun, batches);
+                break;
+            }
+            cursor = b.next();
+        }
+        if (batches > 1 || failed > 0) {
+            log.info("超时释放：本轮共 {} 批，释放 {} 笔，失败 {} 笔", batches, released, failed);
+        }
+        return released;
+    }
+
+    /** 单批释放，返回释放数。保持原有签名——测试与手工触发用它。 */
     public int releaseExpired(Duration ttl, int batchLimit) {
+        return releaseExpiredBatch(ttl, batchLimit, Cursor.START).released();
+    }
+
+    /**
+     * 处理一批：从 {@code after} 游标之后取最多 {@code batchLimit} 笔超期单，逐笔回收。
+     *
+     * <p><b>每笔单独 try/catch，一笔失败不影响其它。</b>原先一笔抛异常就中断整批，
+     * 而下一轮又从同一个队头开始——只要有一笔订单<b>稳定地</b>回收失败
+     * （比如库存列溢出之类的数据问题），排在它后面的所有订单就<b>永远</b>回收不了，
+     * 库存被永久占着，而且没有任何报警：任务每分钟都在"正常失败"。
+     * 实测复现过：毒单后面的健康订单一直停在 pending_payment。
+     * 失败的那笔事务已经回滚，订单原样留着，下一轮触发时会再试一次——
+     * 偶发的失败（比如死锁）自然恢复，稳定的失败则每轮记一条错误日志，等人处理。
+     */
+    public ReleaseBatch releaseExpiredBatch(Duration ttl, int batchLimit, Cursor after) {
+        if (batchLimit < 1) {
+            // 0 或负数会让翻页循环永远不满足"扫到不足一批"——配置写错不该变成死循环
+            throw new IllegalArgumentException("batchLimit 必须 ≥ 1，实际 " + batchLimit);
+        }
         LocalDateTime deadline = LocalDateTime.now().minus(ttl);
-        List<MallOrder> expired = orderMapper.findExpiredPending(deadline, batchLimit);
+        List<MallOrder> expired = orderMapper.findExpiredPending(
+                deadline, after.createdAt(), after.id(), batchLimit);
         if (expired.isEmpty()) {
-            return 0;
+            return new ReleaseBatch(0, 0, 0, after);
         }
 
-        int released = 0;
+        int released = 0, failed = 0;
+        Cursor next = after;
         for (MallOrder order : expired) {
-            Boolean done = tx.execute(s -> cancelAndRestore(order, "超时未支付"));
-            if (Boolean.TRUE.equals(done)) {
-                released++;
+            next = new Cursor(order.getCreatedAt(), order.getId());
+            try {
+                Boolean done = tx.execute(s -> cancelAndRestore(order, "超时未支付"));
+                if (Boolean.TRUE.equals(done)) {
+                    released++;
+                }
+            } catch (RuntimeException e) {
+                failed++;
+                log.error("超时释放单笔失败，跳过继续 orderNo={} skuNo={}",
+                        order.getOrderNo(), order.getSkuNo(), e);
             }
         }
-        log.info("超时释放：扫到 {} 笔超期未支付，实际释放 {} 笔（其余已被支付或取消）",
-                expired.size(), released);
-        return released;
+        log.info("超时释放：扫到 {} 笔超期未支付，实际释放 {} 笔，失败 {} 笔（其余已被支付或取消）",
+                expired.size(), released, failed);
+        return new ReleaseBatch(expired.size(), released, failed, next);
     }
 
     // ================================================================ 履约

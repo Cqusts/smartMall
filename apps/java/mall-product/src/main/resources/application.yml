@@ -85,7 +85,9 @@ smartmall:
       enabled: true
       interval: PT1M          # 上一轮跑完后再等多久（fixedDelay）
       initial-delay: PT30S    # 启动后先缓一会，别和应用初始化抢资源
-      batch-size: 200         # 单轮上限，给积压时的工作量封顶
+      batch-size: 200         # 每批条数
+      max-run: PT30S          # 一次触发里最多翻多久。积压时循环翻批直到队列空或用完这个预算，
+                              # 没翻完的留给下一轮。原先每轮只处理一批（200 单/分钟）
 
 logging:
   level:

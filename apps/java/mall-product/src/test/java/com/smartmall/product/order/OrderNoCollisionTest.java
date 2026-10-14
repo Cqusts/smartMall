@@ -71,7 +71,7 @@ class OrderNoCollisionTest {
     }
 
     OrderService serviceWith(OrderNoGenerator gen) {
-        return new OrderService(orderMapper, skuMapper, tx, gen, Duration.ofMinutes(30), 200);
+        return new OrderService(orderMapper, skuMapper, tx, gen, Duration.ofMinutes(30), 200, Duration.ofSeconds(30));
     }
 
     static CreateOrderRequest req() {

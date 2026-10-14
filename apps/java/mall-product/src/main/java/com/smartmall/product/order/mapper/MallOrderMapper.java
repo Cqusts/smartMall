@@ -132,11 +132,32 @@ public interface MallOrderMapper extends BaseMapper<MallOrder> {
     /**
      * 超期未支付的订单。给超时释放任务用。
      *
-     * <p>{@code ORDER BY id} + {@code LIMIT} 是为了让每一轮的工作量有上界。
-     * 不限量的话，积压几万单时这个任务会一次性拉进内存、并且长时间持锁。
+     * <p><b>排序键必须是索引键，所以是 {@code ORDER BY created_at, id}，不是 {@code ORDER BY id}。</b>
+     * 原先写成 {@code ORDER BY id LIMIT}，优化器宁愿从主键最小处顺着扫、边扫边过滤，
+     * 也不走 {@code idx_status_created}（走索引就要再按 id 排序）。于是每次回收都是
+     * <b>扫主键直到凑够一批</b>——订单表里绝大多数是早已支付/完成的老单，最老的待支付单
+     * 却往往很靠后，整张表的老单都得被扫过去。真库实测，30 万行、超期单排在最后：
+     * <pre>
+     *   ORDER BY id                         310 ms   type=index  key=PRIMARY
+     *   ORDER BY created_at, id + 游标        4 ms   type=range  key=idx_status_created
+     * </pre>
+     * 后者是索引范围扫描加 LIMIT 提前停止，耗时不随表增大。InnoDB 二级索引的叶子里
+     * 天然带着主键，所以 {@code (status, created_at)} 上的索引已经按 {@code (created_at, id)}
+     * 有序，不用加任何索引。
+     *
+     * <p><b>游标是 {@code (created_at, id)} 二元组，不是单独的 id。</b>
+     * 回收要一批接一批地往后翻，翻页必须有"从哪儿接着看"。更要紧的是容错：某一笔订单回收
+     * 失败时它仍是 {@code pending_payment}，下一批如果还从头查会再次拿到它——
+     * 失败的订单数一旦 ≥ 批大小，翻页就会原地空转，后面的健康订单一笔也收不到。
+     * 带游标就能越过它们。同一秒下的单很多，所以 created_at 相同时要靠 id 打破平局。
      */
     @Select("SELECT * FROM mall_order WHERE status = 'pending_payment' "
-            + "AND created_at < #{before} ORDER BY id LIMIT #{limit}")
+            + "AND created_at < #{before} "
+            + "AND (created_at > #{afterCreatedAt} "
+            + "     OR (created_at = #{afterCreatedAt} AND id > #{afterId})) "
+            + "ORDER BY created_at, id LIMIT #{limit}")
     List<MallOrder> findExpiredPending(@Param("before") LocalDateTime before,
+                                       @Param("afterCreatedAt") LocalDateTime afterCreatedAt,
+                                       @Param("afterId") long afterId,
                                        @Param("limit") int limit);
 }
